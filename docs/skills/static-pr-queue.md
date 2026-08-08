@@ -1,6 +1,6 @@
 ---
 name: static-pr-queue
-version: "1.6"
+version: "1.7"
 last_updated: 2026-08-08
 id: static-pr-queue
 one_line_purpose: Publish a safe, static queue of public pull requests.
@@ -81,6 +81,11 @@ A consumer must not gain an approve or merge action. `ready-for-human-merge` is
 a recommendation to a person, not an instruction a tool may execute, so the
 menu offers neither and `tests/bluefin-review.sh` fails if a `pr merge` or
 `pr review` call appears in the reviewer.
+
+The snapshot carries each pull request's `author` so a consumer can skip the
+walker's own work. Authorship is the one field that never changes after
+creation, so it is safe to trust from the snapshot where state like
+mergeability is not; a walk is for reviewing other people's work.
 
 ### Duplicates Are Evidence, Overlap Is Not
 

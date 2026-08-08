@@ -108,6 +108,7 @@ function normalizePullRequest(value) {
   const url = validUrl(value.url);
   const updatedAt = validTimestamp(value.updatedAt, 'updatedAt');
   const labels = validLabels(value.labels);
+  const author = requiredString(value.author, 'author');
   const reviewState = validState(value.reviewState, REVIEW_STATES, 'reviewState');
   const mergeableState = validState(
     value.mergeableState,
@@ -123,6 +124,7 @@ function normalizePullRequest(value) {
     url,
     updatedAt,
     labels,
+    author,
     reviewState,
     mergeableState,
     checkState,
@@ -189,6 +191,7 @@ export function buildQueue({ pullRequests, generatedAt }) {
         number: item.number,
         url: item.url,
         title: item.title,
+        author: item.author,
         updated_at: item.updatedAt,
         labels: item.labels,
         review_state: item.reviewState,

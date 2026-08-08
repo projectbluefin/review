@@ -185,6 +185,10 @@ function pullRequestFields(value, repository) {
     typeof value.html_url !== 'string' ||
     typeof value.updated_at !== 'string' ||
     !Array.isArray(value.labels) ||
+    typeof value.user !== 'object' ||
+    value.user === null ||
+    typeof value.user.login !== 'string' ||
+    value.user.login === '' ||
     typeof value.head !== 'object' ||
     value.head === null ||
     typeof value.head.sha !== 'string'
@@ -207,6 +211,7 @@ function pullRequestFields(value, repository) {
     url: value.html_url,
     updatedAt: value.updated_at,
     labels,
+    author: value.user.login,
     sha: value.head.sha,
   };
 }
@@ -239,6 +244,7 @@ async function enrichPullRequest({ fetch, owner, repository, token, pullRequest 
     url: pullRequest.url,
     updatedAt: pullRequest.updatedAt,
     labels: pullRequest.labels,
+    author: pullRequest.author,
     reviewState: reviewState(reviewData),
     mergeableState: mergeableState(details),
     checkState: checkState(checkData),

@@ -16,6 +16,7 @@ function pullRequest(overrides = {}) {
     url: 'https://github.com/projectbluefin/bluefin/pull/1',
     updatedAt: '2026-08-03T16:00:00Z',
     labels: ['quality'],
+    author: 'contributor',
     reviewState: 'review_required',
     mergeableState: 'clean',
     checkState: 'success',
@@ -78,6 +79,7 @@ test('renders matching deterministic Markdown and JSON artifacts', () => {
     'number',
     'url',
     'title',
+    'author',
     'updated_at',
     'labels',
     'review_state',
@@ -107,6 +109,7 @@ function githubPullRequest(number, sha = `sha-${number}`) {
     html_url: `https://github.com/projectbluefin/bluefin/pull/${number}`,
     updated_at: '2026-08-03T16:00:00Z',
     labels: [{ name: 'quality' }],
+    user: { login: 'contributor' },
     head: { sha },
   };
 }
@@ -142,6 +145,7 @@ test('fetches every pull-request page and derives GitHub evidence', async () => 
   assert.equal(pullRequests.length, 101);
   assert.equal(pullRequests[0].repository, 'projectbluefin/bluefin');
   assert.equal(pullRequests[0].number, 1);
+  assert.equal(pullRequests[0].author, 'contributor');
   assert.equal(pullRequests[0].reviewState, 'review_required');
   assert.equal(pullRequests[0].mergeableState, 'clean');
   assert.equal(pullRequests[0].checkState, 'success');
