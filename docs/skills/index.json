@@ -113,9 +113,9 @@
         "podman",
         "foreground"
       ],
-      "description": "Maintains the three foreground review recipes, VM and container-only launch paths, and credential boundaries. Use when editing justfile.",
-      "version": "2.5",
-      "last_updated": "2026-08-07",
+      "description": "Maintains the four foreground review recipes, VM and container-only launch paths, and credential boundaries. Use when editing justfile.",
+      "version": "2.6",
+      "last_updated": "2026-08-08",
       "doc_type": "runbook"
     },
     {

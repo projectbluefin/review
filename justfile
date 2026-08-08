@@ -18,6 +18,11 @@
 #                     Takes an optional model profile and thinking effort,
 #                     e.g. 'just review-container opus5 high'.
 #   review-doctor     Read-only preflight diagnostics. Starts nothing.
+#   review-queue      Walk the Bluefin PR queue in the contributor
+#                     container — no Hive, no VM. Foreground; q or
+#                     Ctrl-C stops. Arguments pass through to
+#                     `bluefin-review queue`, e.g.
+#                     'just review-queue --repo bluefin'.
 #
 # ─────────────────────────────────────────────────────────────────────────
 # FOREGROUND GUARANTEE
@@ -1140,6 +1145,85 @@ review-container profile="" effort="":
     echo "  The entrypoint attaches to the 'contributor' tmux session for you."
     echo "  From a second terminal: podman exec -it ${CONTAINER_NAME} tmux attach -t contributor"
     echo "  Stop any time with Ctrl-C — that is the only way it ends."
+    exec "${CONTAINER_ARGS[@]}"
+
+# Walk the Bluefin PR queue in the contributor container — no Hive, no VM.
+# The container runs `bluefin-review queue` instead of the contributor agent,
+# so no Hive registration is mounted or required. Foreground: q or Ctrl-C
+# stops. Arguments pass straight through to `bluefin-review queue`:
+#
+#   just review-queue                      # everything the queue marks 'review'
+#   just review-queue --repo bluefin       # one repository
+#   just review-queue --all                # every recommended action
+#
+# One instance owns the 'review-queue' name; REVIEW_QUEUE_NAME overrides it
+# for a concurrent second walk, exactly as REVIEW_CONTAINER_NAME does for
+# review-container.
+review-queue *queue_args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{shared_functions}}
+    TOOL="{{tool_env}}"
+    COPILOT_DEFAULT_MODEL="{{copilot_default_model}}"
+
+    require_goose_backend "$TOOL"
+    preflight_agent
+    command -v podman &>/dev/null || {
+      echo "ERROR: Podman is required to run the contributor container." >&2
+      echo "  Install Podman, then re-run review-queue." >&2
+      exit 1
+    }
+
+    CONTAINER_NAME="${REVIEW_QUEUE_NAME:-review-queue}"
+    require_valid_container_name "$CONTAINER_NAME"
+
+    resolve_goose_selection
+
+    CONTRIBUTOR_IMAGE="{{contributor_image}}"
+    require_no_running_instance "$CONTAINER_NAME"
+    ensure_contributor_image "$CONTRIBUTOR_IMAGE"
+
+    CONTAINER_ARGS=(
+      podman run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
+      --label "$(owner_run_label)"
+      --userns "keep-id:uid=1000,gid=1000"
+      # Podman does not pass COLORTERM through on its own.
+      --env COLORTERM
+    )
+    [[ -n "$GOOSE_PROVIDER" ]] && CONTAINER_ARGS+=(--env "GOOSE_PROVIDER=${GOOSE_PROVIDER}")
+    [[ -n "$GOOSE_MODEL" ]] && CONTAINER_ARGS+=(--env "GOOSE_MODEL=${GOOSE_MODEL}")
+    [[ -n "${GOOSE_THINKING_EFFORT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_THINKING_EFFORT=${GOOSE_THINKING_EFFORT}")
+    [[ -n "${GOOSE_CONTEXT_LIMIT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_CONTEXT_LIMIT=${GOOSE_CONTEXT_LIMIT}")
+    # The Copilot credential is what powers 'r' (the Goose review of a pull
+    # request); the walk itself only reads GitHub, so a missing credential is
+    # a warning, not a stop.
+    resolve_copilot_token
+    if [[ -n "${COPILOT_TOKEN:-}" ]]; then
+      export GITHUB_COPILOT_TOKEN="$COPILOT_TOKEN"
+      CONTAINER_ARGS+=(--env GITHUB_COPILOT_TOKEN)
+      echo "✓ Copilot credential passed to the agent."
+    else
+      report_missing_copilot_credential
+    fi
+    # The walk is a GitHub reader from the first keystroke to the last, so an
+    # identity is load-bearing here, not advisory.
+    resolve_gh_token
+    if [[ -z "${GH_TOKEN_VALUE:-}" ]]; then
+      report_missing_gh_token
+      echo "ERROR: the queue walk reads live pull-request state from GitHub and cannot run without a token." >&2
+      exit 1
+    fi
+    export GH_TOKEN="$GH_TOKEN_VALUE"
+    CONTAINER_ARGS+=(--env GH_TOKEN)
+    report_gh_token_blast_radius "${GH_TOKEN_SOURCE}"
+
+    # queue_args is word-split on purpose: it carries separate flags such as
+    # '--repo bluefin' through to bluefin-review.
+    # shellcheck disable=SC2086
+    CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE" queue {{queue_args}})
+
+    echo "✓ starting the PR queue walk (no Hive)."
+    echo "  q or Ctrl-C stops; the walk is the only thing running."
     exec "${CONTAINER_ARGS[@]}"
 
 # Preflight check: is this machine actually ready for 'just review'?

@@ -217,6 +217,21 @@ changes your view; Hive still owns task and output handling.
 
 ### Walking the queue
 
+`just review-queue` runs the walk in the contributor container — no Hive
+registration, no VM. It needs only a GitHub token (the walk reads live
+pull-request state) and, for `r`, the same Copilot credential the other launch
+paths pass through. Arguments pass straight through to `bluefin-review queue`:
+
+```bash
+just review-queue                      # everything the queue marks 'review'
+just review-queue --repo bluefin       # one repository
+just review-queue --all                # every action
+```
+
+`q` or Ctrl-C stops. `REVIEW_QUEUE_NAME=review-queue-2 just review-queue`
+runs a second walk beside the first, like `REVIEW_CONTAINER_NAME` does for
+`review-container`.
+
 `bluefin-review queue` walks the public PR queue one pull request at a time.
 Each stop prints read-only Review Evidence — author, draft state, review
 decision, mergeability, size, and check totals — read live from GitHub rather

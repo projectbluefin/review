@@ -416,6 +416,7 @@ run_recipe() {
       -u GOOSE_THINKING_EFFORT -u GOOSE_CONTEXT_LIMIT \
       -u REVIEW_NON_INTERACTIVE -u GOOSE_INSTALLED \
       -u REVIEW_TEST_BOOTSTRAP_MODE -u REVIEW_CONTAINER_NAME \
+      -u REVIEW_QUEUE_NAME \
       HOME="$home" PATH="$fake_bin:/usr/bin:/bin" TMPDIR="$tmp_root" \
       GUM_LOG="$gum_log" RUNNER_LOG="$runner_log" QEMU_LOG="$qemu_log" \
       IMAGE_LOG="$image_log" \
@@ -599,6 +600,37 @@ run_recipe review-container GH_READY=1 \
 assert_eq "$(wc -c <"$gum_log")" 0 "the launcher must never prompt for a model"
 assert_file_contains "--env GOOSE_MODEL=gpt-5.6-luna" "$runner_log"
 assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
+
+# ══ 2b. Queue walk: no Hive, GH_TOKEN required, args pass through ════════
+begin "review-queue: launches the walk with no Hive config at all"
+reset_logs
+mv "$home/.config/hive" "$home/.config/hive.saved"
+RECIPE_ARGS=(--repo bluefin)
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
+mv "$home/.config/hive.saved" "$home/.config/hive"
+assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
+assert_file_contains "--name review-queue" "$runner_log"
+assert_file_contains "queue --repo bluefin" "$runner_log"
+assert_file_contains "--env GOOSE_PROVIDER=github_copilot" "$runner_log"
+assert_file_not_contains ".config/hive" "$runner_log"
+assert_file_contains "GH_TOKEN:present" "$credential_log"
+assert_not_contains "contributor.env" "$OUT"
+assert_contains "starting the PR queue walk (no Hive)" "$OUT"
+
+begin "review-queue: no GitHub token is one actionable error"
+reset_logs
+run_recipe review-queue GH_READY=1
+assert_nonzero_status "$STATUS" "a queue walk without a token must not launch"
+assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
+assert_contains "cannot run without a token" "$OUT"
+assert_eq "$(wc -c <"$runner_log")" 0 "no container may start without a token"
+
+begin "review-queue: REVIEW_QUEUE_NAME scopes a second walk"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  REVIEW_QUEUE_NAME=review-queue-2
+assert_file_contains "--name review-queue-2" "$runner_log"
+assert_file_not_contains "--name review-queue " "$runner_log"
 
 # ══ 3. Doctor: advisory VM limitation, no failure on a fully provisioned host ══
 if kvm_usable; then
@@ -1271,10 +1303,10 @@ fi
 if grep -nE '(^|[^[:alnum:]_])(nohup|setsid)([^[:alnum:]_]|$)' "$code"; then
   fail "nohup/setsid must never appear on a launch path"
 fi
-assert_eq "$(grep -c 'podman run --rm --interactive --tty' "$code")" 1 \
-  "expected exactly one foreground podman run site (the contributor container)"
+assert_eq "$(grep -c 'podman run --rm --interactive --tty' "$code")" 2 \
+  "expected exactly two foreground podman run sites (contributor container and queue walk)"
 # A stale container from a hard-killed terminal must never block a relaunch.
-assert_eq "$(grep -c 'podman run --rm --interactive --tty --replace --name' "$code")" 1 \
+assert_eq "$(grep -c 'podman run --rm --interactive --tty --replace --name' "$code")" 2 \
   "every named foreground run must reclaim its name with --replace"
 
 begin "static: a launch cannot detach through an option form or a second line"
@@ -1411,9 +1443,10 @@ fi
 if grep -n 'just review-stop' "$code"; then
   fail "nothing may point a user at a stop command that must not exist"
 fi
-# The recipe list is exactly: launch the VM, launch the container, diagnose.
-assert_eq "$(grep -cE '^review[a-z-]*[ :]' "$code")" 3 \
-  "expected exactly three recipes (review, -container, -doctor)"
+# The recipe list is exactly: launch the VM, launch the container, diagnose,
+# walk the PR queue.
+assert_eq "$(grep -cE '^review[a-z-]*[ :]' "$code")" 4 \
+  "expected exactly four recipes (review, -container, -doctor, -queue)"
 
 begin "static: upstream contribute-setup runs with upstream's own version-check opt-out"
 # Our Hive checkout is a pinned detached SHA on purpose. Upstream's private

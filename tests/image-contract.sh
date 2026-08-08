@@ -458,6 +458,12 @@ require image/entrypoint.sh \
   'truecolor | 24bit) tmux_fallback_term=xterm-direct ;;' \
   'TERM=${TERM:-<unset>} has no terminfo; using ${tmux_fallback_term}' \
   '/usr/local/bin/contributor-agent.sh "$@" &' \
+  'queue_walk=false' \
+  '${1:-}" = queue' \
+  '$queue_walk" = false' \
+  'walking the PR queue needs no Hive' \
+  'PR queue walk starting (no Hive)' \
+  'exec bluefin-review queue "$@"' \
   'tmux has-session -t contributor' \
   'tmux readiness diagnostics' \
   'tmux attach-session -t contributor' \

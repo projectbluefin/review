@@ -17,14 +17,28 @@ if [ -n "${GOOSE_PROVIDER:-}" ] && [ "$GOOSE_PROVIDER" != github_copilot ]; then
   exit 1
 fi
 
+# A queue walk is the PR-review launch path: `bluefin-review queue` needs
+# GH_TOKEN and Goose but no Hive registration, so it skips the contributor.env
+# gate and the Hive handover below.
+queue_walk=false
+if [ "${1:-}" = queue ]; then
+  queue_walk=true
+  shift
+fi
+
 hive_config="${HOME}/.config/hive"
-if [ ! -f "${hive_config}/contributor.env" ]; then
+if [ "$queue_walk" = false ] && [ ! -f "${hive_config}/contributor.env" ]; then
   note "missing ${hive_config}/contributor.env"
   note "  mount your Hive config, or run: just contribute-setup goose"
+  note "  walking the PR queue needs no Hive: run the image with 'queue'"
   exit 1
 fi
 
-note 'Bluefin Operations | contributor runtime starting'
+if [ "$queue_walk" = true ]; then
+  note 'Bluefin Operations | PR queue walk starting (no Hive)'
+else
+  note 'Bluefin Operations | contributor runtime starting'
+fi
 
 # --- Goose configuration -----------------------------------------------------
 #
@@ -98,6 +112,10 @@ for validation_tool in "${validation_tools[@]}"; do
 done
 if ((${#missing_validation_tools[@]})); then
   note "validation tools unavailable: ${missing_validation_tools[*]} (fsdk-containers#89)"
+fi
+
+if [ "$queue_walk" = true ]; then
+  exec bluefin-review queue "$@"
 fi
 
 # --- Hand over to Hive -------------------------------------------------------
