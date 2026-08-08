@@ -52,26 +52,30 @@ cat >"$scratch/queue.json" <<'EOF'
 {
   "generated_at": "2026-08-08T00:00:00.000Z",
   "items": [
-    {"repository":"projectbluefin/alpha","number":1,"recommended_action":"review","title":"first"},
-    {"repository":"projectbluefin/beta","number":2,"recommended_action":"fix-ci","title":"second"},
-    {"repository":"projectbluefin/alpha","number":3,"recommended_action":"review","title":"third"}
+    {"repository":"projectbluefin/alpha","number":1,"recommended_action":"review","title":"first","author":"someone"},
+    {"repository":"projectbluefin/beta","number":2,"recommended_action":"fix-ci","title":"second","author":"someone"},
+    {"repository":"projectbluefin/alpha","number":3,"recommended_action":"review","title":"third","author":"me"}
   ]
 }
 EOF
 
 # gh is stubbed so the test never touches the network or a real repository.
+# 'api user' answers the walker's identity: their own pull requests are not
+# work for them, and alpha#3 above is theirs.
 cat >"$scratch/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${GH_CALLS:?}"
 case "$*" in
+  "api user"*) printf 'me\n' ;;
   *--json*) printf '{"author":{"login":"someone"},"isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","reviewDecision":null,"additions":1,"deletions":0,"changedFiles":1,"updatedAt":"2026-08-08T00:00:00Z","statusCheckRollup":[{"conclusion":"SUCCESS"}]}' ;;
 esac
 EOF
 chmod +x "$scratch/bin/gh"
 
-# Walk the two 'review' items with Enter, then fall off the end of the queue.
-# The loop reads keys from /dev/tty, so this only asserts fully under a
-# terminal; without one, assert the explicit refusal instead of skipping.
+# Walk the one remaining 'review' item with Enter, then fall off the end of
+# the queue. The loop reads keys from /dev/tty, so this only asserts fully
+# under a terminal; without one, assert the explicit refusal instead of
+# skipping.
 set +e
 out="$(printf '\n\n' | PATH="$scratch/bin:$PATH" GH_CALLS="$scratch/gh-calls" \
   "$review" queue --url "file://$scratch/queue.json" 2>&1)"
@@ -80,9 +84,9 @@ set -e
 if [[ "$out" == *'needs an interactive terminal'* ]]; then
   printf 'queue mode correctly refuses a non-interactive run\n'
 else
-  [[ "$out" == *'2 pull request(s) to walk'* ]]
+  [[ "$out" == *'1 pull request(s) to walk'* ]]
   [[ "$out" == *'projectbluefin/alpha#1'* ]]
-  [[ "$out" == *'projectbluefin/alpha#3'* ]]
+  [[ "$out" != *'projectbluefin/alpha#3'* ]]
   [[ "$out" != *'projectbluefin/beta#2'* ]]
 fi
 
@@ -190,11 +194,15 @@ analyzer_out() {
   GH_PR_LIST="$scratch/pulls.json" GH_CALLS="$scratch/gh-dup-calls" \
     PATH="$scratch/bin:$PATH" \
     bash -c '
-      source_file="$1"; number="$2"; cache="$3"
+      source_file="$1"; number="$2"; cache="$3"; mode="${4:-}"
       CACHE_DIR="$(dirname "$cache")"
       eval "$(sed -n "/^DUPLICATE_ANALYZER=/,/^'"'"'$/p" "$source_file")"
-      python3 -c "$DUPLICATE_ANALYZER" "$number" "$cache"
-    ' _ "$review" "$1" "$scratch/pulls.json"
+      if [[ -n "$mode" ]]; then
+        python3 -c "$DUPLICATE_ANALYZER" --numbers "$number" "$cache"
+      else
+        python3 -c "$DUPLICATE_ANALYZER" "$number" "$cache"
+      fi
+    ' _ "$review" "$1" "$scratch/pulls.json" "${2:-}"
 }
 
 # Same dependency, different bump style: a real duplicate.
@@ -209,6 +217,13 @@ analyzer_out() {
 # so it must never be reported as one.
 [[ "$(analyzer_out 3)" == *'overlaps'* ]]
 [[ "$(analyzer_out 3)" != *'dupe-of'* ]]
+
+# The --numbers mode feeds run_goose_review's cluster fetch: bare numbers, no
+# prose, so the shell never parses a human sentence into a pull request number.
+[[ "$(analyzer_out 1 numbers)" == *$'dupes\t2'* ]]
+[[ "$(analyzer_out 4 numbers)" == *$'dupes\t5'* ]]
+[[ "$(analyzer_out 3 numbers)" == *$'overlaps\t1 2'* ]]
+[[ "$(analyzer_out 3 numbers)" != *'same dependency'* ]]
 
 # --- failures are reported, never mistaken for an empty queue -----------------
 # Reading from a process substitution discards the producer's status, which made

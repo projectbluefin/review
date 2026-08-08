@@ -463,6 +463,8 @@ require image/entrypoint.sh \
   '$queue_walk" = false' \
   'walking the PR queue needs no Hive' \
   'PR queue walk starting (no Hive)' \
+  'api/v1/knowledge' \
+  'Authorization: Bearer ${GH_TOKEN}' \
   'exec bluefin-review queue "$@"' \
   'tmux has-session -t contributor' \
   'tmux readiness diagnostics' \

@@ -232,6 +232,12 @@ just review-queue --all                # every action
 runs a second walk beside the first, like `REVIEW_CONTAINER_NAME` does for
 `review-container`.
 
+Pull requests you authored are skipped — a walk is for reviewing other
+people's work. Authorship never changes, so the snapshot's `author` field is
+the one value the filter trusts without a live re-read. The container also
+fetches the Hive knowledge base with your token before the walk starts, so
+`r` reviews carry the same hub context a Hive session would have.
+
 `bluefin-review queue` walks the public PR queue one pull request at a time.
 Each stop prints read-only Review Evidence — author, draft state, review
 decision, mergeability, size, and check totals — read live from GitHub rather
@@ -267,6 +273,12 @@ Keeping those separate is the point. Across the live queue, shared files flag
 174 pairs, mostly unrelated changes touching one busy workflow file, while the
 same-dependency and same-issue tests find 13. Reporting the first as duplication
 would bury the second.
+
+And because duplicates are the same work, one review judges the whole cluster:
+`r` fetches every duplicate's diff alongside the checkout, and the Review Draft
+must name which pull request should merge and which should close as superseded,
+with evidence. Overlaps are listed in the review as merge-ordering hazards but
+keep their own stops.
 
 Detection costs one `gh pr list` per repository, cached for the walk, so
 revisiting a repository does not refetch it.

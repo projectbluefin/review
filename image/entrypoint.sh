@@ -39,7 +39,6 @@ if [ "$queue_walk" = true ]; then
 else
   note 'Bluefin Operations | contributor runtime starting'
 fi
-
 # --- Goose configuration -----------------------------------------------------
 #
 # GOOSE_PATH_ROOT is the image-owned policy, data, and state seam. The pinned
@@ -115,6 +114,18 @@ if ((${#missing_validation_tools[@]})); then
 fi
 
 if [ "$queue_walk" = true ]; then
+  # The Hive knowledge base normally reaches the agent through the Hive
+  # runtime's ten-minute refresh. A queue walk has no Hive, so fetch the same
+  # export once, with the walker's own token, onto the path bluefin-review
+  # already names in its review instructions. Best-effort: the hub's auth
+  # redirects an expired token, and a walk without the export still works.
+  if [ -n "${GH_TOKEN:-}" ]; then
+    curl --fail --silent --show-error --max-time 30 \
+      --header "Authorization: Bearer ${GH_TOKEN}" \
+      "https://hosted-projectbluefin-knuckle-gjvq.hive.kubestellar.io/api/v1/knowledge" \
+      -o "${HOME}/agent.md" || rm -f "${HOME}/agent.md"
+  fi
+  note 'Bluefin Operations | PR queue walk (no Hive)'
   exec bluefin-review queue "$@"
 fi
 

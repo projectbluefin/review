@@ -54,7 +54,11 @@ review_instructions() {
   if [[ -s "$KNOWLEDGE_FILE" ]]; then
     listing+="- hive knowledge base (refreshed from the hub): ${KNOWLEDGE_FILE}"$'\n'
   fi
-  [[ -n "$listing" ]] || return 0
+  if [[ -z "$listing" ]]; then
+    # No doctrine on disk, but a duplicate cluster still needs to reach Goose.
+    [[ -n "${BLUEFIN_REVIEW_RELATED:-}" ]] && printf '%s' "$BLUEFIN_REVIEW_RELATED"
+    return 0
+  fi
 
   printf '%s' "This is a Project Bluefin review. The org's review doctrine is on disk; read the entries that match this diff before judging it, and prefer them over general habit:
 ${listing}
@@ -62,6 +66,11 @@ Report findings with severity, file and line references, and the evidence for
 each. State what you could not verify. If there are no evidenced findings, say
 so plainly. A human makes every approval and merge decision; never present a
 recommendation as one."
+  # run_goose_review appends the duplicate cluster here so one review judges
+  # every pull request doing the same work instead of just the one on screen.
+  if [[ -n "${BLUEFIN_REVIEW_RELATED:-}" ]]; then
+    printf '\n\n%s' "$BLUEFIN_REVIEW_RELATED"
+  fi
 }
 
 # Every review goes through here so both modes carry the same context.
@@ -102,6 +111,9 @@ Queue options:
   --repo <name>     only this repository (short name or owner/repo)
   --url <url>       read the queue from somewhere else
 
+Pull requests authored by the GH_TOKEN owner are skipped: a walk is for
+reviewing other people's work.
+
 The queue is a recommendation snapshot. GitHub stays authoritative for pull
 request state, and every merge or approval remains a human action taken
 outside this tool.
@@ -110,6 +122,10 @@ EOF
 
 # --- duplicate detection ------------------------------------------------------
 
+# Two output modes: human lines for the evidence block, and '--numbers' for
+# run_goose_review, which fetches each duplicate's diff so one review judges
+# the whole cluster instead of walking the same work twice.
+#
 # Renovate opens a digest bump and a version bump for the same dependency, and
 # several agents can close one issue from separate pull requests, so the queue
 # carries real duplicates. Normalise a title down to the dependency it updates
@@ -122,6 +138,9 @@ EOF
 DUPLICATE_ANALYZER='
 import json, sys, re, itertools
 
+numbers_only = sys.argv[1] == "--numbers"
+if numbers_only:
+    sys.argv.pop(1)
 number = int(sys.argv[1])
 prs = json.load(open(sys.argv[2]))
 
@@ -145,7 +164,8 @@ this = next((p for p in prs if p["number"] == number), None)
 if this is None:
     # Outside the fetched page. Saying nothing here would read exactly like
     # "no duplicates found", which is the wrong conclusion to hand a reviewer.
-    print("related\tnot among the %d open pull requests checked" % len(prs))
+    if not numbers_only:
+        print("related\tnot among the %d open pull requests checked" % len(prs))
     sys.exit(0)
 
 def issues(pr):
@@ -156,20 +176,27 @@ def paths(pr):
 
 mine_subject, mine_issues, mine_paths = subject(this["title"]), issues(this), paths(this)
 duplicates, overlaps = [], []
+dup_numbers, overlap_numbers = [], []
 for other in prs:
     if other["number"] == number:
         continue
     shared_issues = mine_issues & issues(other)
     if mine_subject and subject(other["title"]) == mine_subject:
         duplicates.append("#%d (same dependency %s)" % (other["number"], mine_subject))
+        dup_numbers.append(other["number"])
     elif shared_issues:
         duplicates.append("#%d (both close #%d)" % (other["number"], sorted(shared_issues)[0]))
+        dup_numbers.append(other["number"])
     elif mine_paths & paths(other):
         overlaps.append("#%d" % other["number"])
+        overlap_numbers.append(str(other["number"]))
 
-if duplicates:
+if numbers_only:
+    print("dupes\t" + " ".join(str(n) for n in dup_numbers))
+    print("overlaps\t" + " ".join(overlap_numbers))
+elif duplicates:
     print("dupe-of\t" + ", ".join(duplicates[:6]))
-if overlaps:
+if overlaps and not numbers_only:
     trailer = ", ..." if len(overlaps) > 6 else ""
     print("overlaps\t" + ", ".join(overlaps[:6]) + trailer)
 '
@@ -206,17 +233,22 @@ show_related() {
 # --- queue mode --------------------------------------------------------------
 
 # Read the queue into a compact TSV so the loop never re-parses JSON. Fields are
-# tab-separated because a pull request title can contain anything else.
+# tab-separated because a pull request title can contain anything else. $self
+# is the walker's login: a walk reviews other people's work, so their own pull
+# requests never enter the list. Authorship never changes, which makes it the
+# one snapshot field safe to filter on without a live re-read; snapshots from
+# before the field existed pass everything through.
 load_queue() {
-  local url="$1" action="$2" repo="$3" raw
+  local url="$1" action="$2" repo="$3" self="$4" raw
   # Report once, at the call site: this runs in a command substitution, so a
   # 'die' here would print and the caller would print again.
   raw="$(curl --fail --location --show-error --silent --max-time 60 "$url")" || return 1
 
-  printf '%s' "$raw" | jq -r --arg action "$action" --arg repo "$repo" '
+  printf '%s' "$raw" | jq -r --arg action "$action" --arg repo "$repo" --arg self "$self" '
     .items
     | map(select($action == "" or .recommended_action == $action))
     | map(select($repo == "" or .repository == $repo or (.repository | split("/") | last) == $repo))
+    | map(select($self == "" or (.author // "") != $self))
     | .[]
     | [.repository, (.number | tostring), .recommended_action, .title] | @tsv
   '
@@ -294,8 +326,40 @@ run_goose_review() {
     base="$(gh pr view "$number" --repo "$repo" --json baseRefName --jq .baseRefName)" || exit 1
     git fetch --quiet origin "$base" || true
 
+    # Duplicates are the same work wearing another number, so one review must
+    # judge the whole cluster: fetch each duplicate's diff and tell Goose to
+    # name the one that should merge. Overlaps share only files, so they are
+    # listed as ordering hazards without spending a review on them.
+    local_related=""
+    if [[ -n "${CACHE_DIR:-}" ]] && cache="$(repo_pulls "$repo")"; then
+      dup_numbers=""
+      overlap_numbers=""
+      while IFS=$'\t' read -r kind nums; do
+        case "$kind" in
+          dupes) dup_numbers="$nums" ;;
+          overlaps) overlap_numbers="$nums" ;;
+        esac
+      done < <(python3 -c "$DUPLICATE_ANALYZER" --numbers "$number" "$cache" 2>/dev/null)
+
+      if [[ -n "$dup_numbers" ]]; then
+        local_related="These pull requests are the SAME work as the one under review. Review them together and name explicitly which one should merge and which should close as superseded, with evidence from the diffs:"
+        for dup in $dup_numbers; do
+          diff_file="${CACHE_DIR}/related-${dup}.diff"
+          if gh pr diff "$dup" --repo "$repo" >"$diff_file" 2>/dev/null && [[ -s "$diff_file" ]]; then
+            local_related+=$'\n'"- #${dup}: full diff at ${diff_file}"
+          else
+            local_related+=$'\n'"- #${dup}: diff unavailable, read it on GitHub"
+            rm -f "$diff_file"
+          fi
+        done
+      fi
+      if [[ -n "$overlap_numbers" ]]; then
+        local_related+=$'\n'"These pull requests only share files with this one — a merge-ordering hazard, not duplicates; note conflicts but review them on their own stops: ${overlap_numbers}"
+      fi
+    fi
+
     banner
-    goose_review "origin/${base}...HEAD"
+    BLUEFIN_REVIEW_RELATED="$local_related" goose_review "origin/${base}...HEAD"
   )
 }
 
@@ -343,10 +407,15 @@ queue_mode() {
 
   local -a items=()
   local line queue_tsv
+  # Resolve the walker's identity once: their own pull requests are not work
+  # for them. An unresolvable identity disables the filter rather than
+  # emptying the queue on a transient API failure.
+  local self_login
+  self_login="$(gh api user --jq .login 2>/dev/null || true)"
   # Capture before the loop: reading from a process substitution discards the
   # producer's exit status, so a failed fetch or a malformed snapshot would
   # otherwise surface as "Nothing in the queue" and a success exit.
-  if ! queue_tsv="$(load_queue "$url" "$action" "$repo")"; then
+  if ! queue_tsv="$(load_queue "$url" "$action" "$repo" "$self_login")"; then
     die "could not read the queue from ${url}"
   fi
   while IFS= read -r line; do

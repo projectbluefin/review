@@ -101,6 +101,11 @@ Normalise a Renovate title to the dependency it updates before comparing;
 and `<action> action` are all the same shape wearing different words. Fetch
 each repository's open pull requests once per walk and cache them.
 
+A duplicate cluster is reviewed once, not walked twice: `bluefin-review`
+fetches every duplicate's diff beside the checkout, and the Review Draft must
+name which pull request merges and which close as superseded. Overlaps are
+named in the review as ordering hazards and keep their own stops.
+
 ## Red Flags
 
 - A workflow uses `pull_request_target`, a fork head ref, a personal token, or
