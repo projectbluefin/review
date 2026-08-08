@@ -143,6 +143,15 @@ BLUEFIN_REVIEW_SKILLS_ROOT="$scratch/skills" \
   PATH="$scratch/bin:$PATH" GOOSE_ARGV="$scratch/argv-nokb" \
   "$review" main...HEAD >/dev/null
 [[ "$(tr '\0' '\n' <"$scratch/argv-nokb")" != *'knowledge base'* ]]
+
+# Upstream writes a non-empty placeholder when the hub fetch fails; a size
+# check alone would announce that dead export as the knowledge base.
+printf 'Knowledge base not yet available.\n' >"$scratch/placeholder.md"
+BLUEFIN_REVIEW_SKILLS_ROOT="$scratch/skills" \
+  BLUEFIN_REVIEW_KNOWLEDGE_FILE="$scratch/placeholder.md" \
+  PATH="$scratch/bin:$PATH" GOOSE_ARGV="$scratch/argv-placeholder" \
+  "$review" main...HEAD >/dev/null
+[[ "$(tr '\0' '\n' <"$scratch/argv-placeholder")" != *'knowledge base'* ]]
 # The range must survive as its own argument, after the instructions.
 [[ "$(tr '\0' '\n' <"$scratch/argv" | tail -1)" == 'main...HEAD' ]]
 

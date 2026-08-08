@@ -114,16 +114,37 @@ if ((${#missing_validation_tools[@]})); then
 fi
 
 if [ "$queue_walk" = true ]; then
-  # The Hive knowledge base normally reaches the agent through the Hive
-  # runtime's ten-minute refresh. A queue walk has no Hive, so fetch the same
-  # export once, with the walker's own token, onto the path bluefin-review
-  # already names in its review instructions. Best-effort: the hub's auth
-  # redirects an expired token, and a walk without the export still works.
+  # A queue walk gets its context the way a Hive session does, minus Hive:
+  # source the pinned runtime's extension seam (/etc/hive/entrypoint.d), whose
+  # hook owns the hosted hub URL and the curl rewrite to its authenticated
+  # endpoint, then fetch the knowledge export with upstream's own expression.
+  # The hook gates on HIVE_HUB, so it is sourced twice: once to learn the hub
+  # it owns, once with HIVE_HUB exported so the rewrite installs. The hub URL
+  # is defined once in this image, in the hook — never here.
   if [ -n "${GH_TOKEN:-}" ]; then
-    curl --fail --silent --show-error --max-time 30 \
-      --header "Authorization: Bearer ${GH_TOKEN}" \
-      "https://hosted-projectbluefin-knuckle-gjvq.hive.kubestellar.io/api/v1/knowledge" \
-      -o "${HOME}/agent.md" || rm -f "${HOME}/agent.md"
+    shopt -s nullglob
+    for hook in /etc/hive/entrypoint.d/*.sh; do
+      # shellcheck disable=SC1090
+      [ -r "$hook" ] && . "$hook"
+    done
+    if [ -n "${hosted_hub:-}" ]; then
+      export HIVE_HUB="$hosted_hub"
+      for hook in /etc/hive/entrypoint.d/*.sh; do
+        # shellcheck disable=SC1090
+        [ -r "$hook" ] && . "$hook"
+      done
+      hub_http="${HIVE_HUB/wss:\/\//https://}"
+      curl -sf --max-time 30 "${hub_http%/contribute}/api/knowledge/export" \
+        -o "${HOME}/agent.md" || rm -f "${HOME}/agent.md"
+      # Goose-native delivery, as upstream's runtime does it: a review
+      # subprocess then inherits hub context without relying on the
+      # --instructions pointer alone.
+      if [ -s "${HOME}/agent.md" ]; then
+        ln -sf agent.md "${HOME}/AGENTS.md"
+        ln -sf agent.md "${HOME}/.goosehints"
+        ln -sf agent.md "${HOME}/.goose-instructions.md"
+      fi
+    fi
   fi
   note 'Bluefin Operations | PR queue walk (no Hive)'
   exec bluefin-review queue "$@"

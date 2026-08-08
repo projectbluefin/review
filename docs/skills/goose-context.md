@@ -1,6 +1,6 @@
 ---
 name: goose-context
-version: "2.0"
+version: "2.1"
 last_updated: 2026-08-08
 id: goose-context
 one_line_purpose: Keep Goose config and skill routing working in the guest.
@@ -81,6 +81,17 @@ build output and must not be committed.
 The pinned Hive runtime links its refreshed knowledge export to Goose-native
 `AGENTS.md` and `.goosehints`. Do not add `CONTEXT_FILE_NAMES` merely to retain
 the legacy `CLAUDE.md` link; keep auto-loaded files concise.
+
+Queue mode (`bluefin-review queue`) has no Hive session, so the entrypoint
+acquires the same context through Hive's own seam: it sources
+`/etc/hive/entrypoint.d/*.sh` (whose hook owns the hosted hub URL and the
+authenticated curl rewrite), fetches the export with upstream's exact
+`api/knowledge/export` expression, and creates the same `AGENTS.md` /
+`.goosehints` symlinks. Do not hardcode the hub URL or the hosted API path
+anywhere else — the hook is the single definition. Upstream writes a
+non-empty "Knowledge base not yet available." placeholder on fetch failure,
+so `bluefin-review` checks content, not just size, before naming the export
+in its instructions.
 
 ## Review Context Is Not Session Context
 

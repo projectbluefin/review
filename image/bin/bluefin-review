@@ -51,7 +51,10 @@ review_instructions() {
     fi
     listing+=$'\n'
   done
-  if [[ -s "$KNOWLEDGE_FILE" ]]; then
+  # Upstream writes a non-empty placeholder ("Knowledge base not yet
+  # available.") when the hub fetch fails, so a size check alone would
+  # announce a dead export as the knowledge base.
+  if [[ -s "$KNOWLEDGE_FILE" ]] && ! grep -q 'Knowledge base not yet available' "$KNOWLEDGE_FILE"; then
     listing+="- hive knowledge base (refreshed from the hub): ${KNOWLEDGE_FILE}"$'\n'
   fi
   if [[ -z "$listing" ]]; then

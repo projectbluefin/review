@@ -36,7 +36,7 @@
         "config"
       ],
       "description": "Keeps Goose configuration and global and repository skill routing available in the guest, and records that Context7 is Hive's hub-side capability the image must never configure. Use when Goose loses its config or misses a skill.",
-      "version": "2.0",
+      "version": "2.1",
       "last_updated": "2026-08-08",
       "doc_type": "reference"
     },

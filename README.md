@@ -238,8 +238,9 @@ runs a second walk beside the first, like `REVIEW_CONTAINER_NAME` does for
 Pull requests you authored are skipped — a walk is for reviewing other
 people's work. Authorship never changes, so the snapshot's `author` field is
 the one value the filter trusts without a live re-read. The container also
-fetches the Hive knowledge base with your token before the walk starts, so
-`r` reviews carry the same hub context a Hive session would have.
+fetches the Hive knowledge base through Hive's own entrypoint hook chain —
+the same authenticated export and Goose-native `AGENTS.md`/`.goosehints`
+symlinks a Hive session gets — so `r` reviews carry full hub context.
 
 `bluefin-review queue` walks the public PR queue one pull request at a time.
 Each stop prints read-only Review Evidence — author, draft state, review
