@@ -1,6 +1,6 @@
 ---
 name: launcher
-version: "2.6"
+version: "2.7"
 last_updated: 2026-08-08
 id: launcher
 one_line_purpose: Change review just recipes without breaking foreground.
@@ -65,7 +65,9 @@ Goose, or image build skill documents.
    all and starts the image with the `queue` argument, which the entrypoint
    dispatches to `bluefin-review queue` before the Hive config gate. The walk
    needs a GitHub token from the first keystroke, so the recipe fails without
-   one rather than warning, and it forwards its recipe arguments verbatim to
+   one rather than warning. Leading non-flag arguments are the model profile
+   and thinking effort — the same closed set `review-container` takes — and
+   everything from the first `-` flag onward forwards verbatim to
    `bluefin-review queue`. Its instance name is `review-queue`, overridable
    with `REVIEW_QUEUE_NAME` — the queue walk's analogue of
    `REVIEW_CONTAINER_NAME`, and likewise the only instance knob it gets.

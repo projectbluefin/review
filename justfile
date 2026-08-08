@@ -20,9 +20,10 @@
 #   review-doctor     Read-only preflight diagnostics. Starts nothing.
 #   review-queue      Walk the Bluefin PR queue in the contributor
 #                     container — no Hive, no VM. Foreground; q or
-#                     Ctrl-C stops. Arguments pass through to
-#                     `bluefin-review queue`, e.g.
-#                     'just review-queue --repo bluefin'.
+#                     Ctrl-C stops. Takes the same model profile and
+#                     effort as review-container, then passes the rest
+#                     through to `bluefin-review queue`, e.g.
+#                     'just review-queue kimi high --repo bluefin'.
 #
 # ─────────────────────────────────────────────────────────────────────────
 # FOREGROUND GUARANTEE
@@ -1153,8 +1154,9 @@ review-container profile="" effort="":
 # stops. Arguments pass straight through to `bluefin-review queue`:
 #
 #   just review-queue                      # everything the queue marks 'review'
+#   just review-queue kimi high            # pick the model profile and effort
 #   just review-queue --repo bluefin       # one repository
-#   just review-queue --all                # every recommended action
+#   just review-queue opus5 --all          # profile, then bluefin-review flags
 #
 # One instance owns the 'review-queue' name; REVIEW_QUEUE_NAME overrides it
 # for a concurrent second walk, exactly as REVIEW_CONTAINER_NAME does for
@@ -1165,6 +1167,10 @@ review-queue *queue_args:
     {{shared_functions}}
     TOOL="{{tool_env}}"
     COPILOT_DEFAULT_MODEL="{{copilot_default_model}}"
+    OPUS_MODEL="{{opus_model}}"
+    OPUS_CONTEXT_LIMIT="{{opus_context_limit}}"
+    KIMI_MODEL="{{kimi_model}}"
+    KIMI_CONTEXT_LIMIT="{{kimi_context_limit}}"
 
     require_goose_backend "$TOOL"
     preflight_agent
@@ -1177,6 +1183,16 @@ review-queue *queue_args:
     CONTAINER_NAME="${REVIEW_QUEUE_NAME:-review-queue}"
     require_valid_container_name "$CONTAINER_NAME"
 
+    # Leading non-flag arguments are the model profile and thinking effort,
+    # exactly as review-container takes them; everything from the first '-'
+    # flag onward belongs to bluefin-review queue. Word-splitting {{queue_args}}
+    # is the point: it arrives as one string of separate flags.
+    # shellcheck disable=SC2086
+    set -- {{queue_args}}
+    profile="" effort=""
+    if [[ $# -gt 0 && "$1" != -* ]]; then profile="$1"; shift; fi
+    if [[ $# -gt 0 && "$1" != -* ]]; then effort="$1"; shift; fi
+    resolve_model_profile "$profile" "$effort"
     resolve_goose_selection
 
     CONTRIBUTOR_IMAGE="{{contributor_image}}"
@@ -1217,10 +1233,8 @@ review-queue *queue_args:
     CONTAINER_ARGS+=(--env GH_TOKEN)
     report_gh_token_blast_radius "${GH_TOKEN_SOURCE}"
 
-    # queue_args is word-split on purpose: it carries separate flags such as
-    # '--repo bluefin' through to bluefin-review.
-    # shellcheck disable=SC2086
-    CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE" queue {{queue_args}})
+    # Whatever survived the profile/effort shift belongs to bluefin-review.
+    CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE" queue "$@")
 
     echo "✓ starting the PR queue walk (no Hive)."
     echo "  q or Ctrl-C stops; the walk is the only thing running."

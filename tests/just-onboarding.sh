@@ -632,6 +632,32 @@ run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
 assert_file_contains "--name review-queue-2" "$runner_log"
 assert_file_not_contains "--name review-queue " "$runner_log"
 
+begin "review-queue: a leading profile and effort set the model, flags pass through"
+reset_logs
+RECIPE_ARGS=(kimi high --repo bluefin)
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
+assert_file_contains "--env GOOSE_MODEL=kimi-k3" "$runner_log"
+assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
+assert_file_contains "--env GOOSE_CONTEXT_LIMIT=264000" "$runner_log"
+assert_file_contains "queue --repo bluefin" "$runner_log"
+assert_file_not_contains "queue kimi" "$runner_log"
+
+begin "review-queue: an unknown profile is one actionable error, nothing launches"
+reset_logs
+RECIPE_ARGS=(gpt-9)
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
+assert_nonzero_status "$STATUS" "an unknown profile must not launch anything"
+assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
+assert_contains "unknown model profile 'gpt-9'" "$OUT"
+assert_eq "$(wc -c <"$runner_log")" 0 "no container may start on a bad profile"
+
+begin "review-queue: flags first means no profile, everything passes through"
+reset_logs
+RECIPE_ARGS=(--all)
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
+assert_file_contains "--env GOOSE_MODEL=gpt-5.6-luna" "$runner_log"
+assert_file_contains "queue --all" "$runner_log"
+
 # ══ 3. Doctor: advisory VM limitation, no failure on a fully provisioned host ══
 if kvm_usable; then
   begin "review-doctor: fully provisioned x86_64 host exits 0 with VM advisory"

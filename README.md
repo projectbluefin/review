@@ -224,11 +224,14 @@ paths pass through. Arguments pass straight through to `bluefin-review queue`:
 
 ```bash
 just review-queue                      # everything the queue marks 'review'
+just review-queue kimi high            # pick the model profile and effort
 just review-queue --repo bluefin       # one repository
 just review-queue --all                # every action
 ```
 
-`q` or Ctrl-C stops. `REVIEW_QUEUE_NAME=review-queue-2 just review-queue`
+The leading arguments are the same model profiles `review-container` takes
+(`luna`, `opus5`, `kimi` plus an optional effort); everything from the first
+flag onward passes straight through to `bluefin-review queue`. `REVIEW_QUEUE_NAME=review-queue-2 just review-queue`
 runs a second walk beside the first, like `REVIEW_CONTAINER_NAME` does for
 `review-container`.
 
