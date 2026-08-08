@@ -1,9 +1,448 @@
 #!/usr/bin/env bash
+# Managed Reviewer Client.
+#
+# Two modes, one contract: this prepares a Review Draft for a human. It never
+# approves, submits, or merges. Every state-changing action below is one the
+# maintainer explicitly selects from the menu, and the destructive ones are
+# simply not offered.
+#
+#   bluefin-review [range]   review a local diff through Goose (default)
+#   bluefin-review queue     walk the Bluefin PR queue one pull request at a time
 set -euo pipefail
 
-printf '%s\n' \
-  '+------------------------+' \
-  '| BLUEFIN REVIEW         |' \
-  '| HUMAN DECISION REQUIRED|' \
-  '+------------------------+'
-exec goose review "$@"
+QUEUE_URL="${BLUEFIN_REVIEW_QUEUE_URL:-https://projectbluefin.github.io/review/queue.json}"
+WORKSPACE="${HIVE_WORKSPACE_DIR:-${HOME}/workspace}"
+
+# Goose discovers session skills under ~/.agents/skills, but 'goose review'
+# does not read them: its own context comes from '.agents/REVIEW.md' and
+# '.agents/checks/*.md' inside the REVIEWED repository. Reviewing another
+# project therefore gets Goose's generic prompt with none of the org's review
+# doctrine, and we must not write into the repository under review to fix that.
+#
+# --instructions is the additive seam (--prompt would replace Goose's default
+# prompt wholesale). Pass a POINTER rather than the documents themselves: the
+# projected pr-review skill and its references are ~33 KB, Goose dispatches one
+# subprocess per check, and that cost would be paid on every check of every
+# review. This mirrors local-agent-policy.md, which likewise routes the agent
+# into the skill inventory instead of inlining it.
+SKILLS_ROOT="${BLUEFIN_REVIEW_SKILLS_ROOT:-${HOME}/.agents/skills}"
+CONTEXT_SKILLS="${BLUEFIN_REVIEW_CONTEXT_SKILLS:-pr-review queue-feed hive-review human-gates}"
+
+# Hive downloads the hub's knowledge export here and refreshes it every ten
+# minutes, symlinking it to the names Goose loads as context files. Naming the
+# path explicitly means a review reaches the knowledge base even if a review
+# subprocess does not inherit those context files.
+KNOWLEDGE_FILE="${BLUEFIN_REVIEW_KNOWLEDGE_FILE:-${HOME}/agent.md}"
+
+# Open pull requests fetched per repository for duplicate detection. The busiest
+# factory repository sits well under this; the analyzer says so explicitly when
+# a pull request falls outside the page, so the limit can never be mistaken for
+# a clean result.
+PULL_FETCH_LIMIT="${BLUEFIN_REVIEW_PULL_LIMIT:-200}"
+
+review_instructions() {
+  local id skill listing=""
+  for id in $CONTEXT_SKILLS; do
+    skill="${SKILLS_ROOT}/${id}/SKILL.md"
+    [[ -f "$skill" ]] || continue
+    listing+="- ${id}: ${skill}"
+    if compgen -G "${SKILLS_ROOT}/${id}/references/*.md" >/dev/null; then
+      listing+=" (plus ${SKILLS_ROOT}/${id}/references/)"
+    fi
+    listing+=$'\n'
+  done
+  if [[ -s "$KNOWLEDGE_FILE" ]]; then
+    listing+="- hive knowledge base (refreshed from the hub): ${KNOWLEDGE_FILE}"$'\n'
+  fi
+  [[ -n "$listing" ]] || return 0
+
+  printf '%s' "This is a Project Bluefin review. The org's review doctrine is on disk; read the entries that match this diff before judging it, and prefer them over general habit:
+${listing}
+Report findings with severity, file and line references, and the evidence for
+each. State what you could not verify. If there are no evidenced findings, say
+so plainly. A human makes every approval and merge decision; never present a
+recommendation as one."
+}
+
+# Every review goes through here so both modes carry the same context.
+goose_review() {
+  local instructions
+  instructions="$(review_instructions)"
+  if [[ -n "$instructions" ]]; then
+    goose review --instructions "$instructions" "$@"
+  else
+    goose review "$@"
+  fi
+}
+
+banner() {
+  printf '%s\n' \
+    '+------------------------+' \
+    '| BLUEFIN REVIEW         |' \
+    '| HUMAN DECISION REQUIRED|' \
+    '+------------------------+'
+}
+
+die() {
+  printf 'bluefin-review: %s\n' "$1" >&2
+  exit 1
+}
+
+rule() { printf '%s\n' '--------------------------------------------------------------'; }
+
+usage() {
+  cat <<'EOF'
+Usage:
+  bluefin-review [range]              review a local diff through Goose
+  bluefin-review queue [options]      walk the Bluefin PR queue
+
+Queue options:
+  --action <name>   only this recommended_action (default: review)
+  --all             every action, not just one
+  --repo <name>     only this repository (short name or owner/repo)
+  --url <url>       read the queue from somewhere else
+
+The queue is a recommendation snapshot. GitHub stays authoritative for pull
+request state, and every merge or approval remains a human action taken
+outside this tool.
+EOF
+}
+
+# --- duplicate detection ------------------------------------------------------
+
+# Renovate opens a digest bump and a version bump for the same dependency, and
+# several agents can close one issue from separate pull requests, so the queue
+# carries real duplicates. Normalise a title down to the dependency it updates
+# so those collapse onto one key.
+#
+# 'shares a file' is deliberately NOT treated as duplication: across the live
+# queue that fires on 174 pairs, mostly unrelated changes touching one common
+# workflow file, and drowns the ~13 real ones. It is reported separately as an
+# ordering hazard.
+DUPLICATE_ANALYZER='
+import json, sys, re, itertools
+
+number = int(sys.argv[1])
+prs = json.load(open(sys.argv[2]))
+
+def subject(title):
+    s = title.lower()
+    s = re.sub(r"^\w+(\([^)]*\))?:\s*", "", s)
+    for pattern in (
+        r"update module\s+(\S+)",
+        r"update dependency\s+(\S+)",
+        r"update\s+(\S+)\s+docker\s+(?:tag|digest)",
+        r"update\s+(\S+)\s+action",
+        r"update\s+(\S+)\s+digest",
+        r"update\s+(\S+)\s+to\s+v?[\d.]",
+    ):
+        found = re.search(pattern, s)
+        if found:
+            return re.sub(r":[^:/]*$", "", found.group(1).strip())
+    return None
+
+this = next((p for p in prs if p["number"] == number), None)
+if this is None:
+    # Outside the fetched page. Saying nothing here would read exactly like
+    # "no duplicates found", which is the wrong conclusion to hand a reviewer.
+    print("related\tnot among the %d open pull requests checked" % len(prs))
+    sys.exit(0)
+
+def issues(pr):
+    return {r["number"] for r in (pr.get("closingIssuesReferences") or [])}
+
+def paths(pr):
+    return {f["path"] for f in (pr.get("files") or [])}
+
+mine_subject, mine_issues, mine_paths = subject(this["title"]), issues(this), paths(this)
+duplicates, overlaps = [], []
+for other in prs:
+    if other["number"] == number:
+        continue
+    shared_issues = mine_issues & issues(other)
+    if mine_subject and subject(other["title"]) == mine_subject:
+        duplicates.append("#%d (same dependency %s)" % (other["number"], mine_subject))
+    elif shared_issues:
+        duplicates.append("#%d (both close #%d)" % (other["number"], sorted(shared_issues)[0]))
+    elif mine_paths & paths(other):
+        overlaps.append("#%d" % other["number"])
+
+if duplicates:
+    print("dupe-of\t" + ", ".join(duplicates[:6]))
+if overlaps:
+    trailer = ", ..." if len(overlaps) > 6 else ""
+    print("overlaps\t" + ", ".join(overlaps[:6]) + trailer)
+'
+
+# One 'gh pr list' per repository, cached for the session: the walk revisits a
+# repository once per queued pull request, and re-fetching each time would turn
+# a 0.7s call into dozens. A failed fetch is reported, never cached as an empty
+# result -- "no duplicates" and "could not look" must not read the same.
+repo_pulls() {
+  local repo="$1" cache="${CACHE_DIR}/${1//\//_}.json"
+  if [[ ! -f "$cache" ]]; then
+    if ! gh pr list --repo "$repo" --state open --limit "$PULL_FETCH_LIMIT" \
+      --json number,title,files,closingIssuesReferences >"$cache" 2>/dev/null; then
+      rm -f "$cache"
+      return 1
+    fi
+  fi
+  printf '%s' "$cache"
+}
+
+show_related() {
+  local repo="$1" number="$2" cache
+  [[ -n "${CACHE_DIR:-}" ]] || return 0
+  if ! cache="$(repo_pulls "$repo")"; then
+    printf ' %-8s %s\n' 'related' "could not read open pull requests for ${repo}"
+    return 0
+  fi
+  python3 -c "$DUPLICATE_ANALYZER" "$number" "$cache" 2>/dev/null |
+    while IFS=$'\t' read -r kind detail; do
+      printf ' %-8s %s\n' "$kind" "$detail"
+    done
+}
+
+# --- queue mode --------------------------------------------------------------
+
+# Read the queue into a compact TSV so the loop never re-parses JSON. Fields are
+# tab-separated because a pull request title can contain anything else.
+load_queue() {
+  local url="$1" action="$2" repo="$3" raw
+  # Report once, at the call site: this runs in a command substitution, so a
+  # 'die' here would print and the caller would print again.
+  raw="$(curl --fail --location --show-error --silent --max-time 60 "$url")" || return 1
+
+  printf '%s' "$raw" | jq -r --arg action "$action" --arg repo "$repo" '
+    .items
+    | map(select($action == "" or .recommended_action == $action))
+    | map(select($repo == "" or .repository == $repo or (.repository | split("/") | last) == $repo))
+    | .[]
+    | [.repository, (.number | tostring), .recommended_action, .title] | @tsv
+  '
+}
+
+# Read-only Review Evidence. Live GitHub state, not the snapshot's copy of it,
+# because the snapshot can be hours old and a stale "clean" reading is exactly
+# the one that misleads a reviewer.
+show_evidence() {
+  local repo="$1" number="$2" position="$3" total="$4" action="$5" title="$6"
+
+  rule
+  printf ' [%s/%s]  %s#%s\n' "$position" "$total" "$repo" "$number"
+  printf ' %s\n' "$title"
+  printf ' queue says: %s\n' "$action"
+  rule
+
+  local json
+  if ! json="$(gh pr view "$number" --repo "$repo" \
+    --json author,isDraft,mergeable,mergeStateStatus,reviewDecision,additions,deletions,changedFiles,updatedAt,statusCheckRollup 2>&1)"; then
+    printf ' (could not read live state from GitHub: %s)\n' "$json"
+    return 0
+  fi
+
+  printf '%s' "$json" | jq -r '
+    def dash: if . == null or . == "" then "-" else . end;
+    " author   \(.author.login // "-")",
+    " updated  \(.updatedAt // "-")",
+    " draft    \(.isDraft)    review   \(.reviewDecision // "-")",
+    " merge    \(.mergeable // "-") / \(.mergeStateStatus // "-")",
+    " size     +\(.additions) -\(.deletions) across \(.changedFiles) files",
+    " checks   " + (
+      (.statusCheckRollup // [])
+      | map(.conclusion // .state // "PENDING")
+      | if length == 0 then "none reported"
+        else
+          (map(select(. == "SUCCESS" or . == "NEUTRAL" or . == "SKIPPED")) | length | tostring) + " ok, " +
+          (map(select(. == "FAILURE" or . == "ERROR" or . == "TIMED_OUT" or . == "CANCELLED")) | length | tostring) + " failed, " +
+          (map(select(. == "PENDING" or . == "IN_PROGRESS" or . == "QUEUED")) | length | tostring) + " pending"
+        end
+    )
+  '
+  show_related "$repo" "$number"
+  rule
+}
+
+# Put the pull request on disk in the Hive workspace and hand the diff to Goose.
+# Clone once per repository, then reuse it; a review loop that re-cloned every
+# time would spend its life in git rather than in review.
+run_goose_review() {
+  local repo="$1" number="$2"
+  # Two statements, not one: within a single 'local', the later name is not yet
+  # assigned when the earlier expansion runs, so a combined declaration expands
+  # to an empty repository directory (and trips 'set -u').
+  local name="${repo##*/}"
+  local dir="${WORKSPACE}/${name}"
+
+  mkdir -p "$WORKSPACE"
+  if [[ ! -d "${dir}/.git" ]]; then
+    printf 'cloning %s into %s\n' "$repo" "$dir"
+    gh repo clone "$repo" "$dir" -- --quiet || {
+      printf 'could not clone %s\n' "$repo" >&2
+      return 1
+    }
+  fi
+
+  (
+    cd "$dir" || exit 1
+    git fetch --quiet origin || true
+    gh pr checkout "$number" --repo "$repo" || {
+      printf 'could not check out %s#%s\n' "$repo" "$number" >&2
+      exit 1
+    }
+
+    base="$(gh pr view "$number" --repo "$repo" --json baseRefName --jq .baseRefName)" || exit 1
+    git fetch --quiet origin "$base" || true
+
+    banner
+    goose_review "origin/${base}...HEAD"
+  )
+}
+
+menu() {
+  printf '\n [Enter] next   [r] review   [d] diff   [o] browser   [c] comment   [p] previous   [q] quit\n'
+  printf ' > '
+}
+
+queue_mode() {
+  local action=review repo="" url="$QUEUE_URL"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --action)
+        action="${2:?--action needs a value}"
+        shift 2
+        ;;
+      --all)
+        action=""
+        shift
+        ;;
+      --repo)
+        repo="${2:?--repo needs a value}"
+        shift 2
+        ;;
+      --url)
+        url="${2:?--url needs a value}"
+        shift 2
+        ;;
+      -h | --help)
+        usage
+        return 0
+        ;;
+      *) die "unknown queue option: $1" ;;
+    esac
+  done
+
+  command -v gh >/dev/null || die "gh is required for queue mode"
+  command -v jq >/dev/null || die "jq is required for queue mode"
+
+  # Per-session cache of each repository's open pull requests, used to spot
+  # duplicates. Removed on the way out so a later walk sees current state.
+  CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bluefin-review.XXXXXX")"
+  trap 'rm -rf "$CACHE_DIR"' EXIT INT TERM
+
+  local -a items=()
+  local line queue_tsv
+  # Capture before the loop: reading from a process substitution discards the
+  # producer's exit status, so a failed fetch or a malformed snapshot would
+  # otherwise surface as "Nothing in the queue" and a success exit.
+  if ! queue_tsv="$(load_queue "$url" "$action" "$repo")"; then
+    die "could not read the queue from ${url}"
+  fi
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && items+=("$line")
+  done <<<"$queue_tsv"
+
+  local total="${#items[@]}"
+  if ((total == 0)); then
+    printf 'Nothing in the queue for that filter.\n'
+    return 0
+  fi
+
+  printf '%s pull request(s) to walk. Ctrl-C or q stops.\n' "$total"
+
+  # A TTY read, not stdin: goose and gh both consume stdin, so a plain `read`
+  # would swallow the next keystroke or hit EOF mid-loop. Probe in a subshell
+  # first -- a failed 'exec' redirection is fatal to the shell that runs it, so
+  # it cannot be guarded with '||', and '[[ -r /dev/tty ]]' is not a usable
+  # test because the path exists and passes it in contexts where opening still
+  # fails with ENXIO. Never attach '2>/dev/null' to the real exec: with only
+  # redirections, exec applies them to THIS shell permanently, silencing every
+  # later diagnostic.
+  if ! (exec 3</dev/tty) 2>/dev/null; then
+    die "queue mode needs an interactive terminal"
+  fi
+  exec 3</dev/tty
+
+  local index=0 item pr_repo pr_number pr_action pr_title key body
+  while ((index < total)); do
+    item="${items[index]}"
+    IFS=$'\t' read -r pr_repo pr_number pr_action pr_title <<<"$item"
+
+    printf '\n'
+    show_evidence "$pr_repo" "$pr_number" "$((index + 1))" "$total" "$pr_action" "$pr_title"
+
+    menu
+    IFS= read -r -n1 key <&3 || key=q
+    printf '\n'
+
+    case "$key" in
+      '')
+        index=$((index + 1))
+        ;;
+      r)
+        # A failed checkout or a failed Goose run must not be announced as a
+        # finished draft; the reviewer would judge output that never appeared.
+        if run_goose_review "$pr_repo" "$pr_number"; then
+          printf '\nThe Review Draft above is for you to judge. Nothing was submitted.\n'
+        else
+          printf '\nReview did not complete for %s#%s. Nothing was submitted.\n' \
+            "$pr_repo" "$pr_number"
+        fi
+        ;;
+      d)
+        gh pr diff "$pr_number" --repo "$pr_repo" | ${PAGER:-less -R} || true
+        ;;
+      o)
+        gh pr view "$pr_number" --repo "$pr_repo" --web || true
+        ;;
+      c)
+        printf ' comment (empty aborts): '
+        IFS= read -r body <&3 || body=""
+        if [[ -n "$body" ]]; then
+          gh pr comment "$pr_number" --repo "$pr_repo" --body "$body" || true
+        else
+          printf ' skipped\n'
+        fi
+        ;;
+      p)
+        ((index > 0)) && index=$((index - 1))
+        ;;
+      q)
+        printf 'Stopped at %s of %s.\n' "$((index + 1))" "$total"
+        return 0
+        ;;
+      *)
+        printf ' unknown key: %s\n' "$key"
+        ;;
+    esac
+  done
+
+  printf '\nEnd of queue.\n'
+}
+
+# --- entry -------------------------------------------------------------------
+
+case "${1-}" in
+  queue)
+    shift
+    queue_mode "$@"
+    ;;
+  -h | --help)
+    usage
+    ;;
+  *)
+    banner
+    goose_review "$@"
+    ;;
+esac

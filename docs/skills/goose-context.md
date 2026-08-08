@@ -1,7 +1,7 @@
 ---
 name: goose-context
-version: "1.9"
-last_updated: 2026-08-04
+version: "2.0"
+last_updated: 2026-08-08
 id: goose-context
 one_line_purpose: Keep Goose config and skill routing working in the guest.
 entry_point: docs/skills/goose-context.md
@@ -82,6 +82,41 @@ The pinned Hive runtime links its refreshed knowledge export to Goose-native
 `AGENTS.md` and `.goosehints`. Do not add `CONTEXT_FILE_NAMES` merely to retain
 the legacy `CLAUDE.md` link; keep auto-loaded files concise.
 
+## Review Context Is Not Session Context
+
+`goose review` does **not** read `~/.agents/skills`. It discovers its own
+context from `.agents/REVIEW.md` and `.agents/checks/*.md` inside the
+repository being reviewed. Verified with `goose review --dry-run`: a check
+placed at the reviewed repository's root is reported as
+`discovered ... (scope: <root>)`, while the same file under
+`$HOME/.agents/checks` is ignored entirely.
+
+Two consequences:
+
+1. Projecting an org skill into `~/.agents/skills` puts it in *session*
+   context only. It does nothing for a review.
+2. The reviewed repository belongs to someone else, so writing `.agents/`
+   files into it is not available as a fix.
+
+Use `--instructions`, which is additive. `--prompt` replaces Goose's embedded
+review prompt wholesale and throws away its correctness and code-quality
+passes. Name the documents on disk rather than inlining them: the projected
+`pr-review` skill plus its references is roughly 33 KB, and Goose dispatches
+one subprocess per check, so an inlined copy is paid on every check of every
+review. `bluefin-review` sends a sub-1 KB pointer covering `pr-review`,
+`queue-feed`, `hive-review`, `human-gates`, and Hive's `~/agent.md` knowledge
+export, and omits any entry whose file is absent.
+
+## Skill References Must Be Projected Too
+
+`scripts/generate-skills.py` writes `SKILL.md` from each manifest
+`entry_point`. Skill bodies also link sibling material as
+`references/<name>.md`, and the manifest does not list those files, so they
+are resolved from the body. Without that, `pr-review` alone shipped four
+dangling links. Reference names come from a fetched body rather than the
+manifest, so treat them as untrusted: accept a plain `<file>.md` sibling only,
+and reject any path separator or traversal segment before joining a path.
+
 ## Common Rationalizations
 
 - "The policy wording is cosmetic." The image contract validates specific
@@ -110,6 +145,11 @@ without increasing the bounded tool response size.
   confirmation prompt as the safety control for this image.
 - Treating absent Context7 output as evidence for an unverified external
   claim. Context7 arrives through Hive's knowledge export, not the image.
+- Assuming `goose review` sees the skills projected into `~/.agents/skills`,
+  or writing `.agents/` files into a repository under review to make it.
+- Inlining skill bodies into `--instructions`, or reaching for `--prompt`
+  when the intent is to add context rather than replace the review prompt.
+- Projecting a skill without the `references/` documents its body links to.
 
 ## Verification
 

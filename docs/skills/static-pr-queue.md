@@ -1,7 +1,7 @@
 ---
 name: static-pr-queue
-version: "1.4"
-last_updated: 2026-08-04
+version: "1.6"
+last_updated: 2026-08-08
 id: static-pr-queue
 one_line_purpose: Publish a safe, static queue of public pull requests.
 entry_point: docs/skills/static-pr-queue.md
@@ -68,6 +68,38 @@ GitHub owns pull-request state and merge decisions.
 | "A timestamp-only refresh is harmless." | It commits every 15 minutes without new evidence and obscures real changes. |
 | "A fork workflow can run the generator with write access." | Never run untrusted PR code with a write-capable token. Fork events wait for the scheduled refresh. |
 | "The queue can tell agents to merge." | It can emit only `ready-for-human-merge`; repository gates still apply. |
+
+## Consuming The Queue
+
+`bluefin-review queue` is the one shipped consumer. It reads the snapshot only
+to decide **what to show a human next**, and re-reads every displayed fact from
+GitHub live, because the snapshot can be hours old and a stale "clean" reading
+is the one most likely to mislead a reviewer. Treat that split as the rule for
+any future consumer: the queue orders the walk, GitHub supplies the evidence.
+
+A consumer must not gain an approve or merge action. `ready-for-human-merge` is
+a recommendation to a person, not an instruction a tool may execute, so the
+menu offers neither and `tests/bluefin-review.sh` fails if a `pr merge` or
+`pr review` call appears in the reviewer.
+
+### Duplicates Are Evidence, Overlap Is Not
+
+The queue ranks each pull request alone, so it cannot see that two entries are
+the same work. Report that at the point of review, and keep two signals apart:
+
+- **Duplicate** — the pull requests update the same dependency, or close the
+  same issue. One supersedes the other.
+- **Overlap** — they merely touch a file in common. That is a merge-ordering
+  hazard, and both changes may still be wanted.
+
+Measured against the live queue, shared files match 174 pairs while
+same-dependency and same-issue match 13. Collapsing the two would hide every
+real duplicate behind noise from one busy workflow file.
+
+Normalise a Renovate title to the dependency it updates before comparing;
+`update module <path>`, `update dependency <name>`, `<image> docker digest`,
+and `<action> action` are all the same shape wearing different words. Fetch
+each repository's open pull requests once per walk and cache them.
 
 ## Red Flags
 

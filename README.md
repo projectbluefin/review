@@ -215,6 +215,97 @@ PageUp scrolls, tmux search finds text, and `q` returns to the live pane.
 The mouse wheel also enters copy-mode and scrolls long output. Copy-mode only
 changes your view; Hive still owns task and output handling.
 
+### Walking the queue
+
+`bluefin-review queue` walks the public PR queue one pull request at a time.
+Each stop prints read-only Review Evidence — author, draft state, review
+decision, mergeability, size, and check totals — read live from GitHub rather
+than from the snapshot, because a stale "clean" reading is the one most likely
+to mislead a reviewer. Then it offers a menu:
+
+| Key | Action |
+|---|---|
+| `Enter` | next pull request |
+| `r` | check the pull request out and review it through `goose review` |
+| `d` | show the diff |
+| `o` | open it in a browser |
+| `c` | leave a comment |
+| `p` | previous pull request |
+| `q` | stop |
+
+### Duplicates
+
+The queue holds real duplicates, so each stop also reports a pull request's
+near-neighbours in the same repository:
+
+```
+ dupe-of  #26 (same dependency actions/checkout)
+ overlaps #25, #24, #22
+```
+
+`dupe-of` means the two are the *same work*: Renovate raises a digest bump and a
+version bump for one dependency, and several agents can close one issue from
+separate pull requests. `overlaps` means only that they touch a file in common —
+an ordering hazard, not duplication.
+
+Keeping those separate is the point. Across the live queue, shared files flag
+174 pairs, mostly unrelated changes touching one busy workflow file, while the
+same-dependency and same-issue tests find 13. Reporting the first as duplication
+would bury the second.
+
+Detection costs one `gh pr list` per repository, cached for the walk, so
+revisiting a repository does not refetch it.
+
+```bash
+bluefin-review queue                      # everything the queue marks 'review'
+bluefin-review queue --repo common        # one repository
+bluefin-review queue --action fix-ci      # a different recommended action
+bluefin-review queue --all                # every action
+```
+
+`r` clones each repository once into `HIVE_WORKSPACE_DIR` (default
+`~/workspace`), checks the pull request out there, and reviews
+`origin/<base>...HEAD`. The result is a Review Draft for you to judge.
+
+### Review context
+
+`goose review` does not read `~/.agents/skills`. Its own context comes from
+`.agents/REVIEW.md` and `.agents/checks/*.md` **inside the repository being
+reviewed**, so reviewing another project would otherwise get Goose's generic
+prompt with none of Project Bluefin's review doctrine — and writing those files
+into someone else's checkout is not an option.
+
+`bluefin-review` therefore passes `--instructions` (additive) rather than
+`--prompt` (which would replace Goose's default prompt), naming the doctrine on
+disk instead of inlining it:
+
+| Source | Path |
+|---|---|
+| `pr-review`, `queue-feed`, `hive-review`, `human-gates` | `~/.agents/skills/<id>/SKILL.md` and `references/` |
+| Hive knowledge base | `~/agent.md`, refreshed from the hub every 10 minutes |
+
+This mirrors `local-agent-policy.md`, which routes the agent into the skill
+inventory rather than repeating it. Inlining those documents would add roughly
+33 KB to every check subprocess of every review; the pointer costs under 1 KB.
+Entries are omitted when their files are absent, so nothing dangles.
+
+Override with `BLUEFIN_REVIEW_CONTEXT_SKILLS` (space-separated skill ids),
+`BLUEFIN_REVIEW_SKILLS_ROOT`, or `BLUEFIN_REVIEW_KNOWLEDGE_FILE`.
+
+Hive keeps running throughout: the queue walk is an ordinary command inside the
+contributor container, so the knowledge base, its refresh loop, and the
+`contributor` session are untouched. Run it in a second pane with
+`podman exec -it <container> tmux attach -t contributor`, or in any shell in
+that container.
+
+The menu deliberately offers no approve and no merge. This is the Managed
+Reviewer Client from
+[`docs/factory/agentic-model.md`](docs/factory/agentic-model.md): it prepares a
+Review Draft and never claims review, approval, or merge authority. Those stay
+human actions taken in GitHub, and `tests/bluefin-review.sh` fails if a merge
+or review-submission path is ever added. Queue mode needs an interactive
+terminal and says so rather than looping silently without one.
+
 ## Configuration
 
 All configuration is read at launch.
@@ -227,6 +318,10 @@ All configuration is read at launch.
 | `REVIEW_HIVE_COMMIT` | Full Hive commit used for contributor setup. |
 | `REVIEW_CONTAINER_NAME` | Contributor container name; defaults to `review-container`. Give a second concurrent instance its own name. |
 | `REVIEW_GH_TOKEN` | Optional GitHub token override for container-only mode. |
+| `BLUEFIN_REVIEW_QUEUE_URL` | Queue snapshot `bluefin-review queue` reads; defaults to the published `queue.json`. |
+| `BLUEFIN_REVIEW_CONTEXT_SKILLS` | Skill ids named as review context; defaults to `pr-review queue-feed hive-review human-gates`. |
+| `BLUEFIN_REVIEW_SKILLS_ROOT` | Projected org skills root; defaults to `~/.agents/skills`. |
+| `BLUEFIN_REVIEW_KNOWLEDGE_FILE` | Hive knowledge export named as review context; defaults to `~/agent.md`. |
 | `GOOSE_PROVIDER` | Unset or `github_copilot`. |
 | `GOOSE_MODEL` | Optional GitHub Copilot model override. |
 | `GOOSE_THINKING_EFFORT` | Optional Copilot reasoning-effort override. |
