@@ -337,7 +337,7 @@ RUN set -eu; \
 # this is a pinned checkout projected into the discovery root — one seam,
 # no second generator. These carry the Ghost Cluster operating knowledge the
 # dashboard's build dispatch (#133) depends on.
-ARG LAB_SKILLS_COMMIT=c043fe59c0719787d6c2dfaccfd023af7d71e3e6
+ARG LAB_SKILLS_COMMIT=4d6cc39e5f55c848f226fd570eb07f91c367c28d
 RUN set -eu; \
     workdir="$(mktemp -d)"; \
     trap 'rm -rf "$workdir"' EXIT; \
