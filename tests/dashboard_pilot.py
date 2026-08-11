@@ -28,6 +28,7 @@ TUI_DIR = Path(
         Path(__file__).resolve().parent.parent / "image" / "tui",
     )
 )
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
 sys.path.insert(0, str(TUI_DIR))
 
 SNAPSHOT = {
@@ -106,11 +107,13 @@ async def main() -> int:
     steer_log = workdir / "steer.log"
 
     def review_stub(exit_code: int, output: str) -> str:
+        review_output = workdir / "review-output.txt"
+        review_output.write_text(output)
         return write_stub(
             workdir / "bluefin-review",
             f'printf "%s\\n" "$*" >>"{review_log}"\n'
             f'printf "%s\\n" "${{BLUEFIN_REVIEW_STEER-}}" >>"{steer_log}"\n'
-            f'printf "%s\\n" "{output}"\n'
+            f'cat "{review_output}"\n'
             f"exit {exit_code}\n",
         )
 
@@ -245,6 +248,17 @@ async def main() -> int:
                 if app.stops:
                     break
                 await pilot.pause(0.05)
+            app.stops[0].live = {
+                "headRefOid": "0123456789abcdef",
+                "isDraft": False,
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
+                "statusCheckRollup": [
+                    {"name": "validate", "conclusion": "SUCCESS"},
+                    {"name": "docs", "conclusion": "FAILURE"},
+                ],
+            }
+            app.stops[0].overlap = {"duplicates": [44], "overlaps": [45, 46]}
             await pilot.press("r")
             await pilot.pause()
             screen = app.screen
@@ -257,7 +271,16 @@ async def main() -> int:
                 await pilot.pause(0.05)
             check(screen.finished, f"review screen never finished (exit {exit_code})")
             status = screen.query_one("#review-status", tui.Static)
-            return str(status.render()), set(status.classes)
+            card = screen.query_one("#review-card", tui.Static)
+            raw = screen.query_one("#review-log", tui.RichLog)
+            check("hidden" in raw.classes, "completed raw evidence must start collapsed")
+            await pilot.press("e")
+            await pilot.pause()
+            check("hidden" not in raw.classes, "[e] must reveal the raw review evidence")
+            await pilot.press("e")
+            await pilot.pause()
+            check("hidden" in raw.classes, "[e] must return to the decision card")
+            return str(status.render()), set(status.classes), str(card.render())
 
     # ── batch queueing must gate each PR once, for the whole sequence ────
     app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
@@ -1431,8 +1454,11 @@ async def main() -> int:
         subprocess.run = real_run
     gh_log.write_text("")
 
-    # ── a completed review reports complete ──────────────────────────────
-    text, classes = await run_review(0, "0 findings")
+    # ── a completed structured review becomes a concise decision card ───
+    clean_output = (FIXTURE_DIR / "goose-review-clean.txt").read_text()
+    findings_output = (FIXTURE_DIR / "goose-review-findings.txt").read_text()
+    incomplete_output = (FIXTURE_DIR / "goose-review-incomplete.txt").read_text()
+    text, classes, card = await run_review(0, clean_output)
     check("COMPLETE" in text, f"exit 0 must report COMPLETE, got {text!r}")
     check("complete" in classes, f"exit 0 must carry the complete style, got {classes}")
     check(
@@ -1444,10 +1470,40 @@ async def main() -> int:
         invocations[-1:] == ["pr projectbluefin/bluefinctl 31"],
         f"the review must call 'pr <repo> <number>', got {invocations[-1:]}",
     )
+    for expected in (
+        "No evidenced findings",
+        "checks  4 verified / 1 unverified",
+        "overlap 1 duplicate / 2 shared-file hazard",
+        "CI failure",
+        "MERGEABLE/CLEAN",
+        "0123456789ab",
+        "[a] approve+queue",
+        "[m] merge",
+        "[u] update",
+        "[e] evidence",
+    ):
+        check(expected in card, f"the completed card must show {expected!r}, got {card!r}")
+
+    text, classes, card = await run_review(0, findings_output)
+    check("COMPLETE" in text, f"a structured findings run must complete, got {text!r}")
+    for expected in (
+        "FINDINGS",
+        "critical:0  high:1  medium:1  low:0",
+        "image/entrypoint.sh:87",
+        "SIGTERM [signal] no longer reaches",
+    ):
+        check(expected in card, f"the findings card must show {expected!r}, got {card!r}")
+
+    # Exit zero plus arbitrary prose has no structured evidence and must not
+    # be promoted to the clean state.
+    text, classes, card = await run_review(0, "0 findings")
+    check("UNPARSABLE" in text, f"unstructured exit 0 must be UNPARSABLE, got {text!r}")
+    check("incomplete" in classes, f"unparsable output must use warning styling, got {classes}")
+    check("No clean decision" in card, f"unparsable output must direct raw inspection, got {card!r}")
 
     # ── the regression that started this: a review whose checks returned no
     # verdict must never read as clean ───────────────────────────────────
-    text, classes = await run_review(65, "goose review: orchestrator emitted 0 finding(s)")
+    text, classes, card = await run_review(65, incomplete_output)
     check("INCOMPLETE" in text, f"exit 65 must report INCOMPLETE, got {text!r}")
     check("incomplete" in classes, f"exit 65 must carry the incomplete style, got {classes}")
     check(
@@ -1460,9 +1516,48 @@ async def main() -> int:
     )
 
     # ── a failed review is a failure, not an empty result ────────────────
-    text, classes = await run_review(3, "boom")
+    text, classes, card = await run_review(3, "boom")
     check("FAILED" in text, f"a nonzero exit must report FAILED, got {text!r}")
     check("failed" in classes, f"a failed review must carry the failed style, got {classes}")
+
+    # ── completed-card actions return through the existing mutation gate ─
+    review_stub(0, clean_output)
+    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        app.self_login = "castrojo"
+        stop = app.stops[0]
+        stop.live = {"isDraft": False, "headRefOid": "0123456789abcdef"}
+        await pilot.press("r")
+        for _ in range(400):
+            if isinstance(app.screen, tui.ReviewScreen) and app.screen.finished:
+                break
+            await pilot.pause(0.05)
+        check(
+            isinstance(app.screen, tui.ReviewScreen) and app.screen.finished,
+            "the card action test needs a completed review",
+        )
+        await pilot.press("a")
+        for _ in range(200):
+            if isinstance(app.screen, tui.ConfirmMutation):
+                break
+            await pilot.pause(0.05)
+        check(
+            isinstance(app.screen, tui.ConfirmMutation),
+            "[a] on the decision card must reach the existing typed-number gate",
+        )
+        if isinstance(app.screen, tui.ConfirmMutation):
+            check(
+                app.screen.expected == "31"
+                and [command[:3] for command in app.screen.commands]
+                == [["gh", "pr", "review"], ["gh", "pr", "edit"]],
+                f"the card must preserve the queue action, got {app.screen.commands}",
+            )
+            await pilot.press("escape")
 
     # ── the steer box: typed text reaches the review as instructions ─────
     review_stub(0, "0 findings")
@@ -1504,7 +1599,7 @@ async def main() -> int:
 
     # ── an unsteered review must not inherit a stale steer ───────────────
     steer_log.write_text("")
-    await run_review(0, "0 findings")
+    await run_review(0, clean_output)
     check(
         steer_log.read_text().splitlines()[-1:] == [""],
         f"an unsteered review must carry no steer, got {steer_log.read_text()!r}",
@@ -1580,7 +1675,8 @@ async def main() -> int:
     outcomes = [r["outcome"] for r in records if r.get("action") == "review"]
     check(
         outcomes == [
-            "complete", "incomplete", "failed", "complete", "complete", "stopped"
+            "complete", "complete", "incomplete", "incomplete", "failed",
+            "complete", "incomplete", "complete", "stopped",
         ],
         f"every review must be traced with its outcome, got {outcomes}",
     )

@@ -40,6 +40,7 @@ from textual.widgets import (
     RichLog,
     Static,
 )
+from review_result import adapt_current_engine
 
 QUEUE_URL = os.environ.get(
     "BLUEFIN_REVIEW_QUEUE_URL",
@@ -367,6 +368,7 @@ class Stop:
     selected: bool = False
     failure: str = ""
     live: dict = field(default_factory=dict)
+    overlap: dict = field(default_factory=dict)
 
     @property
     def key(self) -> str:
@@ -375,6 +377,57 @@ class Stop:
     @property
     def batchable(self) -> bool:
         return dependency_subject(self.title) is not None
+
+
+def live_review_context(live: dict) -> dict:
+    checks = live.get("statusCheckRollup") or []
+    outcomes = [
+        str(item.get("conclusion") or item.get("state") or "PENDING").upper()
+        for item in checks
+    ]
+    failed = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}
+    passed = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+    if any(outcome in failed for outcome in outcomes):
+        ci = "failure"
+    elif outcomes and all(outcome in passed for outcome in outcomes):
+        ci = "success"
+    elif outcomes:
+        ci = "pending"
+    else:
+        ci = "unknown"
+    return {
+        "ci": ci,
+        "mergeable": live.get("mergeable") or "?",
+        "merge_state": live.get("mergeStateStatus") or "?",
+        "head": str(live.get("headRefOid") or "?")[:12],
+        "draft": live.get("isDraft", "?"),
+    }
+
+
+def live_review_verification(live: dict) -> list[dict]:
+    records = []
+    passed = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+    failed = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}
+    for index, item in enumerate(live.get("statusCheckRollup") or [], start=1):
+        outcome = str(item.get("conclusion") or item.get("state") or "PENDING").upper()
+        state = (
+            "verified"
+            if outcome in passed
+            else "unverified"
+            if outcome in failed
+            else "pending"
+        )
+        records.append(
+            {
+                "name": item.get("name")
+                or item.get("context")
+                or f"CI check {index}",
+                "state": state,
+                "evidence": outcome,
+                "source": "github",
+            }
+        )
+    return records
 
 
 class ConfirmMutation(ModalScreen[bool]):
@@ -607,6 +660,10 @@ class ReviewScreen(Screen):
         Binding("q", "close", "close"),
         Binding("x", "stop", "stop review"),
         Binding("L", "leave_review", "leave a review"),
+        Binding("a", "queue", "approve and queue"),
+        Binding("m", "merge_now", "merge now"),
+        Binding("u", "update_branch", "update branch"),
+        Binding("e", "toggle_evidence", "raw evidence"),
     ]
 
     def __init__(self, stop: Stop, steer: str = "") -> None:
@@ -617,6 +674,7 @@ class ReviewScreen(Screen):
         self.finished = False
         self.stop_requested = False
         self.started = time.monotonic()
+        self.output: list[str] = []
 
     def compose(self) -> ComposeResult:
         stop = self.stop_record
@@ -627,6 +685,7 @@ class ReviewScreen(Screen):
             + (f"  steer: {escape(self.steer)}" if self.steer else ""),
             id="review-status",
         )
+        yield Static("building decision card…", id="review-card")
         yield RichLog(highlight=False, markup=False, wrap=True, id="review-log")
         yield Footer()
 
@@ -677,27 +736,40 @@ class ReviewScreen(Screen):
         )
 
     def append(self, line: str) -> None:
+        self.output.append(line)
         self.query_one("#review-log", RichLog).write(line)
 
     def finish(self, code: int | None, error: str) -> None:
         self.finished = True
         stop = self.stop_record
         elapsed = int(time.monotonic() - self.started)
+        result = adapt_current_engine(
+            "\n".join(self.output), code,
+            {"backend": os.environ.get("GOOSE_PROVIDER", "goose"),
+             "model": os.environ.get("GOOSE_MODEL", "gpt-5.6-luna"),
+             "repository": stop.repository, "pull_request": stop.number},
+            verification=live_review_verification(stop.live),
+            overlap=stop.overlap,
+            live=live_review_context(stop.live),
+        )
         if error:
             outcome, state = "error", f"FAILED to start: {error}"
         elif self.stop_requested:
             outcome, state = "stopped", "STOPPED — you cancelled it. Nothing was submitted."
-        elif code == 0:
+        elif code is not None and code < 0:
+            outcome, state = "stopped", "STOPPED — the review was killed. Nothing was submitted."
+        elif result.state in ("complete", "findings"):
             outcome = "complete"
             state = "COMPLETE — a Review Draft for you to judge. Nothing was submitted."
-        elif code == REVIEW_INCOMPLETE:
+        elif result.state == "incomplete":
             outcome = "incomplete"
             state = (
                 "INCOMPLETE — part of this review returned no verdict. "
-                "Its finding count is NOT a clean bill of health."
+                "Its finding count is not a clean bill of health."
             )
-        elif code is not None and code < 0:
-            outcome, state = "stopped", "STOPPED — the review was killed. Nothing was submitted."
+        elif result.state == "unparsable":
+            outcome = "incomplete"
+            state = "UNPARSABLE — the review output is not a clean result."
         else:
             outcome = "failed"
             state = f"FAILED (exit {code}) — the review did not run. Nothing was submitted."
@@ -709,6 +781,55 @@ class ReviewScreen(Screen):
             f" {link(stop.key, pr_url(stop.repository, stop.number))} — "
             f"{escape(state)} ({elapsed}s) — {escape('[escape]')} closes"
         )
+        finding_total = sum(result.counts.values())
+        headline = (
+            "No evidenced findings."
+            if result.is_clean else
+            f"{finding_total} evidenced finding{'s' if finding_total != 1 else ''}."
+            if result.state == "findings" else
+            "No clean decision: inspect raw evidence."
+        )
+        lines = [
+            f"{result.state.upper()}  {escape(stop.key)} — {headline}",
+            "severity  "
+            + "  ".join(
+                f"{key}:{result.counts[key]}"
+                for key in ("critical", "high", "medium", "low")
+            ),
+        ]
+        for finding in result.findings[:5]:
+            lines.append(
+                f"{finding['severity'].upper()}  "
+                f"{escape(finding.get('file', '?'))}:{finding.get('line', '?')}  "
+                f"{escape(finding.get('title', ''))}"
+            )
+        verified = sum(1 for item in result.verification if item.get("state") == "verified")
+        unverified = sum(1 for item in result.verification if item.get("state") == "unverified")
+        lines.append(
+            f"checks  {verified} verified / {unverified} unverified / "
+            f"{len(result.verification)} reported"
+        )
+        duplicates = result.overlap.get("duplicates") or []
+        overlaps = result.overlap.get("overlaps") or []
+        lines.append(f"overlap {len(duplicates)} duplicate / {len(overlaps)} shared-file hazard")
+        lines.append(
+            f"live     CI {result.live.get('ci', 'unknown')} · merge "
+            f"{escape(result.live.get('mergeable', '?'))}/"
+            f"{escape(result.live.get('merge_state', '?'))} · "
+            f"head {escape(result.live.get('head', '?'))}"
+        )
+        lines.append(
+            f"source  {escape(result.provenance.get('backend', '?'))} / "
+            f"{escape(result.provenance.get('model', '?'))}"
+        )
+        lines.append(
+            "actions  "
+            f"{escape('[L]')} review  {escape('[a]')} approve+queue  "
+            f"{escape('[m]')} merge  {escape('[u]')} update  "
+            f"{escape('[e]')} evidence"
+        )
+        self.query_one("#review-card", Static).update("\n".join(lines))
+        self.query_one("#review-log", RichLog).add_class("hidden")
         trace(
             {
                 "action": "review",
@@ -754,6 +875,25 @@ class ReviewScreen(Screen):
         the moment a maintainer actually has an opinion to record."""
         self.app.leave_review(self.stop_record)
 
+    def action_toggle_evidence(self) -> None:
+        self.query_one("#review-log", RichLog).toggle_class("hidden")
+
+    def return_to_queue(self, action) -> None:
+        if not self.finished:
+            self.notify("review still running — [x] stops it")
+            return
+        self.dismiss()
+        self.app.call_after_refresh(action)
+
+    def action_queue(self) -> None:
+        self.return_to_queue(self.app.action_merge)
+
+    def action_merge_now(self) -> None:
+        self.return_to_queue(self.app.action_merge_now)
+
+    def action_update_branch(self) -> None:
+        self.return_to_queue(self.app.action_update_branch)
+
     def action_close(self) -> None:
         # A review takes minutes. Closing mid-run would throw that away with a
         # keystroke, so an unfinished review has to be stopped deliberately.
@@ -783,6 +923,8 @@ class ReviewDashboard(App):
     #keys-reading { color: $text; }
     #keys-acting { color: magenta; }
     #diff-header { height: 1; background: $panel; color: cyan; text-style: bold; }
+    #review-card { border: solid $success; padding: 1 2; height: auto; color: $text; }
+    #review-log.hidden { display: none; }
     #diff-scroll { border: solid $secondary; background: $surface; }
     #diff-body { padding: 0 1; width: auto; }
     ListItem.selected Label { color: magenta; text-style: bold; }
@@ -1159,7 +1301,13 @@ class ReviewDashboard(App):
             self.pulls_cache[repo] = json.loads(listing.stdout)
         return self.pulls_cache[repo]
 
-    def paint_context(self, text: str) -> None:
+    def paint_context(
+        self, stop: Stop, text: str, dupes: list[dict], overlaps: list[dict]
+    ) -> None:
+        stop.overlap = {
+            "duplicates": [item["number"] for item in dupes],
+            "overlaps": [item["number"] for item in overlaps],
+        }
         context = self.query("#context")
         if context:
             context.first().update(text)
@@ -1362,7 +1510,9 @@ class ReviewDashboard(App):
         # repaint that populate()/refresh_rows() can be doing at the same
         # moment. Upstream: "avoid calling methods on your UI directly from a
         # threaded worker" (textual.textualize.io/guide/workers).
-        self.call_from_thread(self.paint_context, "\n".join(lines))
+        self.call_from_thread(
+            self.paint_context, stop, "\n".join(lines), dupes, overlaps
+        )
 
     # ── the mutation gate ─────────────────────────────────────────────────
 

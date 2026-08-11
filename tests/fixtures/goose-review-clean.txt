@@ -1,0 +1,4 @@
+goose review: discovered 2 check(s): bluefin-doctrine, shell-safety
+goose review: check 'bluefin-doctrine' completed: 0 finding(s)
+goose review: check 'shell-safety' completed: 0 finding(s)
+goose review: orchestrator emitted 0 finding(s) from 2 check(s) (main: ran, 0 finding(s))

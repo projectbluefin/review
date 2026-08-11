@@ -149,6 +149,7 @@ if [[ ! -x "${venv}/bin/python" ]] || [[ "$(cat "$stamp" 2>/dev/null || true)" !
 fi
 
 "${venv}/bin/python" -m py_compile "$tui"
+"${venv}/bin/python" "$repo_root/tests/review_result_contract.py"
 "${venv}/bin/python" "$repo_root/tests/dashboard_pilot.py"
 
 printf 'dashboard contract OK\n'

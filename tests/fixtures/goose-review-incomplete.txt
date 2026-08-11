@@ -1,0 +1,6 @@
+goose review: discovered 2 check(s): bluefin-doctrine, shell-safety
+goose review: check 'bluefin-doctrine' completed: 0 finding(s)
+goose review: check 'shell-safety' failed: parse check JSON: expected value at line 1 column 1
+goose review: orchestrator emitted 0 finding(s) from 2 check(s) (main: ran, 0 finding(s))
+--------------------------------------------------------------
+ REVIEW INCOMPLETE — 1 part(s) of this review returned no verdict:

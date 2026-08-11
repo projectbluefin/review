@@ -1,0 +1,6 @@
+goose review: discovered 2 check(s): bluefin-doctrine, shell-safety
+goose review: check 'bluefin-doctrine' completed: 1 finding(s)
+goose review: check 'shell-safety' completed: 0 finding(s)
+{"severity":"high","path":"image/entrypoint.sh","line_start":87,"line_end":89,"summary":"SIGTERM [signal] no longer reaches the contributor process group","check":"bluefin-doctrine"}
+{"severity":"medium","path":"tests/image-contract.sh","line_start":401,"line_end":401,"summary":"The contract does not exercise the new signal path","check":"main"}
+goose review: orchestrator emitted 2 finding(s) from 2 check(s) (main: ran, 1 finding(s))
