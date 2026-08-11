@@ -16,6 +16,38 @@ from tui.review_evidence_manifest import ReviewRequest  # noqa: E402
 class HarnessContract(unittest.TestCase):
     def setUp(self):
         self.binding = ReviewRequest("project", "review", 166, "a" * 40, "b" * 40, "maintainer", "review", generated_at="test")
+        self.review_payload = {
+            "version": 1,
+            "state": "complete",
+            "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+            "findings": [],
+        }
+
+    @staticmethod
+    def stream(*events):
+        return "\n".join(
+            event if isinstance(event, str) else json.dumps(event)
+            for event in events
+        )
+
+    def result_event(self, item_id="item_1", payload=None):
+        return {
+            "type": "item.completed",
+            "item": {
+                "id": item_id,
+                "type": "agent_message",
+                "text": json.dumps(payload or self.review_payload),
+            },
+        }
+
+    def terminal_stream(self, *before_result, payload=None):
+        return self.stream(
+            {"type": "thread.started", "thread_id": "thread_1"},
+            {"type": "turn.started"},
+            *before_result,
+            self.result_event(payload=payload),
+            {"type": "turn.completed", "usage": {}},
+        )
 
     def test_registry_exposes_both_adapters_without_fallback(self):
         registry = HarnessRegistry()
@@ -73,7 +105,7 @@ class HarnessContract(unittest.TestCase):
     def test_codex_stream_converts_into_merged_review_result(self):
         adapter = CodexHarness(availability=Availability.READY)
         result = adapter.convert(
-            '{"version":1,"state":"complete","counts":{"critical":0,"high":0,"medium":0,"low":0},"findings":[]}',
+            self.terminal_stream(),
             self.binding,
         )
         self.assertEqual(result.state, "complete")
@@ -83,34 +115,178 @@ class HarnessContract(unittest.TestCase):
         self.assertEqual(result.provenance["repository"], "project/review")
 
     def test_codex_converts_terminal_agent_message_envelope(self):
-        payload = {
-            "version": 1,
-            "state": "complete",
-            "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
-            "findings": [],
-        }
-        stream = "\n".join([
-            json.dumps({"type": "thread.started", "thread_id": "t"}),
-            json.dumps({
-                "type": "item.completed",
-                "item": {"id": "item_1", "type": "agent_message", "text": json.dumps(payload)},
-            }),
-            json.dumps({"type": "turn.completed", "usage": {}}),
-        ])
         result = CodexHarness(availability=Availability.READY).convert(
-            stream, self.binding, model="gpt-5.6-luna", effort="low",
+            self.terminal_stream(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "item_0",
+                        "type": "agent_message",
+                        "text": "Reviewing exact-head evidence.",
+                    },
+                }
+            ),
+            self.binding,
+            model="gpt-5.6-luna",
+            effort="low",
         )
         self.assertEqual(result.state, "complete")
 
-    def test_codex_provenance_uses_invocation_overrides(self):
-        payload = json.dumps({
+    def test_codex_rejects_bare_review_result(self):
+        stream = json.dumps(self.review_payload)
+        result = CodexHarness(availability=Availability.READY).convert(
+            stream, self.binding
+        )
+        self.assertEqual(result.state, "unparsable")
+        self.assertEqual(result.raw_evidence, [stream])
+
+    def test_codex_rejects_invalid_terminal_lifecycles(self):
+        started = [
+            {"type": "thread.started", "thread_id": "thread_1"},
+            {"type": "turn.started"},
+        ]
+        result = self.result_event()
+        completed = {"type": "turn.completed", "usage": {}}
+        finding_payload = {
             "version": 1,
             "state": "findings",
             "counts": {"critical": 0, "high": 0, "medium": 1, "low": 0},
-            "findings": [],
-        })
+            "findings": [
+                {
+                    "severity": "medium",
+                    "file": "image/harness/codex.py",
+                    "line": 1,
+                    "title": "ambiguous result",
+                }
+            ],
+        }
+        cases = {
+            "missing thread start": [started[1], result, completed],
+            "thread start missing id": [
+                {"type": "thread.started"},
+                started[1],
+                result,
+                completed,
+            ],
+            "missing turn start": [started[0], result, completed],
+            "duplicate turn start": [
+                *started,
+                {"type": "turn.started"},
+                result,
+                completed,
+            ],
+            "missing turn completion": [*started, result],
+            "completion before result": [*started, completed, result],
+            "valid-looking nonterminal result": [
+                *started,
+                result,
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "item_2",
+                        "type": "agent_message",
+                        "text": "Continuing after an intermediate result.",
+                    },
+                },
+                completed,
+            ],
+            "duplicate result messages": [
+                *started,
+                result,
+                self.result_event("item_2", finding_payload),
+                completed,
+            ],
+            "failed turn": [
+                *started,
+                result,
+                {"type": "turn.failed", "error": {"message": "failed"}},
+            ],
+            "cancelled turn": [
+                *started,
+                result,
+                {"type": "turn.cancelled"},
+            ],
+            "event after completion": [
+                *started,
+                result,
+                completed,
+                {"type": "thread.started", "thread_id": "thread_2"},
+            ],
+            "completion missing usage": [
+                *started,
+                result,
+                {"type": "turn.completed"},
+            ],
+            "completion with malformed usage": [
+                *started,
+                result,
+                {"type": "turn.completed", "usage": []},
+            ],
+            "malformed terminal json": [
+                *started,
+                result,
+                '{"type":"turn.completed"',
+            ],
+            "malformed nonterminal json": [
+                started[0],
+                '{"type":"turn.started"',
+                result,
+                completed,
+            ],
+            "malformed final result item": [
+                *started,
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "item_1",
+                        "type": "agent_message",
+                        "text": None,
+                    },
+                },
+                completed,
+            ],
+        }
+        adapter = CodexHarness(availability=Availability.READY)
+        for name, events in cases.items():
+            with self.subTest(name=name):
+                stream = self.stream(*events)
+                converted = adapter.convert(stream, self.binding)
+                self.assertEqual(converted.state, "unparsable")
+                self.assertEqual(converted.raw_evidence, stream.splitlines())
+
+    def test_codex_bounds_raw_evidence_for_malformed_stream(self):
+        stream = self.stream(
+            {"type": "thread.started", "thread_id": "thread_1"},
+            {"type": "turn.started"},
+            *(["x" * 1000] * 500),
+        )
         result = CodexHarness(availability=Availability.READY).convert(
-            payload, self.binding, model="gpt-5.6-luna", effort="medium",
+            stream, self.binding
+        )
+        self.assertEqual(result.state, "unparsable")
+        self.assertLess(len(result.raw_evidence), 500)
+        self.assertLessEqual(len(result.raw_evidence), 400)
+        self.assertLessEqual(len("\n".join(result.raw_evidence)), 120_000)
+
+    def test_codex_provenance_uses_invocation_overrides(self):
+        payload = {
+            "version": 1,
+            "state": "findings",
+            "counts": {"critical": 0, "high": 0, "medium": 1, "low": 0},
+            "findings": [
+                {
+                    "severity": "medium",
+                    "file": "image/harness/codex.py",
+                    "line": 1,
+                    "title": "finding",
+                }
+            ],
+        }
+        result = CodexHarness(availability=Availability.READY).convert(
+            self.terminal_stream(payload=payload),
+            self.binding,
+            model="gpt-5.6-luna",
+            effort="medium",
         )
         self.assertEqual(result.provenance["model"], "gpt-5.6-luna")
         self.assertEqual(result.provenance["reasoning_effort"], "medium")

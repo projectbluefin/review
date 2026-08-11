@@ -72,11 +72,11 @@ class CodexHarness:
         if selected_effort not in self.SUPPORTED_EFFORTS:
             raise ValueError(f"unsupported Codex reasoning effort: {selected_effort}")
         lines = payload.splitlines()
-        result = parse_review_result(payload)
-        if result.state == "unparsable":
-            result = self._convert_jsonl(lines)
         if exit_code != 0:
-            return ReviewResult(1, "failed", raw_evidence=payload.splitlines())
+            raw_evidence = self._unparsable(lines).raw_evidence
+            result = ReviewResult(1, "failed", raw_evidence=raw_evidence)
+        else:
+            result = self._convert_jsonl(lines)
         provenance = dict(result.provenance)
         provenance.update({
             "backend": "codex", "model": selected_model,
@@ -89,26 +89,79 @@ class CodexHarness:
                             result.overlap, result.live, result.raw_evidence)
 
     @staticmethod
+    def _unparsable(lines: list[str]) -> ReviewResult:
+        return parse_review_result("", raw_evidence=lines)
+
+    @staticmethod
     def _convert_jsonl(lines: list[str]) -> ReviewResult:
-        """Accept only the official terminal agent-message event envelope."""
-        terminal: ReviewResult | None = None
+        """Accept one complete official Codex JSONL turn and nothing else."""
+        invalid = CodexHarness._unparsable(lines)
+        events: list[dict] = []
         for line in lines:
             try:
                 event = json.loads(line)
             except (TypeError, ValueError, json.JSONDecodeError):
-                continue
-            if not isinstance(event, dict) or event.get("type") != "item.completed":
-                continue
+                return invalid
+            if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+                return invalid
+            events.append(event)
+
+        if len(events) < 4:
+            return invalid
+        thread_started = events[0]
+        if (
+            thread_started.get("type") != "thread.started"
+            or not isinstance(thread_started.get("thread_id"), str)
+            or not thread_started["thread_id"].strip()
+            or events[1].get("type") != "turn.started"
+        ):
+            return invalid
+
+        event_types = [event["type"] for event in events]
+        if (
+            event_types.count("thread.started") != 1
+            or event_types.count("turn.started") != 1
+            or event_types.count("turn.completed") != 1
+            or event_types[-1] != "turn.completed"
+            or any(
+                event_type.startswith("turn.")
+                and event_type not in {"turn.started", "turn.completed"}
+                for event_type in event_types
+            )
+        ):
+            return invalid
+        if not isinstance(events[-1].get("usage"), dict):
+            return invalid
+
+        terminal_event = events[-2]
+        terminal_item = terminal_event.get("item")
+        if (
+            terminal_event.get("type") != "item.completed"
+            or not isinstance(terminal_item, dict)
+            or terminal_item.get("type") != "agent_message"
+            or not isinstance(terminal_item.get("id"), str)
+            or not terminal_item["id"].strip()
+            or not isinstance(terminal_item.get("text"), str)
+        ):
+            return invalid
+        terminal = parse_review_result(terminal_item["text"])
+        if terminal.state == "unparsable":
+            return invalid
+
+        result_positions: list[int] = []
+        for index, event in enumerate(events):
             item = event.get("item")
-            if not isinstance(item, dict) or item.get("type") != "agent_message":
-                continue
-            text = item.get("text")
-            if not isinstance(text, str):
-                continue
-            candidate = parse_review_result(text)
-            if candidate.state != "unparsable":
-                terminal = candidate
-        return terminal or ReviewResult(1, "unparsable", raw_evidence=lines)
+            if (
+                event.get("type") == "item.completed"
+                and isinstance(item, dict)
+                and item.get("type") == "agent_message"
+                and isinstance(item.get("text"), str)
+                and parse_review_result(item["text"]).state != "unparsable"
+            ):
+                result_positions.append(index)
+        if result_positions != [len(events) - 2]:
+            return invalid
+        return terminal
 
     def stream(self, binding: ReviewRequest, *, prompt: str,
                on_line: Callable[[str], None], effort: str | None = None,
