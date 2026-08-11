@@ -1705,7 +1705,7 @@ async def main() -> int:
     check(
         outcomes == [
             "complete", "complete", "incomplete", "incomplete", "failed",
-            "complete", "incomplete", "complete", "stopped", "failed",
+            "complete", "incomplete", "complete", "stopped", "error",
         ],
         f"every review must be traced with its outcome, got {outcomes}",
     )
