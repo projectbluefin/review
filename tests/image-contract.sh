@@ -251,7 +251,12 @@ require tests/image-audit.sh \
   'projectbluefin/fsdk-containers' \
   'must contain exactly linux/amd64 and linux/arm64 manifests' \
   '--require-github-attestation' \
-  'org.opencontainers.image.base.digest'
+  'org.opencontainers.image.base.digest' \
+  'native arm64 runtime measurement is tracked by #77'
+
+forbid tests/image-audit.sh \
+  'native arm64 runtime measurement is #87' \
+  'slot+=" — #87"'
 
 # Host setup and the image relay exchange the same contributor protocol, so
 # their pinned Hive revisions must remain exactly aligned.
@@ -538,14 +543,15 @@ require .github/workflows/publish-compat-image.yml \
   'attestations: write' \
   'id-token: write' \
   'IMAGE: ghcr.io/projectbluefin/review' \
+  'ARM64_IMAGE: ghcr.io/${{ github.repository }}' \
   'Derive review image metadata' \
   'tags: review:smoke' \
   '["/usr/local/bin/review-entrypoint"]' \
   'secrets: |' \
   "github_token=\${{ secrets.GITHUB_TOKEN }}" \
   'Resolve official Goose canary asset identities' \
-  "GOOSE_X86_64_SHA256=\${{ steps.goose.outputs.x86_64_sha256 }}" \
-  "GOOSE_AARCH64_SHA256=\${{ steps.goose.outputs.aarch64_sha256 }}" \
+  "GOOSE_X86_64_SHA256=\${{ needs.resolve-goose.outputs.x86_64_sha256 }}" \
+  "GOOSE_AARCH64_SHA256=\${{ needs.resolve-goose.outputs.aarch64_sha256 }}" \
   'org.opencontainers.image.title=Bluefin review contributor' \
   'org.opencontainers.image.description=Foreground contributor runtime for projectbluefin/review.' \
   'org.opencontainers.image.base.name=${{ steps.metadata.outputs.base_name }}' \
@@ -560,6 +566,39 @@ require .github/workflows/publish-compat-image.yml \
   '--require-attestations' \
   '--require-github-attestation' \
   '--attestation-repository "${GITHUB_REPOSITORY}"'
+
+# Native arm64 runtime evidence is the gate for the same-revision stable
+# publication. The workflow must prove the host, engine, and built container
+# architecture before the existing audit accepts any runtime evidence.
+# shellcheck disable=SC2016 # Literal workflow text, not shell expansion.
+require .github/workflows/publish-compat-image.yml \
+  'resolve-goose:' \
+  'arm64-runtime:' \
+  'needs: [resolve-goose]' \
+  'runs-on: ubuntu-24.04-arm' \
+  'Prove native arm64 host and engine' \
+  'host_arch="$(uname -m)"' \
+  'engine_arch="$(docker info --format' \
+  'Build native arm64 smoke image' \
+  'platforms: linux/arm64' \
+  'push: true' \
+  'tags: ${{ env.ARM64_IMAGE }}:arm64-smoke-' \
+  'DERIVED_IMAGE: ${{ env.ARM64_IMAGE }}@${{ steps.arm64_build.outputs.digest }}' \
+  'GOOSE_X86_64_SHA256=${{ needs.resolve-goose.outputs.x86_64_sha256 }}' \
+  'GOOSE_AARCH64_SHA256=${{ needs.resolve-goose.outputs.aarch64_sha256 }}' \
+  'docker image inspect "$DERIVED_IMAGE"' \
+  'docker run --rm --entrypoint /usr/bin/uname "$DERIVED_IMAGE" -m' \
+  'cat "$RUNNER_TEMP/review-image-audit-arm64.md" >> "$GITHUB_STEP_SUMMARY"' \
+  'bash tests/image-audit.sh --verify-base-evidence' \
+  'bash tests/image-audit.sh --derived "$DERIVED_IMAGE"' \
+  '--report "$RUNNER_TEMP/review-image-audit-arm64.md"' \
+  "if: github.repository == 'projectbluefin/review'" \
+  'needs: [arm64-runtime, resolve-goose]'
+
+forbid .github/workflows/publish-compat-image.yml \
+  'docker/setup-qemu-action' \
+  '--privileged' \
+  'docker run --privileged'
 
 # ':-/config}' and ':-/workspace}' are mount points Hive never used.
 forbid image/entrypoint.sh \

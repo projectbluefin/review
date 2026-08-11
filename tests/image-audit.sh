@@ -664,7 +664,7 @@ done
 
 # Record both platform slots explicitly. A platform with no native host is
 # unavailable evidence, never a skipped row and never a QEMU substitute;
-# native arm64 runtime measurement is tracked by #87.
+# native arm64 runtime measurement is tracked by #77.
 append ""
 append "#### Runtime evidence by platform"
 append ""
@@ -681,7 +681,7 @@ for platform in amd64 arm64; do
       slot="**native** (this host)"
     else
       slot="unavailable (no native linux/${platform} host)"
-      [[ "$platform" == arm64 ]] && slot+=" — #87"
+      [[ "$platform" == arm64 ]] && slot+=" — #77"
     fi
     if [[ "$image_kind" == base ]]; then
       base_slot="$slot"

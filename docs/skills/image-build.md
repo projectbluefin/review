@@ -1,7 +1,7 @@
 ---
 name: image-build
 version: "2.17"
-last_updated: 2026-08-07
+last_updated: 2026-08-11
 id: image-build
 one_line_purpose: Derive and pin the review contributor image safely.
 entry_point: docs/skills/image-build.md
@@ -167,7 +167,7 @@ fix.
     pinned source. Its report states only current exact-digest facts; retired
     comparisons stay in #70/#87. Both platform slots are always recorded —
     native or unavailable — and an unavailable slot is never a skipped row or
-    a QEMU substitute (native arm64 runtime measurement is #87). `--report
+    a QEMU substitute (native arm64 runtime measurement is #77). `--report
     FILE` writes the Markdown report to a file; reports are generated output
     and stay out of git (`image-audit-report.md` is ignored).
     Publishing requires BuildKit `provenance: mode=max` and `sbom: true`, a
@@ -175,6 +175,13 @@ fix.
     verification of both platforms, OCI labels/annotations, both BuildKit
     attestations, and the GitHub attestation. Never call QEMU runtime proof
     native.
+    The publish workflow's `arm64-runtime` job runs on GitHub's
+    `ubuntu-24.04-arm` runner, proves the host, Docker engine, and container
+    architecture, builds an immutable arm64 smoke image from the shared Goose
+    identities, and runs the base and derived audit modes. Its generated report
+    in the GitHub Actions step summary is the native acceptance artifact.
+    The `publish` job needs that native job before it can move `:stable`; the
+    existing amd64 smoke and validation remain separate evidence.
 12. Measure compressed manifest, unpacked filesystem, layer/directory deltas,
     cold/warm builds, and native amd64/arm64 runtime behavior before and after
     each composition change. Deleting inherited files in a later layer does not

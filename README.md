@@ -668,6 +668,14 @@ input's GitHub attestation and its linux/amd64+linux/arm64 manifest before a
 build; after publication it verifies both review attestations, labels,
 annotations, subject digest, and exactly those two platforms.
 
+Before `:stable` advances, `publish-compat-image.yml` runs the native
+`arm64-runtime` job on GitHub's `ubuntu-24.04-arm` runner. It proves the host,
+Docker engine, and container architecture, builds an immutable arm64 smoke
+image from the same resolved Goose identities as the final publish, and runs
+the existing base and derived image audits. The generated arm64 audit report in
+the GitHub Actions step summary is the native acceptance artifact; local amd64
+validation cannot supply that evidence.
+
 The pinned Hive runtime preserves an existing `~/.config/goose/config.yaml`.
 The image still uses `GOOSE_PATH_ROOT=/opt/bluefin/goose` to keep controlled
 Goose policy, data, and state separate from Hive's runtime-owned config. Hive
@@ -763,7 +771,9 @@ and network access. It defaults to `docker`; on a podman host set
 `CONTAINER_ENGINE=podman`. Use `--verify-base-evidence` to check the pinned
 FSDK input alone, or `--derived <image>` to audit a build. The report records
 each platform's runtime evidence as native or unavailable — never QEMU —
-and `--report image-audit-report.md` writes it to a git-ignored file:
+and `--report image-audit-report.md` writes it to a git-ignored file. Native
+arm64 acceptance comes from the `arm64-runtime` job in
+`.github/workflows/publish-compat-image.yml` and its generated step summary:
 
 ```bash
 CONTAINER_ENGINE=podman bash tests/image-audit.sh \
