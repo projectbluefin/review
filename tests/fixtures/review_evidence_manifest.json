@@ -1,0 +1,14 @@
+{
+  "owner": "octo",
+  "repository": "sample",
+  "pull_request_number": 17,
+  "base_sha": "0123456789abcdef0123456789abcdef01234567",
+  "head_sha": "89abcdef0123456789abcdef0123456789abcdef",
+  "actor": "maintainer",
+  "tenant": "octo-tenant",
+  "installation": "github-installation-7",
+  "generated_at": "2026-08-11T00:00:00Z",
+  "focus": "review correctness",
+  "steering": "read-only evidence",
+  "version": 1
+}
