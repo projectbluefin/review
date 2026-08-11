@@ -72,6 +72,7 @@ class HarnessContract(unittest.TestCase):
         self.assertEqual(result.state, "complete")
         self.assertEqual(result.provenance["backend"], "codex")
         self.assertEqual(result.provenance["model"], "gpt-5.6-luna")
+        self.assertEqual(result.provenance["reasoning_effort"], "low")
         self.assertEqual(result.provenance["repository"], "project/review")
 
     def test_nonzero_codex_exit_fails_closed(self):

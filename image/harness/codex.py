@@ -73,7 +73,7 @@ class CodexHarness:
             "backend": "codex", "model": self.model,
             "auth": "subscription-oauth", "repository": f"{binding.owner}/{binding.repository}",
             "pull_request": binding.pull_request_number, "base_sha": binding.base_sha,
-            "head_sha": binding.head_sha,
+            "head_sha": binding.head_sha, "reasoning_effort": self.effort,
         })
         return ReviewResult(result.version, result.state, result.counts,
                             result.findings, result.verification, provenance,
