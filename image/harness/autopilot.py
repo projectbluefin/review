@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .codex import CodexHarness
+from .goose import GooseHarness
 from tui.review_evidence_manifest import ReviewRequest
 from .registry import Availability
 from tui.review_result import ReviewResult
@@ -24,6 +25,16 @@ class Discovery:
     model: str
     reasoning: str
     availability: Availability
+
+
+@dataclass(frozen=True)
+class HarnessOption:
+    harness: object
+    discovery: Discovery
+
+    @property
+    def status(self) -> str:
+        return self.discovery.availability.value
 
 
 @dataclass(frozen=True)
@@ -82,6 +93,29 @@ def discover() -> Discovery:
     model = "gpt-5.6-luna"
     reasoning = "low, medium, high, max"
     return Discovery("codex", installed, auth, capability, model, reasoning, availability)
+
+
+def discover_all() -> list[HarnessOption]:
+    """Discover every registered maintainer harness without starting inference."""
+    goose = GooseHarness()
+    return [
+        HarnessOption(goose, Discovery(
+            "goose", "ready", "ready", "ready", "gpt-5.6-luna", "low", goose.availability,
+        )),
+        HarnessOption(CodexHarness(), discover()),
+    ]
+
+
+def choose_option(repository: str, preferences: dict[str, Preference],
+                  options: list[HarnessOption], configured: Preference | None = None) -> HarnessOption | None:
+    by_id = {option.harness.branding.harness_id: option for option in options}
+    candidates = [preferences.get(repository), preferences.get("*"), configured,
+                  Preference("codex", "gpt-5.6-luna", "low")]
+    for candidate in candidates:
+        option = by_id.get(candidate.harness_id) if candidate else None
+        if option and option.discovery.availability is Availability.READY:
+            return option
+    return next((option for option in options if option.discovery.availability is Availability.READY), None)
 
 
 def choose(repository: str, preferences: dict[str, Preference], discovery: Discovery,

@@ -46,7 +46,9 @@ from textual.widgets import (
 from review_result import ReviewResult, adapt_current_engine
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from harness.codex import CodexHarness
-from harness.autopilot import discover
+from harness.autopilot import (HarnessOption, Preference, can_remember,
+                               choose_option, discover_all, load_preferences,
+                               remember_success)
 from review_evidence_manifest import ReviewRequest
 from harness.registry import Availability
 
@@ -661,17 +663,19 @@ class HarnessTakeoff(ModalScreen[str | None]):
 
     BINDINGS = [Binding("escape", "dismiss(None)", "cancel")]
 
-    def __init__(self, initial: str = "codex") -> None:
+    def __init__(self, options: list[HarnessOption], initial: HarnessOption | None) -> None:
         super().__init__()
+        self.options = options
         self.initial = initial
 
     def compose(self) -> ComposeResult:
         with Vertical(id="takeoff-box"):
             yield Label("Select review harness — Start runs only after confirmation")
             yield Select(
-                [("Codex CLI — gpt-5.6-luna / low", "codex"),
-                 ("Goose", "goose")],
-                value=self.initial,
+                [(f"{option.harness.branding.terminal_badge} {option.harness.branding.display_name} · "
+                  f"{option.status} · {option.discovery.model} / {option.discovery.reasoning}",
+                  option.harness.branding.harness_id) for option in self.options],
+                value=(self.initial.harness.branding.harness_id if self.initial else Select.BLANK),
                 id="takeoff-select",
             )
             yield Button("Start", id="takeoff-start", variant="primary")
@@ -685,7 +689,18 @@ class HarnessTakeoff(ModalScreen[str | None]):
             value = self.query_one("#takeoff-select", Select).value
             self.dismiss(str(value) if value else None)
         elif event.button.id == "takeoff-diagnostics":
-            self.notify("Codex: binary/auth/model/effort discovery is shown in the cockpit.")
+            option = self.selected_option()
+            if option:
+                self.notify(
+                    f"{option.harness.branding.display_name}: {option.status}; "
+                    f"auth={option.discovery.auth}; model={option.discovery.model}; "
+                    f"effort={option.discovery.reasoning}"
+                )
+
+    def selected_option(self) -> HarnessOption | None:
+        value = self.query_one("#takeoff-select", Select).value
+        return next((option for option in self.options
+                     if option.harness.branding.harness_id == value), None)
 
 
 class ReviewScreen(Screen):
@@ -834,6 +849,18 @@ class ReviewScreen(Screen):
                 overlap=stop.overlap,
                 live=live_review_context(stop.live),
             )
+        if ACTIVE_BACKEND == "codex" and len(str(stop.live.get("baseRefOid") or "")) == 40 and len(str(stop.live.get("headRefOid") or "")) == 40:
+            request = ReviewRequest(
+                *stop.repository.split("/", 1), stop.number,
+                stop.live["baseRefOid"], stop.live["headRefOid"],
+                actor="maintainer", tenant="review", generated_at="dashboard",
+            )
+            if can_remember(result, request):
+                remember_success(
+                    load_preferences(), stop.repository,
+                    Preference("codex", result.provenance.get("model", "gpt-5.6-luna"),
+                               result.provenance.get("reasoning_effort", "low")),
+                )
         if error:
             outcome, state = "error", f"FAILED to start: {error}"
         elif self.stop_requested:
@@ -1072,6 +1099,7 @@ class ReviewDashboard(App):
         self.reselect: set[str] = set()
         self.all_items: list[dict] = []
         self.harness_state = "CHECKING"
+        self.harness_options: list[HarnessOption] = []
 
     # ── layout ────────────────────────────────────────────────────────────
 
@@ -1108,10 +1136,12 @@ class ReviewDashboard(App):
     @work(thread=True)
     def discover_harness(self) -> None:
         """Probe Codex off the UI thread; discovery never starts inference."""
-        result = discover()
-        self.call_from_thread(self.harness_loaded, result)
+        options = discover_all()
+        self.call_from_thread(self.harness_loaded, options)
 
-    def harness_loaded(self, result) -> None:
+    def harness_loaded(self, options: list[HarnessOption]) -> None:
+        self.harness_options = options
+        result = next((option.discovery for option in options if option.harness.branding.harness_id == ACTIVE_BACKEND), options[0].discovery)
         self.harness_state = result.availability.value
         label = self.query_one("#harness-status", Static)
         if result.availability is Availability.READY:
@@ -1221,12 +1251,14 @@ class ReviewDashboard(App):
 
     def start_review(self, stop: Stop, steer: str = "") -> None:
         if ACTIVE_BACKEND == "codex":
+            options = self.harness_options or discover_all()
+            initial = choose_option(stop.repository, load_preferences(), options)
             def selected(backend: str | None) -> None:
                 global ACTIVE_BACKEND
                 if backend:
                     ACTIVE_BACKEND = backend
                     self.push_screen(ReviewScreen(stop, steer=steer))
-            self.push_screen(HarnessTakeoff(ACTIVE_BACKEND), selected)
+            self.push_screen(HarnessTakeoff(options, initial), selected)
             return
         self.push_screen(ReviewScreen(stop, steer=steer))
 

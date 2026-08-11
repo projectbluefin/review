@@ -7,7 +7,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "image"))
 from harness.autopilot import (Discovery, Preference, can_remember, choose,
-                               load_preferences, remember_success, stale_choice)  # noqa: E402
+                               choose_option, discover_all, load_preferences,
+                               remember_success, stale_choice)  # noqa: E402
 from harness.registry import Availability  # noqa: E402
 from tui.review_evidence_manifest import ReviewRequest  # noqa: E402
 from tui.review_result import ReviewResult  # noqa: E402
@@ -54,6 +55,21 @@ class AutopilotContract(unittest.TestCase):
         text = tui.read_text() + service.read_text()
         for state in ("CHECKING", "READY", "UNAVAILABLE_BINARY", "Sign in", "Diagnostics"):
             self.assertIn(state, text)
+
+    def test_registry_drives_metadata_and_recommended_selection(self):
+        options = discover_all()
+        self.assertTrue({option.harness.branding.harness_id for option in options} >= {"goose", "codex"})
+        self.assertTrue(all(len(option.harness.branding.terminal_badge) == 2 for option in options))
+        selected = choose_option("org/repo", {}, options)
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.harness.branding.harness_id, "codex")
+
+    def test_remembered_unavailable_choice_does_not_silently_fallback(self):
+        options = discover_all()
+        remembered = {"org/repo": Preference("codex", "gpt-5.6-luna", "low")}
+        selected = choose_option("org/repo", remembered, options)
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.harness.branding.harness_id, "codex")
 
 
 if __name__ == "__main__":
