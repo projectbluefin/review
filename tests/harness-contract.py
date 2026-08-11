@@ -45,6 +45,30 @@ class HarnessContract(unittest.TestCase):
         self.assertEqual(self.binding.pull_request, 166)
         self.assertEqual((self.binding.base_sha, self.binding.head_sha), ("base", "head"))
 
+    def test_codex_command_binds_context_model_effort_and_json(self):
+        adapter = CodexHarness(availability=Availability.READY)
+        command = adapter.command(self.binding, prompt="inspect", effort="low")
+        self.assertEqual(command[:3], ["codex", "exec", "--json"])
+        self.assertIn("--model", command)
+        self.assertIn("gpt-5.6-luna", command)
+        self.assertIn("model_reasoning_effort=low", command)
+        self.assertIn("project/review#166 base=base head=head", command[-1])
+
+    def test_codex_stream_converts_into_merged_review_result(self):
+        adapter = CodexHarness(availability=Availability.READY)
+        result = adapter.convert(
+            '{"version":1,"state":"complete","counts":{"critical":0,"high":0,"medium":0,"low":0},"findings":[]}',
+            self.binding,
+        )
+        self.assertEqual(result.state, "complete")
+        self.assertEqual(result.provenance["backend"], "codex")
+        self.assertEqual(result.provenance["model"], "gpt-5.6-luna")
+        self.assertEqual(result.provenance["repository"], "project/review")
+
+    def test_codex_cancellation_uses_process_group(self):
+        adapter = CodexHarness(availability=Availability.READY)
+        self.assertTrue(adapter.process_group_cancellation)
+
 
 if __name__ == "__main__":
     unittest.main()

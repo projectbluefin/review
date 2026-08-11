@@ -18,6 +18,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 import urllib.request
 from collections import Counter
@@ -41,6 +42,10 @@ from textual.widgets import (
     Static,
 )
 from review_result import adapt_current_engine
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from harness.codex import CodexHarness
+from harness.autopilot import discover
+from harness.registry import Availability, Binding
 
 QUEUE_URL = os.environ.get(
     "BLUEFIN_REVIEW_QUEUE_URL",
@@ -115,6 +120,9 @@ def action_rank(action: str) -> int:
 # The review engine. It produces a Review Draft and has no approve, merge,
 # comment, or close path of its own, so running it can never mutate GitHub.
 REVIEW_COMMAND = os.environ.get("BLUEFIN_REVIEW_COMMAND", "bluefin-review")
+ACTIVE_BACKEND = os.environ.get("BLUEFIN_REVIEW_BACKEND", "goose")
+if ACTIVE_BACKEND not in {"goose", "codex"}:
+    raise RuntimeError(f"unsupported review backend: {ACTIVE_BACKEND}")
 
 # bluefin-review's exit status for a review whose checks did not all return a
 # verdict. 'goose review' exits 0 in that case and still prints a finding
@@ -681,7 +689,7 @@ class ReviewScreen(Screen):
         yield Header(show_clock=True)
         yield Static(
             f" reviewing {link(stop.key, pr_url(stop.repository, stop.number))}"
-            " — starting…"
+            f" — {ACTIVE_BACKEND} starting…"
             + (f"  steer: {escape(self.steer)}" if self.steer else ""),
             id="review-status",
         )
@@ -696,7 +704,22 @@ class ReviewScreen(Screen):
     @work(thread=True)
     def run_review(self) -> None:
         stop = self.stop_record
-        command = [REVIEW_COMMAND, "pr", stop.repository, str(stop.number)]
+        binding = Binding(
+            stop.repository, stop.number,
+            str(stop.live.get("baseRefOid") or "?"),
+            str(stop.live.get("headRefOid") or "?"),
+        )
+        adapter = CodexHarness(availability=CodexHarness.probe())
+        if ACTIVE_BACKEND == "codex":
+            if adapter.availability is not Availability.READY:
+                self.app.call_from_thread(
+                    self.finish, None,
+                    f"Codex unavailable: {adapter.availability.value}",
+                )
+                return
+            command = adapter.command(binding, prompt="Produce the ReviewResult JSON.")
+        else:
+            command = [REVIEW_COMMAND, "pr", stop.repository, str(stop.number)]
         # Maintainer steering rides the documented additive seam: it is added
         # to the review's instructions, never a replacement for the doctrine.
         environment = dict(os.environ)
@@ -743,15 +766,23 @@ class ReviewScreen(Screen):
         self.finished = True
         stop = self.stop_record
         elapsed = int(time.monotonic() - self.started)
-        result = adapt_current_engine(
-            "\n".join(self.output), code,
-            {"backend": os.environ.get("GOOSE_PROVIDER", "goose"),
-             "model": os.environ.get("GOOSE_MODEL", "gpt-5.6-luna"),
-             "repository": stop.repository, "pull_request": stop.number},
-            verification=live_review_verification(stop.live),
-            overlap=stop.overlap,
-            live=live_review_context(stop.live),
-        )
+        if ACTIVE_BACKEND == "codex":
+            result = CodexHarness(availability=Availability.READY).convert(
+                "\n".join(self.output),
+                Binding(stop.repository, stop.number,
+                        str(stop.live.get("baseRefOid") or "?"),
+                        str(stop.live.get("headRefOid") or "?")),
+            )
+        else:
+            result = adapt_current_engine(
+                "\n".join(self.output), code,
+                {"backend": os.environ.get("GOOSE_PROVIDER", "goose"),
+                 "model": os.environ.get("GOOSE_MODEL", "gpt-5.6-luna"),
+                 "repository": stop.repository, "pull_request": stop.number},
+                verification=live_review_verification(stop.live),
+                overlap=stop.overlap,
+                live=live_review_context(stop.live),
+            )
         if error:
             outcome, state = "error", f"FAILED to start: {error}"
         elif self.stop_requested:
@@ -988,12 +1019,14 @@ class ReviewDashboard(App):
         # the batch you spent a minute building is worse than no refresh.
         self.reselect: set[str] = set()
         self.all_items: list[dict] = []
+        self.harness_state = "CHECKING"
 
     # ── layout ────────────────────────────────────────────────────────────
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static("loading queue…", id="status-bar")
+        yield Static("Harness Autopilot — CHECKING…", id="harness-status")
         with Horizontal():
             with Vertical(id="queue-pane"):
                 yield ListView(id="queue")
@@ -1018,6 +1051,27 @@ class ReviewDashboard(App):
         self.query_one("#queue", ListView).focus()
         self.load_queue()
         self.load_hive()
+        self.discover_harness()
+
+    @work(thread=True)
+    def discover_harness(self) -> None:
+        """Probe Codex off the UI thread; discovery never starts inference."""
+        result = discover()
+        self.call_from_thread(self.harness_loaded, result)
+
+    def harness_loaded(self, result) -> None:
+        self.harness_state = result.availability.value
+        label = self.query_one("#harness-status", Static)
+        if result.availability is Availability.READY:
+            label.update(
+                "Harness Autopilot — READY · Codex / gpt-5.6-luna · "
+                "reason: low · Start requires Enter/click"
+            )
+        else:
+            label.update(
+                f"Harness Autopilot — {result.availability.value} · "
+                "[Diagnostics] [Sign in] [Install] [Retry] · no fallback"
+            )
 
     @work(thread=True)
     def load_hive(self) -> None:
@@ -1265,7 +1319,7 @@ class ReviewDashboard(App):
         live = gh(
             "pr", "view", str(stop.number), "--repo", stop.repository,
             "--json",
-            "author,state,headRefOid,isDraft,mergeable,mergeStateStatus,"
+            "author,state,baseRefOid,headRefOid,isDraft,mergeable,mergeStateStatus,"
             "reviewDecision,additions,deletions,changedFiles,updatedAt,"
             "closingIssuesReferences,statusCheckRollup,labels,reviews",
         )
