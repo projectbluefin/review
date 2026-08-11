@@ -60,6 +60,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 tests/harness-contract.py
+          python3 tests/autopilot-contract.py
 
       - name: PR queue generator contract
         run: |
