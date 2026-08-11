@@ -704,18 +704,18 @@ class ReviewScreen(Screen):
     @work(thread=True)
     def run_review(self) -> None:
         stop = self.stop_record
-        base_sha = str(stop.live.get("baseRefOid") or "")
-        head_sha = str(stop.live.get("headRefOid") or "")
-        if (len(base_sha) != 40 or len(head_sha) != 40 or
-                any(char not in "0123456789abcdef" for char in (base_sha + head_sha).lower())):
-            self.app.call_from_thread(
-                self.finish, None,
-                "Codex unavailable: exact PR base/head is unavailable",
-            )
-            return
-        binding = HarnessBinding(stop.repository, stop.number, base_sha, head_sha)
-        adapter = CodexHarness(availability=CodexHarness.probe())
         if ACTIVE_BACKEND == "codex":
+            base_sha = str(stop.live.get("baseRefOid") or "")
+            head_sha = str(stop.live.get("headRefOid") or "")
+            if (len(base_sha) != 40 or len(head_sha) != 40 or
+                    any(char not in "0123456789abcdef" for char in (base_sha + head_sha).lower())):
+                self.app.call_from_thread(
+                    self.finish, None,
+                    "Codex unavailable: exact PR base/head is unavailable",
+                )
+                return
+            binding = HarnessBinding(stop.repository, stop.number, base_sha, head_sha)
+            adapter = CodexHarness(availability=CodexHarness.probe())
             if adapter.availability is not Availability.READY:
                 self.app.call_from_thread(
                     self.finish, None,
