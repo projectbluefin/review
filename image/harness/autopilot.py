@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Iterable
 
 from .codex import CodexHarness
-from .registry import Availability, Binding
+from tui.review_evidence_manifest import ReviewRequest
+from .registry import Availability
 from tui.review_result import ReviewResult
 
 
@@ -102,12 +103,12 @@ def stale_choice(repository: str, preferences: dict[str, Preference],
     return None
 
 
-def can_remember(result: ReviewResult, binding: Binding) -> bool:
+def can_remember(result: ReviewResult, binding: ReviewRequest) -> bool:
     if result.state not in ("complete", "findings"):
         return False
     provenance = result.provenance
     return all(provenance.get(key) == value for key, value in {
-        "backend": "codex", "repository": binding.repository,
-        "pull_request": binding.pull_request, "base_sha": binding.base_sha,
+        "backend": "codex", "repository": f"{binding.owner}/{binding.repository}",
+        "pull_request": binding.pull_request_number, "base_sha": binding.base_sha,
         "head_sha": binding.head_sha,
     }.items())

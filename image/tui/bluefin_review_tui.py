@@ -45,7 +45,8 @@ from review_result import ReviewResult, adapt_current_engine
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from harness.codex import CodexHarness
 from harness.autopilot import discover
-from harness.registry import Availability, Binding as HarnessBinding
+from review_evidence_manifest import ReviewRequest
+from harness.registry import Availability
 
 QUEUE_URL = os.environ.get(
     "BLUEFIN_REVIEW_QUEUE_URL",
@@ -714,7 +715,11 @@ class ReviewScreen(Screen):
                     "Codex unavailable: exact PR base/head is unavailable",
                 )
                 return
-            binding = HarnessBinding(stop.repository, stop.number, base_sha, head_sha)
+            owner, repository = stop.repository.split("/", 1)
+            binding = ReviewRequest(
+                owner, repository, stop.number, base_sha, head_sha,
+                actor="maintainer", tenant="review", generated_at="dashboard",
+            )
             adapter = CodexHarness(availability=CodexHarness.probe())
             if adapter.availability is not Availability.READY:
                 self.app.call_from_thread(
@@ -779,7 +784,10 @@ class ReviewScreen(Screen):
             else:
                 result = CodexHarness(availability=Availability.READY).convert(
                     "\n".join(self.output),
-                    HarnessBinding(stop.repository, stop.number, base_sha, head_sha),
+                    ReviewRequest(
+                        *stop.repository.split("/", 1), stop.number, base_sha, head_sha,
+                        actor="maintainer", tenant="review", generated_at="dashboard",
+                    ),
                     code or 0,
                 )
         else:

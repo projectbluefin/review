@@ -7,7 +7,8 @@ import subprocess
 from dataclasses import dataclass
 from typing import Callable
 
-from .registry import Availability, Binding, HarnessBranding, HarnessCapabilities
+from tui.review_evidence_manifest import ReviewRequest
+from .registry import Availability, HarnessBranding, HarnessCapabilities
 
 try:
     from tui.review_result import ReviewResult, parse_review_result
@@ -45,20 +46,20 @@ class CodexHarness:
         )
         return Availability.READY if check.returncode == 0 else Availability.UNAVAILABLE_AUTH
 
-    def command(self, binding: Binding, *, prompt: str,
+    def command(self, binding: ReviewRequest, *, prompt: str,
                 effort: str | None = None) -> list[str]:
         selected_effort = effort or self.effort
         if selected_effort not in self.SUPPORTED_EFFORTS:
             raise ValueError(f"unsupported Codex reasoning effort: {selected_effort}")
         context = (
-            f"{binding.repository}#{binding.pull_request} "
+            f"{binding.owner}/{binding.repository}#{binding.pull_request_number} "
             f"base={binding.base_sha} head={binding.head_sha}"
         )
         return [self.executable, "exec", "--json", "--model", self.model,
                 "--config", f"model_reasoning_effort={selected_effort}",
                 f"Review exact binding {context}. {prompt}"]
 
-    def convert(self, payload: str, binding: Binding, exit_code: int = 0) -> ReviewResult:
+    def convert(self, payload: str, binding: ReviewRequest, exit_code: int = 0) -> ReviewResult:
         # ``codex exec --json`` is a JSONL progress stream; the final object
         # is the ReviewResult payload.
         result = parse_review_result(payload.splitlines()[-1] if payload.splitlines() else payload)
@@ -67,15 +68,15 @@ class CodexHarness:
         provenance = dict(result.provenance)
         provenance.update({
             "backend": "codex", "model": self.model,
-            "auth": "subscription-oauth", "repository": binding.repository,
-            "pull_request": binding.pull_request, "base_sha": binding.base_sha,
+            "auth": "subscription-oauth", "repository": f"{binding.owner}/{binding.repository}",
+            "pull_request": binding.pull_request_number, "base_sha": binding.base_sha,
             "head_sha": binding.head_sha,
         })
         return ReviewResult(result.version, result.state, result.counts,
                             result.findings, result.verification, provenance,
                             result.overlap, result.live, result.raw_evidence)
 
-    def stream(self, binding: Binding, *, prompt: str,
+    def stream(self, binding: ReviewRequest, *, prompt: str,
                on_line: Callable[[str], None], effort: str | None = None) -> ReviewResult:
         process = subprocess.Popen(
             self.command(binding, prompt=prompt, effort=effort),
@@ -94,7 +95,7 @@ class CodexHarness:
     def cancel(process: subprocess.Popen) -> None:
         os.killpg(process.pid, signal.SIGTERM)
 
-    def invoke(self, binding: Binding, *, prompt: str, model: str | None = None,
+    def invoke(self, binding: ReviewRequest, *, prompt: str, model: str | None = None,
                effort: str | None = None, steer: str | None = None) -> None:
         if self.availability is not Availability.READY:
             raise RuntimeError(f"codex unavailable: {self.availability.value}")

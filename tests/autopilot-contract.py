@@ -8,7 +8,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1] / "image"))
 from harness.autopilot import (Discovery, Preference, can_remember, choose,
                                load_preferences, remember_success, stale_choice)  # noqa: E402
-from harness.registry import Availability, Binding  # noqa: E402
+from harness.registry import Availability  # noqa: E402
+from tui.review_evidence_manifest import ReviewRequest  # noqa: E402
 from tui.review_result import ReviewResult  # noqa: E402
 
 
@@ -25,7 +26,7 @@ class AutopilotContract(unittest.TestCase):
         self.assertIn("confirm a replacement", stale_choice("org/repo", {"*": Preference("codex", "gpt-5.6-luna", "low")}, missing))
 
     def test_only_valid_terminal_exact_bound_result_can_be_remembered(self):
-        binding = Binding("org/repo", 166, "a" * 40, "b" * 40)
+        binding = ReviewRequest("org", "repo", 166, "a" * 40, "b" * 40, "a", "t", generated_at="now")
         result = ReviewResult(1, "complete", provenance={
             "backend": "codex", "repository": "org/repo", "pull_request": 166,
             "base_sha": "a" * 40, "head_sha": "b" * 40,

@@ -8,12 +8,13 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "image"))
 
 from harness.codex import CodexHarness  # noqa: E402
 from harness.goose import GooseHarness  # noqa: E402
-from harness.registry import Availability, Binding, HarnessRegistry  # noqa: E402
+from harness.registry import Availability, HarnessRegistry  # noqa: E402
+from tui.review_evidence_manifest import ReviewRequest  # noqa: E402
 
 
 class HarnessContract(unittest.TestCase):
     def setUp(self):
-        self.binding = Binding("project/review", 166, "a" * 40, "b" * 40)
+        self.binding = ReviewRequest("project", "review", 166, "a" * 40, "b" * 40, "maintainer", "review", generated_at="test")
 
     def test_registry_exposes_both_adapters_without_fallback(self):
         registry = HarnessRegistry()
@@ -40,8 +41,8 @@ class HarnessContract(unittest.TestCase):
         self.assertTrue(adapter.capabilities.provenance)
 
     def test_binding_is_exact_context_shape(self):
-        self.assertEqual(self.binding.repository, "project/review")
-        self.assertEqual(self.binding.pull_request, 166)
+        self.assertEqual(f"{self.binding.owner}/{self.binding.repository}", "project/review")
+        self.assertEqual(self.binding.pull_request_number, 166)
         self.assertEqual((self.binding.base_sha, self.binding.head_sha), ("a" * 40, "b" * 40))
 
     def test_codex_command_binds_context_model_effort_and_json(self):
@@ -71,7 +72,7 @@ class HarnessContract(unittest.TestCase):
 
     def test_binding_rejects_non_sha_placeholders(self):
         with self.assertRaises(ValueError):
-            Binding("project/review", 166, "?" * 40, "b" * 40)
+            ReviewRequest("project", "review", 166, "?" * 40, "b" * 40, "maintainer", "review", generated_at="test")
 
     def test_branding_has_badge_full_name_accessible_label_and_source(self):
         for harness in (GooseHarness(), CodexHarness()):

@@ -7,6 +7,7 @@ requested harness is unavailable.
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping, Protocol, Sequence
+from tui.review_evidence_manifest import ReviewRequest
 
 
 class Availability(str, Enum):
@@ -15,20 +16,6 @@ class Availability(str, Enum):
     UNAVAILABLE_AUTH = "UNAVAILABLE_AUTH"
     UNSUPPORTED_CAPABILITY = "UNSUPPORTED_CAPABILITY"
     FAILED_CONFORMANCE = "FAILED_CONFORMANCE"
-
-
-@dataclass(frozen=True)
-class Binding:
-    repository: str
-    pull_request: int
-    base_sha: str
-    head_sha: str
-
-    def __post_init__(self) -> None:
-        shas = self.base_sha + self.head_sha
-        if (len(self.base_sha) != 40 or len(self.head_sha) != 40 or
-                any(char not in "0123456789abcdef" for char in shas.lower())):
-            raise ValueError("base and head must be 40-character Git SHAs")
 
 
 @dataclass(frozen=True)
@@ -66,7 +53,7 @@ class Harness(Protocol):
     availability: Availability
     capabilities: HarnessCapabilities
 
-    def invoke(self, binding: Binding, *, prompt: str, model: str, effort: str,
+    def invoke(self, binding: ReviewRequest, *, prompt: str, model: str, effort: str,
                steer: str | None = None) -> Any: ...
 
 

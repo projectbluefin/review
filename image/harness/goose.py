@@ -2,7 +2,8 @@
 
 from dataclasses import dataclass
 
-from .registry import Availability, Binding, HarnessBranding, HarnessCapabilities
+from tui.review_evidence_manifest import ReviewRequest
+from .registry import Availability, HarnessBranding, HarnessCapabilities
 
 
 @dataclass
@@ -19,7 +20,7 @@ class GooseHarness:
         provenance=True,
     )
 
-    def invoke(self, binding: Binding, *, prompt: str, model: str,
+    def invoke(self, binding: ReviewRequest, *, prompt: str, model: str,
                effort: str, steer: str | None = None) -> None:
         """The launcher remains the owner of Goose invocation behavior."""
         raise NotImplementedError("use the existing bluefin-review Goose launcher")
