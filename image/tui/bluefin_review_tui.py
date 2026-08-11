@@ -39,7 +39,9 @@ from textual.widgets import (
     ListItem,
     ListView,
     RichLog,
+    Button,
     Static,
+    Select,
 )
 from review_result import ReviewResult, adapt_current_engine
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -654,6 +656,38 @@ class DiffScreen(ModalScreen[None]):
         body.update(self.rendered)
 
 
+class HarnessTakeoff(ModalScreen[str | None]):
+    """One explicit maintainer choice before a selected harness starts."""
+
+    BINDINGS = [Binding("escape", "dismiss(None)", "cancel")]
+
+    def __init__(self, initial: str = "codex") -> None:
+        super().__init__()
+        self.initial = initial
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="takeoff-box"):
+            yield Label("Select review harness — Start runs only after confirmation")
+            yield Select(
+                [("Codex CLI — gpt-5.6-luna / low", "codex"),
+                 ("Goose", "goose")],
+                value=self.initial,
+                id="takeoff-select",
+            )
+            yield Button("Start", id="takeoff-start", variant="primary")
+            yield Button("Diagnostics", id="takeoff-diagnostics")
+
+    def on_mount(self) -> None:
+        self.query_one("#takeoff-select", Select).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "takeoff-start":
+            value = self.query_one("#takeoff-select", Select).value
+            self.dismiss(str(value) if value else None)
+        elif event.button.id == "takeoff-diagnostics":
+            self.notify("Codex: binary/auth/model/effort discovery is shown in the cockpit.")
+
+
 class ReviewScreen(Screen):
     """One Goose review, streamed live.
 
@@ -984,6 +1018,7 @@ class ReviewDashboard(App):
         background: $error; color: $text; text-style: bold;
     }
     #review-log { border: solid $secondary; }
+    #takeoff-box { border: heavy cyan; background: $surface; width: 80%; height: auto; padding: 1 2; margin: 4 4; }
     """
 
     BINDINGS = [
@@ -1181,6 +1216,17 @@ class ReviewDashboard(App):
         self.query_one("#queue", ListView).focus()
         stop = self.current
         if not stop or not steer:
+            return
+        self.start_review(stop, steer)
+
+    def start_review(self, stop: Stop, steer: str = "") -> None:
+        if ACTIVE_BACKEND == "codex":
+            def selected(backend: str | None) -> None:
+                global ACTIVE_BACKEND
+                if backend:
+                    ACTIVE_BACKEND = backend
+                    self.push_screen(ReviewScreen(stop, steer=steer))
+            self.push_screen(HarnessTakeoff(ACTIVE_BACKEND), selected)
             return
         self.push_screen(ReviewScreen(stop, steer=steer))
 
@@ -1689,7 +1735,7 @@ class ReviewDashboard(App):
     def action_review(self) -> None:
         stop = self.current
         if stop:
-            self.push_screen(ReviewScreen(stop))
+            self.start_review(stop)
 
     def leave_review(self, stop: Stop) -> None:
         """Submit a review to GitHub: approve, request changes, or comment.
