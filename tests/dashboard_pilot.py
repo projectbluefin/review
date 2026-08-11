@@ -249,7 +249,8 @@ async def main() -> int:
                     break
                 await pilot.pause(0.05)
             app.stops[0].live = {
-                "headRefOid": "0123456789abcdef",
+                "baseRefOid": "fedcba9876543210fedcba9876543210fedcba98",
+                "headRefOid": "0123456789abcdef0123456789abcdef01234567",
                 "isDraft": False,
                 "mergeable": "MERGEABLE",
                 "mergeStateStatus": "CLEAN",
@@ -1531,7 +1532,11 @@ async def main() -> int:
             await pilot.pause(0.05)
         app.self_login = "castrojo"
         stop = app.stops[0]
-        stop.live = {"isDraft": False, "headRefOid": "0123456789abcdef"}
+        stop.live = {
+            "isDraft": False,
+            "baseRefOid": "fedcba9876543210fedcba9876543210fedcba98",
+            "headRefOid": "0123456789abcdef0123456789abcdef01234567",
+        }
         await pilot.press("r")
         for _ in range(400):
             if isinstance(app.screen, tui.ReviewScreen) and app.screen.finished:
@@ -1654,6 +1659,30 @@ async def main() -> int:
             )
 
     # ── the review path never mutates GitHub ─────────────────────────────
+    # Invalid live refs disable Codex start honestly and never invoke it.
+    tui.ACTIVE_BACKEND = "codex"
+    review_log.write_text("")
+    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        app.stops[0].live = {"isDraft": False, "headRefOid": "bad"}
+        await pilot.press("r")
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.ReviewScreen) and app.screen.finished,
+            "invalid live refs must finish as unavailable",
+        )
+        check(
+            review_log.read_text() == "",
+            "invalid live refs must not invoke Codex",
+        )
+    tui.ACTIVE_BACKEND = "goose"
+
+    # ── the review path never mutates GitHub ─────────────────────────────
     calls = gh_log.read_text().splitlines() if gh_log.exists() else []
     mutations = [
         call
@@ -1676,7 +1705,7 @@ async def main() -> int:
     check(
         outcomes == [
             "complete", "complete", "incomplete", "incomplete", "failed",
-            "complete", "incomplete", "complete", "stopped",
+            "complete", "incomplete", "complete", "stopped", "failed",
         ],
         f"every review must be traced with its outcome, got {outcomes}",
     )

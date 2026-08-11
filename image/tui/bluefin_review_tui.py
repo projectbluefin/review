@@ -41,7 +41,7 @@ from textual.widgets import (
     RichLog,
     Static,
 )
-from review_result import adapt_current_engine
+from review_result import ReviewResult, adapt_current_engine
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from harness.codex import CodexHarness
 from harness.autopilot import discover
@@ -704,23 +704,22 @@ class ReviewScreen(Screen):
     @work(thread=True)
     def run_review(self) -> None:
         stop = self.stop_record
-        binding = HarnessBinding(
-            stop.repository, stop.number,
-            str(stop.live.get("baseRefOid") or "?"),
-            str(stop.live.get("headRefOid") or "?"),
-        )
+        base_sha = str(stop.live.get("baseRefOid") or "")
+        head_sha = str(stop.live.get("headRefOid") or "")
+        if (len(base_sha) != 40 or len(head_sha) != 40 or
+                any(char not in "0123456789abcdef" for char in (base_sha + head_sha).lower())):
+            self.app.call_from_thread(
+                self.finish, None,
+                "Codex unavailable: exact PR base/head is unavailable",
+            )
+            return
+        binding = HarnessBinding(stop.repository, stop.number, base_sha, head_sha)
         adapter = CodexHarness(availability=CodexHarness.probe())
         if ACTIVE_BACKEND == "codex":
             if adapter.availability is not Availability.READY:
                 self.app.call_from_thread(
                     self.finish, None,
                     f"Codex unavailable: {adapter.availability.value}",
-                )
-                return
-            if "?" in (binding.base_sha, binding.head_sha):
-                self.app.call_from_thread(
-                    self.finish, None,
-                    "Codex unavailable: exact PR base/head is unavailable",
                 )
                 return
             command = adapter.command(binding, prompt="Produce the ReviewResult JSON.", effort="low")
@@ -773,12 +772,16 @@ class ReviewScreen(Screen):
         stop = self.stop_record
         elapsed = int(time.monotonic() - self.started)
         if ACTIVE_BACKEND == "codex":
-            result = CodexHarness(availability=Availability.READY).convert(
-                "\n".join(self.output),
-                HarnessBinding(stop.repository, stop.number,
-                        str(stop.live.get("baseRefOid") or "?"),
-                        str(stop.live.get("headRefOid") or "?")),
-            )
+            base_sha = str(stop.live.get("baseRefOid") or "")
+            head_sha = str(stop.live.get("headRefOid") or "")
+            if len(base_sha) != 40 or len(head_sha) != 40:
+                result = ReviewResult(1, "failed", provenance={"backend": "codex"})
+            else:
+                result = CodexHarness(availability=Availability.READY).convert(
+                    "\n".join(self.output),
+                    HarnessBinding(stop.repository, stop.number, base_sha, head_sha),
+                    code or 0,
+                )
         else:
             result = adapt_current_engine(
                 "\n".join(self.output), code,
