@@ -1,5 +1,6 @@
 """Focused contracts for the adapter-first harness seam."""
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -80,6 +81,39 @@ class HarnessContract(unittest.TestCase):
         self.assertEqual(result.provenance["model"], "gpt-5.6-luna")
         self.assertEqual(result.provenance["reasoning_effort"], "low")
         self.assertEqual(result.provenance["repository"], "project/review")
+
+    def test_codex_converts_terminal_agent_message_envelope(self):
+        payload = {
+            "version": 1,
+            "state": "complete",
+            "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+            "findings": [],
+        }
+        stream = "\n".join([
+            json.dumps({"type": "thread.started", "thread_id": "t"}),
+            json.dumps({
+                "type": "item.completed",
+                "item": {"id": "item_1", "type": "agent_message", "text": json.dumps(payload)},
+            }),
+            json.dumps({"type": "turn.completed", "usage": {}}),
+        ])
+        result = CodexHarness(availability=Availability.READY).convert(
+            stream, self.binding, model="gpt-5.6-luna", effort="low",
+        )
+        self.assertEqual(result.state, "complete")
+
+    def test_codex_provenance_uses_invocation_overrides(self):
+        payload = json.dumps({
+            "version": 1,
+            "state": "findings",
+            "counts": {"critical": 0, "high": 0, "medium": 1, "low": 0},
+            "findings": [],
+        })
+        result = CodexHarness(availability=Availability.READY).convert(
+            payload, self.binding, model="gpt-5.6-luna", effort="medium",
+        )
+        self.assertEqual(result.provenance["model"], "gpt-5.6-luna")
+        self.assertEqual(result.provenance["reasoning_effort"], "medium")
 
     def test_nonzero_codex_exit_fails_closed(self):
         adapter = CodexHarness(availability=Availability.READY)

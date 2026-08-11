@@ -663,17 +663,19 @@ class HarnessTakeoff(ModalScreen[str | None]):
 
     BINDINGS = [Binding("escape", "dismiss(None)", "cancel")]
 
-    def __init__(self, options: list[HarnessOption], initial: HarnessOption | None) -> None:
+    def __init__(self, options: list[HarnessOption], initial: HarnessOption | None,
+                 initial_preference: Preference | None = None) -> None:
         super().__init__()
         self.options = options
         self.initial = initial
+        self.initial_preference = initial_preference
 
     def compose(self) -> ComposeResult:
         with Vertical(id="takeoff-box"):
             yield Label("Select review harness — Start runs only after confirmation")
             yield Select(
                 [(f"{option.harness.branding.terminal_badge} {option.harness.branding.display_name} · "
-                  f"{option.status} · {option.discovery.model} / {option.discovery.reasoning}",
+                  f"{option.status} · {self._model(option)} / {self._effort(option)}",
                   option.harness.branding.harness_id) for option in self.options],
                 value=(self.initial.harness.branding.harness_id if self.initial else Select.BLANK),
                 id="takeoff-select",
@@ -681,13 +683,30 @@ class HarnessTakeoff(ModalScreen[str | None]):
             yield Button("Start", id="takeoff-start", variant="primary")
             yield Button("Diagnostics", id="takeoff-diagnostics")
 
+    def _model(self, option: HarnessOption) -> str:
+        if self.initial_preference and self.initial_preference.harness_id == option.harness.branding.harness_id:
+            return self.initial_preference.model
+        return option.discovery.model
+
+    def _effort(self, option: HarnessOption) -> str:
+        if self.initial_preference and self.initial_preference.harness_id == option.harness.branding.harness_id:
+            return self.initial_preference.effort
+        return "low"
+
     def on_mount(self) -> None:
         self.query_one("#takeoff-select", Select).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "takeoff-start":
-            value = self.query_one("#takeoff-select", Select).value
-            self.dismiss(str(value) if value else None)
+            option = self.selected_option()
+            if option is None:
+                self.dismiss(None)
+                return
+            preference = self.initial_preference
+            if preference is None or preference.harness_id != option.harness.branding.harness_id:
+                preference = Preference(option.harness.branding.harness_id,
+                                        option.discovery.model, "low")
+            self.dismiss(preference)
         elif event.button.id == "takeoff-diagnostics":
             option = self.selected_option()
             if option:
@@ -724,10 +743,11 @@ class ReviewScreen(Screen):
         Binding("e", "toggle_evidence", "raw evidence"),
     ]
 
-    def __init__(self, stop: Stop, steer: str = "") -> None:
+    def __init__(self, stop: Stop, steer: str = "", selection: Preference | None = None) -> None:
         super().__init__()
         self.stop_record = stop
         self.steer = steer
+        self.selection = selection or Preference(ACTIVE_BACKEND, "gpt-5.6-luna", "low")
         self.process: subprocess.Popen | None = None
         self.finished = False
         self.stop_requested = False
@@ -776,7 +796,10 @@ class ReviewScreen(Screen):
                     f"Codex unavailable: {adapter.availability.value}",
                 )
                 return
-            command = adapter.command(binding, prompt="Produce the ReviewResult JSON.", effort="low")
+            command = adapter.command(
+                binding, prompt="Produce the ReviewResult JSON.",
+                model=self.selection.model, effort=self.selection.effort,
+            )
         else:
             command = [REVIEW_COMMAND, "pr", stop.repository, str(stop.number)]
         # Maintainer steering rides the documented additive seam: it is added
@@ -838,6 +861,7 @@ class ReviewScreen(Screen):
                         actor="maintainer", tenant="review", generated_at="dashboard",
                     ),
                     code or 0,
+                    model=self.selection.model, effort=self.selection.effort,
                 )
         else:
             result = adapt_current_engine(
@@ -1252,13 +1276,22 @@ class ReviewDashboard(App):
     def start_review(self, stop: Stop, steer: str = "") -> None:
         if ACTIVE_BACKEND == "codex":
             options = self.harness_options or discover_all()
-            initial = choose_option(stop.repository, load_preferences(), options)
-            def selected(backend: str | None) -> None:
+            preferences = load_preferences()
+            initial = choose_option(stop.repository, preferences, options)
+            initial_preference = None
+            for candidate in (preferences.get(stop.repository), preferences.get("*")):
+                if initial and candidate and candidate.harness_id == initial.harness.branding.harness_id:
+                    initial_preference = candidate
+                    break
+            if initial and initial_preference is None:
+                initial_preference = Preference(initial.harness.branding.harness_id,
+                                                initial.discovery.model, "low")
+            def selected(selection: Preference | None) -> None:
                 global ACTIVE_BACKEND
-                if backend:
-                    ACTIVE_BACKEND = backend
-                    self.push_screen(ReviewScreen(stop, steer=steer))
-            self.push_screen(HarnessTakeoff(options, initial), selected)
+                if selection:
+                    ACTIVE_BACKEND = selection.harness_id
+                    self.push_screen(ReviewScreen(stop, steer=steer, selection=selection))
+            self.push_screen(HarnessTakeoff(options, initial, initial_preference), selected)
             return
         self.push_screen(ReviewScreen(stop, steer=steer))
 

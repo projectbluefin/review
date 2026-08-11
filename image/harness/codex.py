@@ -1,5 +1,6 @@
 """Codex CLI adapter contract; it never substitutes another harness."""
 
+import json
 import os
 import signal
 import shutil
@@ -64,22 +65,50 @@ class CodexHarness:
                 f"Review exact binding {context}. {prompt}"
                 + (f" Maintainer steering: {steer}" if steer else "")]
 
-    def convert(self, payload: str, binding: ReviewRequest, exit_code: int = 0) -> ReviewResult:
-        # ``codex exec --json`` is a JSONL progress stream; the final object
-        # is the ReviewResult payload.
-        result = parse_review_result(payload.splitlines()[-1] if payload.splitlines() else payload)
+    def convert(self, payload: str, binding: ReviewRequest, exit_code: int = 0,
+                *, model: str | None = None, effort: str | None = None) -> ReviewResult:
+        selected_model = model or self.model
+        selected_effort = effort or self.effort
+        if selected_effort not in self.SUPPORTED_EFFORTS:
+            raise ValueError(f"unsupported Codex reasoning effort: {selected_effort}")
+        lines = payload.splitlines()
+        result = parse_review_result(payload)
+        if result.state == "unparsable":
+            result = self._convert_jsonl(lines)
         if exit_code != 0:
             return ReviewResult(1, "failed", raw_evidence=payload.splitlines())
         provenance = dict(result.provenance)
         provenance.update({
-            "backend": "codex", "model": self.model,
+            "backend": "codex", "model": selected_model,
             "auth": "subscription-oauth", "repository": f"{binding.owner}/{binding.repository}",
             "pull_request": binding.pull_request_number, "base_sha": binding.base_sha,
-            "head_sha": binding.head_sha, "reasoning_effort": self.effort,
+            "head_sha": binding.head_sha, "reasoning_effort": selected_effort,
         })
         return ReviewResult(result.version, result.state, result.counts,
                             result.findings, result.verification, provenance,
                             result.overlap, result.live, result.raw_evidence)
+
+    @staticmethod
+    def _convert_jsonl(lines: list[str]) -> ReviewResult:
+        """Accept only the official terminal agent-message event envelope."""
+        terminal: ReviewResult | None = None
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(event, dict) or event.get("type") != "item.completed":
+                continue
+            item = event.get("item")
+            if not isinstance(item, dict) or item.get("type") != "agent_message":
+                continue
+            text = item.get("text")
+            if not isinstance(text, str):
+                continue
+            candidate = parse_review_result(text)
+            if candidate.state != "unparsable":
+                terminal = candidate
+        return terminal or ReviewResult(1, "unparsable", raw_evidence=lines)
 
     def stream(self, binding: ReviewRequest, *, prompt: str,
                on_line: Callable[[str], None], effort: str | None = None,
@@ -95,7 +124,8 @@ class CodexHarness:
             lines.append(line.rstrip("\n"))
             on_line(lines[-1])
         process.wait()
-        return self.convert("\n".join(lines), binding, process.returncode)
+        return self.convert("\n".join(lines), binding, process.returncode,
+                            model=model, effort=effort)
 
     @staticmethod
     def cancel(process: subprocess.Popen) -> None:
