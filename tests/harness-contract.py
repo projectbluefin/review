@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Focused contracts for the adapter-first harness seam."""
 
 import sys
