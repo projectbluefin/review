@@ -47,8 +47,9 @@ silently create a second workflow, authority path, or task queue.
    Hive tasks, donates inference, and produces structured pre-review
    feedback. `REVIEW_DETACH=1` runs it detached, with `just review-stop` as
    its lifecycle verb.
-2. **Interactive maintainer TUI** (`review-queue dashboard`): high-velocity
-   PR and issue triage with batching, labels, priority, agent-assisted
+2. **Interactive maintainer dashboard** (`review-queue`): the review surface.
+   Goose reviews a pull request in place and streams its verdict, alongside
+   high-velocity triage with batching, labels, priority, agent-assisted
    documentation updates (#134), and Ghost Cluster build dispatch (#133).
 
 The watcher feedback loop — comparing automated pre-reviews with maintainer
@@ -203,109 +204,308 @@ PageUp scrolls, tmux search finds text, and `q` returns to the live pane.
 The mouse wheel also enters copy-mode and scrolls long output. Copy-mode only
 changes your view; Hive still owns task and output handling.
 
-### Walking the queue
+### Reviewing the queue
 
-`just review-queue` runs the walk in the contributor container — no Hive
-registration. It needs only a GitHub token (the walk reads live
+`just review-queue` runs the dashboard in the contributor container — no Hive
+registration. It needs only a GitHub token (the dashboard reads live
 pull-request state) and, for `r`, the same Copilot credential the other launch
-paths pass through. Arguments pass straight through to `bluefin-review queue`:
+paths pass through. Arguments pass straight through to the dashboard:
 
 ```bash
-just review-queue                      # everything the queue marks 'review'
+just review-queue                      # the whole queue, merge-ready first
 just review-queue kimi high            # pick the model profile and effort
 just review-queue --repo bluefin       # one repository
-just review-queue --all                # every action
-just review-queue dashboard            # the full-screen maintainer dashboard
+just review-queue --action review      # one recommended action
 ```
+
+The default is the **whole** queue. It used to default to the `review` action
+alone, which is a handful of the hundred-plus open pull requests, so the
+dashboard looked nearly empty and the merge-ready work was not on screen at
+all. Stops are ordered for a maintainer — `ready-for-human-merge` first, then
+`review`, then the ones waiting on their author (`resolve-conflicts`,
+`fix-ci`) and on better evidence (`investigate`). `f` cycles the filter
+through each action and back to everything, and the status bar always shows
+how many stops are hidden and why.
 
 ### The dashboard
 
-`just review-queue dashboard` opens the same walk as a full-screen Textual
-TUI: a queue pane (Renovate-style dependency bumps are marked BATCHABLE), a
+`just review-queue` opens the maintainer surface: a full-screen Textual app
+with a queue pane (Renovate-style dependency bumps are marked BATCHABLE), a
 live-evidence details pane, and a context pane carrying the duplicate
-verdicts. The status bar reports queue depth, snapshot freshness, and the
-walker's GitHub identity; your own pull requests are filtered out.
+verdicts. The status bar reports queue depth, snapshot freshness, and your
+GitHub identity; your own pull requests are filtered out.
+
+`r` is the one that matters: it opens a full-screen review that streams
+Goose's output live and then states its own outcome. `x` stops a running
+review — the whole process group, escalating to `SIGKILL`, because a review is
+a shell running Goose running a subprocess per check, and signalling only the
+shell leaves those alive. `escape` closes the screen once it has finished. A review that finished
+reports COMPLETE. A review whose checks returned no verdict — the model
+answered with prose, or an empty response, and `goose review` exited 0 with a
+finding count anyway — reports **INCOMPLETE** and says the count is not a
+clean bill of health. Those two must never look alike, so they are the
+regression `tests/dashboard_pilot.py` drives the real app to prove.
 
 | Key | Action |
 |---|---|
 | `b` | toggle batch selection for the highlighted pull request |
 | `l` | label overlay (`kind/bug`, `area/bootc`, `status/approved`, …) |
 | `p` | cycle priority label (`P0-critical` … `P3-low`) |
+| `r` | **start a review with Goose** — streams live, reports COMPLETE / INCOMPLETE / FAILED |
+| `L` | leave a review on GitHub: approve, request changes, or comment (also from the review screen) |
 | `d` | docs-update agent task (tracked as #134) |
-| `r` | Ghost Cluster build dispatch (tracked as #133) |
+| `g` | Ghost Cluster build dispatch (tracked as #133) |
 | `o` | open in browser |
-| `v` | view the diff |
+| `v` | view the diff — full screen, coloured, scrollable |
 | `c` | comment |
-| `a`/`m` | arm auto-merge — for the batch selection if one exists |
+| `a` | approve and queue: approval + `lgtm`, opting in to Hive auto-merge; for the batch selection if one exists |
+| `m` | merge now: squash immediately, no `lgtm`, maintainers only — the batch selection if one exists |
 | `x` | reject: comment, then close |
 | `h` | handoff: copy the pull request's context to your clipboard (OSC 52) |
+| `/` | steer: type instructions that ride along with the review you start |
+| `f` | cycle the action filter (every action → one at a time → back) |
+| `R` | refresh the queue snapshot and re-ask Hive (keeps your batch) |
+| `u` | update the branch from its base — the batch selection if one exists |
+| `H` | ask Hive: hub state, and who is working on what right now |
 | `M` | resolve the duplicate cluster |
 | `q` | quit |
 
-The dashboard carries the same authority contract as the line-mode walk:
-every mutation prints the exact `gh` command and runs only after you type
-the pull request number, merges are always
-`--squash --auto --match-head-commit`, drafts are refused, and every action
+The dashboard is the only surface that can change anything: every mutation
+prints the exact `gh` command and runs only after you type
+the pull request number, a maintainer can merge directly with `m` or hand the
+pull request to Hive's governor sweep with `a` (approval + `lgtm`), drafts are
+refused, and every
+action
 is appended as a JSON trace to `~/.local/state/bluefin-review/trace.jsonl`
 inside the container for the review feedback loop.
 `tests/dashboard-contract.sh` pins all of it.
 
 The leading arguments are the same model profiles `review-container` takes
 (`luna`, `opus5`, `kimi` plus an optional effort); everything from the first
-flag onward passes straight through to `bluefin-review queue`. `REVIEW_QUEUE_NAME=review-queue-2 just review-queue`
-runs a second walk beside the first, like `REVIEW_CONTAINER_NAME` does for
+flag onward passes straight through to the dashboard. `REVIEW_QUEUE_NAME=review-queue-2 just review-queue`
+runs a second dashboard beside the first, like `REVIEW_CONTAINER_NAME` does for
 `review-container`.
 
-Pull requests you authored are skipped — a walk is for reviewing other
+Pull requests you authored are skipped — the dashboard is for reviewing other
 people's work. Authorship never changes, so the snapshot's `author` field is
-the one value the filter trusts without a live re-read. The container also
-fetches the Hive knowledge base through Hive's own entrypoint hook chain —
-the same authenticated export and Goose-native `AGENTS.md`/`.goosehints`
-symlinks a Hive session gets — so `r` reviews carry full hub context.
+the one value the filter trusts without a live re-read.
 
-`bluefin-review queue` walks the public PR queue one pull request at a time.
-Each stop prints read-only Review Evidence — author, draft state, review
+The container also fetches the Hive knowledge base through Hive's own
+entrypoint hook chain, and leaves it at `~/agent.md` as a file the agent can
+search. It is deliberately *not* linked to `AGENTS.md`/`.goosehints`: Goose
+loads those into every subprocess it starts, `goose review` starts one per
+check, and the live export is ~417 KB — enough to spend a large fraction of
+each check's context window before the diff is read. The review scope names
+the path instead.
+
+Each selection shows read-only Review Evidence — author, draft state, review
 decision, mergeability, size, and check totals — read live from GitHub rather
 than from the snapshot, because a stale "clean" reading is the one most likely
-to mislead a reviewer. Then it offers a menu:
+to mislead a reviewer.
 
-| Key | Action |
-|---|---|
-| `Enter` | next pull request |
-| `r` | check the pull request out and review it through `goose review` |
-| `d` | show the diff |
-| `o` | open it in a browser |
-| `c` | leave a comment (typed-number confirmation) |
-| `m` | arm auto-merge for this pull request (typed-number confirmation) |
-| `M` | resolve this duplicate cluster: arm the survivor, comment and close the superseded, recheck orphaned issues |
-| `h` | handoff: copy the stop's identity, live evidence, and cluster verdicts to your clipboard (OSC 52) |
-| `p` | previous pull request |
-| `q` | stop |
+Everything that names a pull request, an issue, or a person is a terminal
+hyperlink (OSC 8): queue rows, the evidence header, linked issues, duplicate
+and overlap references, the author, the Hive contributor working on a stop,
+and both screen headers. Ctrl-click or click them in any terminal that
+supports the sequence — the same capability `h` already relies on for the
+clipboard.
 
-Stops that are no longer open on GitHub are skipped automatically — the
-snapshot can be hours old, and GitHub is the state.
+Stops that are no longer open on GitHub are refused at the point of action —
+the snapshot can be hours old, and GitHub is the state.
 
-Every state-changing key prints the exact command and runs it only after you
-type the pull request number; empty aborts, and there is no y/yes shortcut. A
-merge is always `--squash --auto --match-head-commit <reviewed sha>`: it arms
-GitHub's own auto-merge pinned to the commit you looked at, and required
-checks and branch protections still gate the actual merge. Drafts are
-refused.
+### Reading the queue at a glance
+
+Rows are coloured from the state the snapshot already carries, so a hundred
+stops are scannable instead of linear:
+
+| colour | meaning | what it usually needs |
+|---|---|---|
+| **bold green** | merge-ready | `m`, or `a` to let the sweep do it |
+| cyan | reviewable, or already approved | `r` then `L` |
+| red | conflicting | a human — `u` cannot fix a real conflict |
+| yellow | checks failing | its author, or `u` if it is merely stale |
+| grey | evidence incomplete | `investigate` — nobody can act yet |
+
+Rows also carry `⚑ CONFLICTS`, `✗ CI` and `✓ approved` markers, so the state
+survives a terminal without colour.
+
+The key map is two lines at the bottom: reading actions on the first, the ones
+that change something on the second. Fourteen bindings do not fit on one row
+of an 80-column terminal, and a truncated key map teaches half the tool.
+
+`R` re-reads the snapshot and re-asks Hive without losing your batch selection
+— the snapshot regenerates every 15 minutes and any merge invalidates it at
+once. `u` runs `gh pr update-branch`, which is the button GitHub shows on a
+pull request that is behind its base, for the whole batch if one is selected.
+
+### Merging a batch, and when one refuses
+
+`b` selects; `m` merges the whole selection, one typed-number gate per pull
+request. `a` batches the same way.
+
+GitHub refuses merges for reasons that are usually fixable, and a batch that
+stops dead on the first refusal is worse than no batch — you are several
+confirmations past it by the time you read the error. A refusal is offered as
+a choice instead:
+
+```
+ projectbluefin/bluefinctl#31 did not merge:
+ Pull request is not mergeable: the base branch is out of date
+
+   [1] update the branch, then merge again
+   [2] approve and queue it for the sweep instead
+   [3] try the merge again
+   [4] leave it queued and move on
+
+ esc keeps it in the queue
+```
+
+What is offered depends on why GitHub said no — behind the base gets the
+update, blocked on review gets the sweep, a conflict gets handed to a human in
+the browser — and retry and keep-it-queued are always there. Updating the
+branch runs `gh pr update-branch` and the merge behind one gate, so it is one
+decision like every other sequence.
+
+Anything not fixed **stays selected and stays marked**: the row carries
+`✗ DID NOT MERGE`, the status line counts them, and the batch moves on to the
+next pull request rather than stopping. Putting it back in the queue is the
+default, not something you have to remember to redo.
+
+### Leaving a review
+
+`r` starts the agent review so you can see the pull request judged; `v` shows
+the diff. Neither submits anything. When you have an opinion, `L` records it
+on GitHub — approve, request changes, or comment — from the dashboard or from
+the review screen with the draft still on it.
+
+That is deliberately none of the other things: it does not merge, and it does
+not apply `lgtm`, so you can say "this is wrong, here is why" or "this looks
+right to me" without landing the change or arming the sweep. A verdict other
+than an approval must carry a reason; an empty one submits nothing.
+
+The evidence pane shows who has already reviewed and what their word is worth:
+
+```
+ reviews  2 (1 maintainer, 1 community)
+          hanthor maintainer APPROVED
+          passerby community CHANGES_REQUESTED
+```
+
+Maintainer or community comes from GitHub's own author association — `OWNER`,
+`MEMBER` and `COLLABORATOR` carry write access, everything else does not.
+GitHub's single `reviewDecision` field cannot tell you which kind of reviewer
+approved, or that three other people also looked.
+
+### Asking Hive
+
+The status line used to read `Hive: not consulted`, permanently — a dashboard
+that never asked. It asks now, on startup and again on `H`, and reports what
+the hub said: `online · 185 actionable · 2 working`, or plainly `unreachable`
+or `not configured`. The hub URL is not written down here; it comes from
+`HIVE_HUB`, which the image's Hive entrypoint hook owns and exports.
+
+The part worth having is per-stop. When a contributor's *current* task is the
+pull request you are looking at, the context pane says so:
+
+```
+ hive     joshyorko is working on THIS now (ct-projectbluefin/bluefin-981-…)
+```
+
+That is the one thing worth interrupting a review for — the diff on screen is
+about to be stale. Otherwise it tells you nobody is on it.
+
+Consulting Hive is strictly read-only and never fatal: an unreachable or
+unauthenticated hub is reported as unreachable, not raised, and the queue
+still works. Hive remains the sole authority for selecting and assigning
+contributor tasks; nothing here claims, reorders, or declines one.
+
+Every state-changing key prints the exact commands and runs them only after you
+type the pull request number; empty aborts, and there is no y/yes shortcut. One
+decision is one gate: an action that takes several `gh` calls — queueing
+(approval + `lgtm`), rejecting (comment + close), resolving a cluster — shows
+every command it will run in that one gate and then runs the whole sequence in
+the background. You are never asked to confirm the same decision twice, and a
+failed step stops the rest instead of asking again.
+Queueing a merge with `a` is the factory's automated merge path: it posts the
+exact approval Hive's governor sweep re-verifies (`Approved by @<you> for Hive
+auto-merge on green CI.`) and adds the `lgtm` label the sweep scans for. The
+sweep — not this tool — performs the squash merge, and it independently
+enforces the self-merge ban, requires mergeable plus all checks green, and
+ignores drafts.
+
+`lgtm` is an **opt-in to that automation, not a toll on merging**. When you
+have read the diff and simply want the change in, `m` merges it now: the same
+typed-number gate, the same squash the sweep would perform, no label, and no
+robot armed. That is a maintainer power — the dashboard asks GitHub whether
+you hold the `push` permission on that repository and refuses if you do not,
+which is why it can never become a contributor agent's path (agents work from
+forks and have no such permission). It never overrides branch protection:
+there is no bypass flag, so a repository that requires review or green checks
+still refuses, and you are told why.
 
 `h` is read-only: it copies the handoff text through OSC 52, which reaches
 your system clipboard when the attached terminal supports that sequence
-(modern terminals and tmux's default `set-clipboard` do); otherwise the walk
-prints the handoff so it can be selected by hand.
+(modern terminals and tmux's default `set-clipboard` do); otherwise the
+dashboard reports that it could not reach the clipboard.
+
+### Steering a review
+
+The box along the bottom steers the next review of the highlighted pull
+request. `/` focuses it, Esc returns to the queue — the queue keeps the
+single-key bindings, because a focused input would swallow them. Enter starts
+the review with what you typed carried as `BLUEFIN_REVIEW_STEER`, which
+`bluefin-review` adds to the review as one more check
+(`maintainer-steering`) alongside the Bluefin doctrine. It is additive by
+construction: steering directs attention within a review and can never
+replace the doctrine or license an approval, a merge, or any other state
+change. The steer is recorded with the review's outcome in the trace.
+
+### How busy the repository is
+
+Each stop also shows the merge queue of its own repository, so you can tell a
+repository with one thing left from one with thirty:
+
+```
+ merge queue projectbluefin/bluefin — 5 open
+   ████████████████████████
+   1 review · 1 CI · 1 conflicts · 2 unclear
+```
+
+Segments carry the same colours as the rows, in the order a maintainer drains
+them: `queued` (already labelled `lgtm`, waiting on the sweep), `ready`,
+`review`, `CI`, `conflicts`, `unclear`. First match wins — anything handed to
+the sweep counts as queued whatever else is true of it, and a conflict
+outranks a failing check because the check cannot mean anything until the
+conflict is gone.
+
+Every non-empty segment gets at least one cell. One pull request waiting on
+the sweep behind sixty unclear ones is exactly what you need to see, and
+proportional rounding is what would hide it.
+
+The meter counts **all** open pull requests in that repository, including your
+own — "how busy is this repository" is a different question from "what is left
+for me to review", and only the second one excludes your own work.
 
 ### Duplicates
 
 The queue holds real duplicates, so each stop also reports a pull request's
-near-neighbours in the same repository:
+near-neighbours in the same repository — with enough of each to choose
+between them without opening a browser tab per candidate:
 
 ```
- dupe-of  #26 (same dependency actions/checkout)
- overlaps #25, #24, #22
+ dupe-of  2 doing the same work — M resolves the cluster
+   #26 chore(deps): update actions/checkout action to v8
+      by renovate · approved, 4 files, 2026-08-05
+      same dependency (actions/checkout)
+   #24 chore(deps): update actions/checkout action to v7
+      by renovate · draft, conflicting, 2 files, 2026-08-01
+      same dependency (actions/checkout)
+ overlaps 3 touching the same files (ordering hazard, not duplication)
 ```
+
+Which of three duplicates to keep is the whole decision, and a bare list of
+numbers said only that a decision was required. The listing this is built from
+already carries the titles and states, so the summary costs nothing extra.
 
 `dupe-of` means the two are the *same work*: Renovate raises a digest bump and a
 version bump for one dependency, and several agents can close one issue from
@@ -323,19 +523,25 @@ must name which pull request should merge and which should close as superseded,
 with evidence. Overlaps are listed in the review as merge-ordering hazards but
 keep their own stops.
 
-Detection costs one `gh pr list` per repository, cached for the walk, so
+Detection costs one `gh pr list` per repository, cached for the session, so
 revisiting a repository does not refetch it.
 
 ```bash
-bluefin-review queue                      # everything the queue marks 'review'
-bluefin-review queue --repo common        # one repository
-bluefin-review queue --action fix-ci      # a different recommended action
-bluefin-review queue --all                # every action
+bluefin-review pr projectbluefin/common 42   # review one pull request
+bluefin-review main...HEAD                   # review a local diff
 ```
 
-`r` clones each repository once into `HIVE_WORKSPACE_DIR` (default
-`~/workspace`), checks the pull request out there, and reviews
-`origin/<base>...HEAD`. The result is a Review Draft for you to judge.
+`bluefin-review` is the review engine both the dashboard's `r` key and a
+terminal call go through. It clones each repository once into
+`HIVE_WORKSPACE_DIR` (default `~/workspace`), checks the pull request out
+there, and reviews `origin/<base>...HEAD`. The result is a Review Draft for
+you to judge.
+
+It has no approve, merge, comment, or close path of its own — those belong to
+the dashboard, behind the typed-number gate — so running a review can never
+change anything on GitHub. Its exit status is the review's verdict about
+itself: `0` complete, `65` incomplete (a check returned no verdict, so the
+finding count cannot be read as clean), anything else a failure.
 
 ### Review context
 
@@ -362,7 +568,7 @@ Entries are omitted when their files are absent, so nothing dangles.
 Override with `BLUEFIN_REVIEW_CONTEXT_SKILLS` (space-separated skill ids),
 `BLUEFIN_REVIEW_SKILLS_ROOT`, or `BLUEFIN_REVIEW_KNOWLEDGE_FILE`.
 
-Hive keeps running throughout: the queue walk is an ordinary command inside the
+Hive keeps running throughout: the dashboard is an ordinary command inside the
 contributor container, so the knowledge base, its refresh loop, and the
 `contributor` session are untouched. Run it in a second pane with
 `podman exec -it <container> tmux attach -t contributor`, or in any shell in
@@ -388,7 +594,7 @@ All configuration is read at launch.
 | `REVIEW_HIVE_COMMIT` | Full Hive commit used for contributor setup. |
 | `REVIEW_CONTAINER_NAME` | Contributor container name; defaults to `review-container`. Give a second concurrent instance its own name. |
 | `REVIEW_GH_TOKEN` | Optional GitHub token override for container-only mode. |
-| `BLUEFIN_REVIEW_QUEUE_URL` | Queue snapshot `bluefin-review queue` reads; defaults to the published `queue.json`. |
+| `BLUEFIN_REVIEW_QUEUE_URL` | Queue snapshot the dashboard reads; defaults to the published `queue.json`. |
 | `BLUEFIN_REVIEW_CONTEXT_SKILLS` | Skill ids named as review context; defaults to `pr-review queue-feed hive-review human-gates`. |
 | `BLUEFIN_REVIEW_SKILLS_ROOT` | Projected org skills root; defaults to `~/.agents/skills`. |
 | `BLUEFIN_REVIEW_KNOWLEDGE_FILE` | Hive knowledge export named as review context; defaults to `~/agent.md`. |
@@ -511,26 +717,29 @@ required checks enforce repository policy.
 
 ### Iterating on the contributor image
 
-Prototype image-owned behavior in this checkout, then build a local tag:
+Prototype image-owned behavior in this checkout, then build the commit you
+have under the same immutable tag CI mints for it:
 
 ```bash
+ref="ghcr.io/projectbluefin/review:sha-$(git rev-parse HEAD)"
 GH_TOKEN="$(gh auth token)" podman build \
   --secret id=github_token,env=GH_TOKEN \
   --build-arg GOOSE_REFRESH="$(date +%s)" \
-  -f image/Containerfile -t localhost/review:dev .
+  -f image/Containerfile -t "$ref" .
 ```
 
 Use that tag for a container-only trial without publishing it:
 
 ```bash
-REVIEW_CONTRIBUTOR_IMAGE=localhost/review:dev \
-  just review-container
+REVIEW_CONTRIBUTOR_IMAGE="$ref" just review-container
 ```
 
-The launcher prefers a fresh copy of moving tags, but falls back to an already
-present local image when no registry copy is available. After the change is
-ready, commit it and use the normal publish workflow; CI publishes immutable
-`sha-<commit>` and version tags and advances `:stable` from `main`.
+An `sha-<commit>` tag names exactly one build, so the launcher never re-pulls
+over it and the local copy is the one that runs. It also says which commit is
+in the image, which a made-up local name cannot.
+After the change is ready, commit it and use the normal publish workflow; CI
+publishes immutable `sha-<commit>` and version tags and advances `:stable`
+from `main`.
 The build secret exists only while GitHub CLI verifies Goose's signed
 provenance and is never included in an image layer. The checked-in checksums
 make this local command use the known canary snapshot; to refresh it, resolve
@@ -559,7 +768,8 @@ each platform's runtime evidence as native or unavailable — never QEMU —
 and `--report image-audit-report.md` writes it to a git-ignored file:
 
 ```bash
-CONTAINER_ENGINE=podman bash tests/image-audit.sh --derived localhost/review:dev
+CONTAINER_ENGINE=podman bash tests/image-audit.sh \
+  --derived "ghcr.io/projectbluefin/review:sha-$(git rev-parse HEAD)"
 ```
 
 `pre-commit run --all-files` runs socket-free hygiene checks locally.

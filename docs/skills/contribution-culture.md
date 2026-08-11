@@ -25,6 +25,24 @@ how much to include in a pull request, and before writing anything a
 maintainer will read. It applies to every task, including work in this
 repository.
 
+## When Not to Use
+
+Do not use this for the mechanics of a branch, commit, or pull request — that
+is [`pr-workflow.md`](pr-workflow.md) — or for any repository-specific
+contract, which its own `AGENTS.md` owns and which outranks this document in
+its own tree.
+
+## Core Process
+
+1. Establish who owns the thing you are changing, and read their contract.
+2. Size the change for a tired maintainer: repair what is broken, finish what
+   the project already decided to do, and leave unrelated fixes for their own
+   change.
+3. When the task can only be completed by out-of-scope work, write the
+   evidenced finding instead — that is the deliverable, not a larger diff.
+4. Say what you could not verify. An unqualified claim that turns out to be
+   wrong costs more than the work saved by not checking.
+
 ## Two Layers: Whose Rules These Are
 
 Everything in this skill binds the **agent**. The human operator is governed

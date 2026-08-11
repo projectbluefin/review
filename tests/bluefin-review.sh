@@ -44,51 +44,110 @@ set -e
 # --- help never invokes goose -------------------------------------------------
 rm -f "$scratch/goose-args-help"
 help_out="$(PATH="$scratch/bin:$PATH" GOOSE_ARGS="$scratch/goose-args-help" "$review" --help)"
-[[ "$help_out" == *'bluefin-review queue'* ]]
+[[ "$help_out" == *'bluefin-review pr'* ]]
 [[ ! -e "$scratch/goose-args-help" ]]
 
-# --- queue mode reads the snapshot and filters it ------------------------------
-cat >"$scratch/queue.json" <<'EOF'
-{
-  "generated_at": "2026-08-08T00:00:00.000Z",
-  "items": [
-    {"repository":"projectbluefin/alpha","number":1,"recommended_action":"review","title":"first","author":"someone"},
-    {"repository":"projectbluefin/beta","number":2,"recommended_action":"fix-ci","title":"second","author":"someone"},
-    {"repository":"projectbluefin/alpha","number":3,"recommended_action":"review","title":"third","author":"me"}
-  ]
-}
-EOF
+# --- pr mode: check the pull request out and review it against its base -------
+# The dashboard's review key shells out to exactly this path, so it is the one
+# place a pull request becomes a diff for Goose to judge.
+mkdir -p "$scratch/workspace/alpha"
+git -C "$scratch/workspace/alpha" init --quiet
+git -C "$scratch/workspace/alpha" config user.email t@example.com
+git -C "$scratch/workspace/alpha" config user.name t
 
-# gh is stubbed so the test never touches the network or a real repository.
-# 'api user' answers the walker's identity: their own pull requests are not
-# work for them, and alpha#3 above is theirs.
 cat >"$scratch/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${GH_CALLS:?}"
 case "$*" in
+  *baseRefName*) printf 'main\n' ;;
+  "pr list"*) printf '[]\n' ;;
   "api user"*) printf 'me\n' ;;
-  *--json*) printf '{"author":{"login":"someone"},"isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","reviewDecision":null,"additions":1,"deletions":0,"changedFiles":1,"updatedAt":"2026-08-08T00:00:00Z","statusCheckRollup":[{"conclusion":"SUCCESS"}]}' ;;
 esac
+exit 0
 EOF
 chmod +x "$scratch/bin/gh"
 
-# Walk the one remaining 'review' item with Enter, then fall off the end of
-# the queue. The loop reads keys from /dev/tty, so this only asserts fully
-# under a terminal; without one, assert the explicit refusal instead of
-# skipping.
 set +e
-out="$(printf '\n\n' | PATH="$scratch/bin:$PATH" GH_CALLS="$scratch/gh-calls" \
-  "$review" queue --url "file://$scratch/queue.json" 2>&1)"
+pr_out="$(PATH="$scratch/bin:$PATH" GH_CALLS="$scratch/gh-calls-pr" \
+  GOOSE_ARGS="$scratch/goose-args-pr" HIVE_WORKSPACE_DIR="$scratch/workspace" \
+  "$review" pr projectbluefin/alpha 31 2>&1)"
+pr_status=$?
 set -e
 
-if [[ "$out" == *'needs an interactive terminal'* ]]; then
-  printf 'queue mode correctly refuses a non-interactive run\n'
-else
-  [[ "$out" == *'1 pull request(s) to walk'* ]]
-  [[ "$out" == *'projectbluefin/alpha#1'* ]]
-  [[ "$out" != *'projectbluefin/alpha#3'* ]]
-  [[ "$out" != *'projectbluefin/beta#2'* ]]
-fi
+[[ "$pr_status" -eq 23 ]]
+[[ "$(cat "$scratch/goose-args-pr")" == "review origin/main...HEAD" ]]
+grep -q 'pr checkout 31 --repo projectbluefin/alpha' "$scratch/gh-calls-pr"
+[[ "$pr_out" == *'HUMAN DECISION REQUIRED'* ]]
+# A Goose failure is never announced as a finished draft.
+[[ "$pr_out" == *'Review did not complete'* ]]
+[[ "$pr_out" != *'for you to judge'* ]]
+
+# A pull request number is the only thing 'pr' accepts as one.
+set +e
+PATH="$scratch/bin:$PATH" "$review" pr projectbluefin/alpha HEAD >/dev/null 2>&1
+bad_number=$?
+PATH="$scratch/bin:$PATH" "$review" pr projectbluefin/alpha >/dev/null 2>&1
+missing_number=$?
+set -e
+((bad_number != 0))
+((missing_number != 0))
+
+# --- a review whose checks returned no verdict is never reported as clean -----
+# 'goose review' exits 0 when a check answers with prose or an empty response
+# instead of JSON, and still prints a finding count. Reading that as a clean
+# review is the worst outcome this tool can produce, so it gets its own status.
+cat >"$scratch/bin/goose" <<'EOF'
+#!/usr/bin/env bash
+cat >&2 <<'OUT'
+goose review: discovered 2 check(s):
+goose review: check 'bluefin-doctrine' failed: parse check JSON: The model returned an empty response.
+goose review: main pass on '.github/workflows/ci.yml' failed: parse check JSON: I'll verify the rest.
+goose review: orchestrator emitted 0 finding(s) from 2 check(s) (main: ran, 0 finding(s))
+OUT
+exit 0
+EOF
+chmod +x "$scratch/bin/goose"
+
+set +e
+incomplete_out="$(PATH="$scratch/bin:$PATH" HIVE_WORKSPACE_DIR="$scratch/workspace" \
+  GH_CALLS="$scratch/gh-calls-inc" "$review" pr projectbluefin/alpha 31 2>&1)"
+incomplete_status=$?
+set -e
+
+# 65, not 0: the caller must be able to tell this apart from a clean review.
+((incomplete_status == 65))
+[[ "$incomplete_out" == *'REVIEW INCOMPLETE'* ]]
+[[ "$incomplete_out" == *'2 part(s)'* ]]
+[[ "$incomplete_out" == *'bluefin-doctrine'* ]]
+[[ "$incomplete_out" == *'not a clean bill of health'* ]]
+# It must never also claim to be a finished draft.
+[[ "$incomplete_out" != *'The Review Draft above is for you to judge'* ]]
+
+# A run where every check answered stays clean, and stays exit 0.
+cat >"$scratch/bin/goose" <<'EOF'
+#!/usr/bin/env bash
+echo "goose review: check 'bluefin-doctrine' completed: 0 finding(s)" >&2
+echo "goose review: orchestrator emitted 0 finding(s) from 1 check(s)" >&2
+exit 0
+EOF
+chmod +x "$scratch/bin/goose"
+
+set +e
+clean_out="$(PATH="$scratch/bin:$PATH" HIVE_WORKSPACE_DIR="$scratch/workspace" \
+  GH_CALLS="$scratch/gh-calls-clean" "$review" pr projectbluefin/alpha 31 2>&1)"
+clean_status=$?
+set -e
+((clean_status == 0))
+[[ "$clean_out" == *'The Review Draft above is for you to judge'* ]]
+[[ "$clean_out" != *'REVIEW INCOMPLETE'* ]]
+
+# restore the exit-code stub for the assertions that follow
+cat >"$scratch/bin/goose" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >"${GOOSE_ARGS:?}"
+exit 23
+EOF
+chmod +x "$scratch/bin/goose"
 
 # --- org review context is injected from the projected common skills ---------
 # 'goose review' reads .agents/REVIEW.md and .agents/checks/*.md from the
@@ -234,26 +293,6 @@ analyzer_out() {
 [[ "$(analyzer_out 3 numbers)" == *$'overlaps\t1 2'* ]]
 [[ "$(analyzer_out 3 numbers)" != *'same dependency'* ]]
 
-# --- failures are reported, never mistaken for an empty queue -----------------
-# Reading from a process substitution discards the producer's status, which made
-# a failed fetch look like "nothing to review" and exit 0.
-set +e
-bad_out="$(PATH="$scratch/bin:$PATH" "$review" queue --url "file://$scratch/missing.json" 2>&1)"
-bad_status=$?
-set -e
-((bad_status != 0))
-[[ "$bad_out" == *'could not read the queue'* ]]
-[[ "$bad_out" != *'Nothing in the queue'* ]]
-# Reported once, not once per layer.
-[[ "$(grep -c 'could not read the queue' <<<"$bad_out")" -eq 1 ]]
-
-printf 'not json\n' >"$scratch/malformed.json"
-set +e
-PATH="$scratch/bin:$PATH" "$review" queue --url "file://$scratch/malformed.json" >/dev/null 2>&1
-malformed_status=$?
-set -e
-((malformed_status != 0))
-
 # --- the image review scope replaces the --instructions pointer ---------------
 # With the overlay present, goose review runs with --check-scope on a scratch
 # copy carrying the static doctrine plus, when a cluster exists, a per-stop
@@ -310,6 +349,47 @@ grep -q '^\.agents/checks/cluster-resolution\.md$' "$scratch/scope-listing2"
 grep -q '#7' "$scratch/scope-cluster2"
 grep -q 'name: cluster-resolution' "$scratch/scope-cluster2"
 
+# Maintainer steering from the dashboard's steer box reaches the review as an
+# additional check in the scratch scope, never as a replacement for doctrine.
+cat >"$scratch/bin/goose" <<'EOF'
+#!/usr/bin/env bash
+scope=""
+while (($#)); do
+  case "$1" in
+    --check-scope) scope="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [[ -n "$scope" ]]; then
+  find "$scope" -type f | sed "s|^$scope/||" | sort >"${SCOPE_LISTING:?}"
+  cat "$scope/.agents/checks/maintainer-steering.md" >"${SCOPE_STEER:?}" 2>/dev/null || : >"${SCOPE_STEER:?}"
+fi
+EOF
+chmod +x "$scratch/bin/goose"
+
+BLUEFIN_REVIEW_SCOPE_ROOT="$scratch/overlay" \
+  BLUEFIN_REVIEW_STEER='check the CI permissions block' \
+  PATH="$scratch/bin:$PATH" \
+  SCOPE_LISTING="$scratch/scope-listing3" SCOPE_STEER="$scratch/scope-steer3" \
+  "$review" main...HEAD >/dev/null
+grep -q '^\.agents/checks/maintainer-steering\.md$' "$scratch/scope-listing3"
+grep -q 'name: maintainer-steering' "$scratch/scope-steer3"
+grep -q 'check the CI permissions block' "$scratch/scope-steer3"
+# Steering is additive: the doctrine check is still there, and steering never
+# licenses a state change.
+grep -q '^\.agents/checks/bluefin-doctrine\.md$' "$scratch/scope-listing3"
+grep -q 'human makes every approval and merge decision' "$scratch/scope-steer3"
+
+# Without a steer, no steering check is written at all.
+BLUEFIN_REVIEW_SCOPE_ROOT="$scratch/overlay" \
+  PATH="$scratch/bin:$PATH" \
+  SCOPE_LISTING="$scratch/scope-listing4" SCOPE_STEER="$scratch/scope-steer4" \
+  "$review" main...HEAD >/dev/null
+if grep -q 'maintainer-steering' "$scratch/scope-listing4"; then
+  echo "an unsteered review must carry no maintainer-steering check" >&2
+  exit 1
+fi
+
 # restore the exit-code stub for any later assertions
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
@@ -318,12 +398,23 @@ exit 23
 EOF
 chmod +x "$scratch/bin/goose"
 
-# --- maintainer actions stay gated and scoped ---------------------------------
-# The walk gained explicit maintainer action keys (m/M), so the old "never
-# merges" grep became these inverted invariants: the powers stay narrow, and
-# every mutation runs through exactly one confirmed call site.
+# --- the engine has no mutation path at all -----------------------------------
+# This used to be a set of "every mutation goes through the one gate" checks,
+# because the walk owned maintainer actions. It no longer does: approve, merge,
+# comment and close belong to the dashboard, behind its typed-number gate. The
+# engine's contract is now absolute rather than conditional — it cannot change
+# anything on GitHub — which is a far cheaper property to keep true.
 
-# No protection bypass, no branch deletion, no review submission, no push.
+# Join backslash continuations first so a wrapped call is scanned as the one
+# command it becomes.
+review_joined="$scratch/review-joined"
+sed -e :a -e '/\\$/N; s/\\\n//; ta' "$review" >"$review_joined"
+
+while IFS= read -r line; do
+  echo "the review engine must not mutate GitHub: $line" >&2
+  exit 1
+done < <(grep -E 'gh (pr (merge|close|comment|edit|review)|issue (close|comment|edit|reopen))' "$review_joined" | grep -vE '^[[:space:]]*#')
+
 if grep -qE -- '--admin' "$review"; then
   echo "bluefin-review must never bypass branch protections with --admin" >&2
   exit 1
@@ -332,88 +423,21 @@ if grep -qE -- '--delete-branch' "$review"; then
   echo "bluefin-review must never delete branches" >&2
   exit 1
 fi
-if grep -qE 'gh pr review' "$review"; then
-  echo "bluefin-review must never submit a review" >&2
-  exit 1
-fi
 if grep -qE '(^|[^[:alnum:]_])git +push' "$review"; then
   echo "bluefin-review must never push" >&2
   exit 1
 fi
 
-# Every merge arms auto-merge pinned to the reviewed commit; an immediate or
-# unpinned merge would bypass GitHub's own gate or merge a head the reviewer
-# never saw. Backslash continuations are joined first so a wrapped call is
-# scanned as the one command it becomes.
-review_joined="$scratch/review-joined"
-sed -e :a -e '/\\$/N; s/\\\n//; ta' "$review" >"$review_joined"
+# The gh verbs it does use are readers, and the repository it clones is a
+# throwaway inside the container's workspace.
 while IFS= read -r line; do
-  [[ "$line" == *'--squash --auto --match-head-commit'* ]] || {
-    echo "every gh pr merge must be --squash --auto --match-head-commit: $line" >&2
+  case "$line" in
+  *'gh pr list'* | *'gh pr view'* | *'gh pr checkout'* | *'gh pr diff'* | *'gh repo clone'*) ;;
+  *)
+    echo "unexpected gh verb in the review engine: $line" >&2
     exit 1
-  }
-done < <(grep -E 'gh pr merge' "$review_joined" | grep -vE '^[[:space:]]*#')
-
-# Exactly one mutation call site: every state-changing gh invocation is the
-# argument of gh_mutate, whose typed-number confirmation is the gate.
-while IFS= read -r line; do
-  [[ "$line" == *'gh_mutate '* ]] || {
-    echo "mutating gh call outside gh_mutate: $line" >&2
-    exit 1
-  }
-done < <(grep -E 'gh (pr (merge|close|comment)|issue (close|comment|edit|reopen))' "$review_joined" | grep -vE '^[[:space:]]*#')
-
-# The confirmation is a typed number with no shortcut: no y/yes prompt and no
-# read timeout may gate a mutation.
-gate="$(sed -n '/^gh_mutate() {/,/^}/p' "$review")"
-[[ -n "$gate" ]] || {
-  echo "gh_mutate not found" >&2
-  exit 1
-}
-if grep -qiE '\(y/n\)|yes/no' <<<"$gate"; then
-  echo "gh_mutate must confirm with the PR number, never y/yes" >&2
-  exit 1
-fi
-if grep -qE -- '-t [1-9]' <<<"$gate"; then
-  echo "gh_mutate must not time a confirmation out" >&2
-  exit 1
-fi
-grep -q -- '-t 0' <<<"$gate" || {
-  echo "gh_mutate must drain buffered tty input before asking" >&2
-  exit 1
-}
-
-# A draft is refused before the confirmation is ever offered.
-grep -q 'EVIDENCE_IS_DRAFT' "$review" || {
-  echo "merge must refuse drafts from live evidence" >&2
-  exit 1
-}
-
-# The handoff key is read-only: it may write to the terminal and the
-# clipboard, never to GitHub, so it must not touch the mutation gate.
-handoff_body="$(sed -n '/^handoff_stop() {/,/^}/p' "$review")"
-[[ -n "$handoff_body" ]] || {
-  echo "handoff_stop not found" >&2
-  exit 1
-}
-grep -q ']52;c;' <<<"$handoff_body" || {
-  echo "handoff must copy through OSC 52" >&2
-  exit 1
-}
-if grep -qE 'gh_mutate|gh (pr|issue|api)' <<<"$handoff_body"; then
-  echo "handoff must stay read-only: no gh calls, no mutation gate" >&2
-  exit 1
-fi
-
-# Live-state skip and cache invalidation: the walk trusts GitHub, not a local
-# ledger, so stale stops are skipped and mutations invalidate the pull cache.
-grep -q 'state,headRefOid' "$review" || {
-  echo "show_evidence must read live state and headRefOid" >&2
-  exit 1
-}
-grep -q 'invalidate_repo_cache' "$review" || {
-  echo "mutations must invalidate the repository pull cache" >&2
-  exit 1
-}
+    ;;
+  esac
+done < <(grep -oE 'gh (pr|repo|issue|api) [a-z-]+' "$review_joined" | sort -u)
 
 printf 'bluefin-review contract OK\n'

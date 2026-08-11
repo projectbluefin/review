@@ -100,8 +100,15 @@ jobs:
           bash tests/image-contract.sh
           bash tests/hive-compatibility.sh
           bash tests/bluefin-review.sh
-          bash tests/dashboard-contract.sh
           bash tests/worktree-guard.sh
+
+      # Drives the real Textual app: builds the hash-locked Textual venv from
+      # image/tui/requirements.lock, then presses keys and asserts what the
+      # maintainer is told. Separate from the step above because it installs.
+      - name: Dashboard contract and pilot
+        run: |
+          set -euo pipefail
+          bash tests/dashboard-contract.sh
 
       - name: Interactive launcher docs and shell stay aligned
         run: |

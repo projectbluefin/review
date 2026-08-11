@@ -20,12 +20,13 @@
 #   review-stop       Stop a detached worker. Refuses attended runs and
 #                     containers this launcher did not start.
 #   review-doctor     Read-only preflight diagnostics. Starts nothing.
-#   review-queue      The interactive maintainer review surface. Walks
-#                     the Bluefin PR queue in the contributor container —
-#                     no Hive registration required. q or Ctrl-C stops.
+#   review-queue      The interactive maintainer review surface: a
+#                     full-screen dashboard over the Bluefin PR queue,
+#                     running in the contributor container — no Hive
+#                     registration required. q or Ctrl-C stops.
 #                     Takes the same model profile and effort as
 #                     review-container, then passes the rest through to
-#                     `bluefin-review queue`, e.g.
+#                     the dashboard, e.g.
 #                     'just review-queue kimi high --repo bluefin'.
 #
 # ─────────────────────────────────────────────────────────────────────────
@@ -281,10 +282,12 @@ require_no_running_instance() {
 }
 image_ref_is_moving() {
   # A digest is immutable and an 'sha-<commit>' tag is minted once per build,
-  # so both always name exactly one image. A locally built image has no
+  # so both always name exactly one image. That makes the tag CI mints the
+  # right name for a local build too: it is honest about which commit is in
+  # the image, and it is never re-pulled over. A locally built image has no
   # registry behind it either, so refreshing it only produces a failed pull
-  # and a misleading "may be out of date" warning; podman stores
-  # 'podman build -t review:dev' as 'localhost/review:dev', so accept the bare
+  # and a misleading "may be out of date" warning; podman stores a bare
+  # 'podman build -t <name>:<tag>' under 'localhost/', so accept the bare
   # name a user is likely to type as well as the stored form. Anything else
   # can be repointed at a newer build under the same name.
   case "$1" in
@@ -329,7 +332,8 @@ ensure_contributor_image() {
   echo "ERROR: cannot obtain the contributor image ${ref}." >&2
   echo "  Published tags are 'stable', the version tags and 'sha-<commit>' — there is no ':latest'." >&2
   echo "  Pick a published tag with REVIEW_CONTRIBUTOR_IMAGE=ghcr.io/projectbluefin/review:stable," >&2
-  echo "  or build it yourself: podman build -f image/Containerfile -t review:dev . && REVIEW_CONTRIBUTOR_IMAGE=review:dev just review-container" >&2
+  echo "  or build the commit you have: ref=ghcr.io/projectbluefin/review:sha-\$(git rev-parse HEAD)" >&2
+  echo "    podman build -f image/Containerfile -t \"\$ref\" . && REVIEW_CONTRIBUTOR_IMAGE=\"\$ref\" just review-container" >&2
   return 1
 }
 resolve_copilot_token() {
@@ -682,6 +686,7 @@ read_hive_value() {
 #        missing, register a hive under that name. Without it, the current
 #        repository's directory name is tried, then the default
 #        ~/.config/hive/contributor.env.
+[doc("Run the Hive contributor worker: receive assigned tasks and donate inference.")]
 review-container profile="" effort="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -747,12 +752,23 @@ review-container profile="" effort="":
       # settings and is exactly that. Mapping the host user onto dev's uid
       # instead makes the mount readable without loosening the host mode.
       --userns "keep-id:uid=1000,gid=1000"
-      --volume "${HOME}/.config/hive:/home/dev/.config/hive:ro"
-      # The selected registration lands on the path the relay reads. When a
-      # named registration (contributor.<name>.env) is in play this overlays
-      # it on top of the directory mount; with the default it is the same
-      # file mounted over itself.
-      --volume "${HIVE_CONTRIBUTOR_ENV}:/home/dev/.config/hive/contributor.env:ro"
+      # The selected registration, and nothing else from ~/.config/hive.
+      #
+      # This used to also bind-mount the whole directory, with the selected
+      # file overlaid on top. Rootless Podman prepares the nested target
+      # through the already-mounted host directory, so with a named
+      # registration (REVIEW_HIVE=<name>) the target creation escaped back to
+      # the host: it created a zero-byte ~/.config/hive/contributor.env owned
+      # by a subordinate uid, and the container then failed on the file it had
+      # just caused to exist. Nothing in the image reads anything else from
+      # that directory, so one file mount is both the fix and the smaller
+      # exposure -- a named worker can no longer see other registrations.
+      #
+      # ':z' is the shared SELinux relabel. ':Z' would give each container a
+      # private MCS category, and review supports concurrent named workers
+      # sharing one registration: the second launch would revoke the first
+      # live container's access to it.
+      --volume "${HIVE_CONTRIBUTOR_ENV}:/home/dev/.config/hive/contributor.env:ro,z"
       --env "AGENT_BACKEND=goose"
       # Podman does not pass COLORTERM through on its own; the entrypoint
       # needs it to pick the direct-color attach fallback for a host TERM
@@ -799,6 +815,7 @@ review-container profile="" effort="":
 # containers started with REVIEW_DETACH=1; it refuses to touch anything this
 # launcher did not start (no review.owner label) and never force-removes.
 # Interactive runs still end with Ctrl-C, not with this.
+[doc("Stop a detached contributor worker. Refuses attended runs and foreign containers.")]
 review-stop name="review-container":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -823,19 +840,20 @@ review-stop name="review-container":
     podman stop "$NAME" >/dev/null
     echo "✓ stopped the detached worker ${NAME}."
 
-# Walk the Bluefin PR queue in the contributor container — no Hive.
-# The container runs `bluefin-review queue` instead of the contributor agent,
-# so no Hive registration is mounted or required. Foreground: q or Ctrl-C
-# stops. Arguments pass straight through to `bluefin-review queue`:
+# The maintainer review dashboard over the Bluefin PR queue — no Hive.
+# The container runs the dashboard instead of the contributor agent, so no
+# Hive registration is mounted or required. Foreground: q or Ctrl-C stops.
+# Arguments pass straight through to the dashboard:
 #
 #   just review-queue                      # everything the queue marks 'review'
 #   just review-queue kimi high            # pick the model profile and effort
 #   just review-queue --repo bluefin       # one repository
-#   just review-queue opus5 --all          # profile, then bluefin-review flags
+#   just review-queue opus5 --all          # profile, then dashboard flags
 #
 # One instance owns the 'review-queue' name; REVIEW_QUEUE_NAME overrides it
-# for a concurrent second walk, exactly as REVIEW_CONTAINER_NAME does for
+# for a concurrent second dashboard, exactly as REVIEW_CONTAINER_NAME does for
 # review-container.
+[doc("Open the maintainer review dashboard over the Bluefin PR queue (no Hive).")]
 review-queue *queue_args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -860,14 +878,10 @@ review-queue *queue_args:
 
     # Leading non-flag arguments are the model profile and thinking effort,
     # exactly as review-container takes them; everything from the first '-'
-    # flag onward belongs to bluefin-review queue. Word-splitting {{queue_args}}
-    # is the point: it arrives as one string of separate flags.
-    # A leading 'dashboard' selects the maintainer TUI instead of the
-    # line-mode walk; the rest of the launch is identical.
+    # flag onward belongs to the dashboard. Word-splitting {{queue_args}} is
+    # the point: it arrives as one string of separate flags.
     # shellcheck disable=SC2086
     set -- {{queue_args}}
-    IMAGE_MODE=queue
-    if [[ $# -gt 0 && "$1" == dashboard ]]; then IMAGE_MODE=dashboard; shift; fi
     profile="" effort=""
     if [[ $# -gt 0 && "$1" != -* ]]; then profile="$1"; shift; fi
     if [[ $# -gt 0 && "$1" != -* ]]; then effort="$1"; shift; fi
@@ -890,8 +904,8 @@ review-queue *queue_args:
     [[ -n "${GOOSE_THINKING_EFFORT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_THINKING_EFFORT=${GOOSE_THINKING_EFFORT}")
     [[ -n "${GOOSE_CONTEXT_LIMIT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_CONTEXT_LIMIT=${GOOSE_CONTEXT_LIMIT}")
     # The Copilot credential is what powers 'r' (the Goose review of a pull
-    # request); the walk itself only reads GitHub, so a missing credential is
-    # a warning, not a stop.
+    # request); the dashboard itself only reads GitHub, so a missing credential
+    # is a warning, not a stop.
     resolve_copilot_token
     if [[ -n "${COPILOT_TOKEN:-}" ]]; then
       export GITHUB_COPILOT_TOKEN="$COPILOT_TOKEN"
@@ -900,27 +914,28 @@ review-queue *queue_args:
     else
       report_missing_copilot_credential
     fi
-    # The walk is a GitHub reader from the first keystroke to the last, so an
-    # identity is load-bearing here, not advisory.
+    # The dashboard is a GitHub reader from the first keystroke to the last, so
+    # an identity is load-bearing here, not advisory.
     resolve_gh_token
     if [[ -z "${GH_TOKEN_VALUE:-}" ]]; then
       report_missing_gh_token
-      echo "ERROR: the queue walk reads live pull-request state from GitHub and cannot run without a token." >&2
+      echo "ERROR: the dashboard reads live pull-request state from GitHub and cannot run without a token." >&2
       exit 1
     fi
     export GH_TOKEN="$GH_TOKEN_VALUE"
     CONTAINER_ARGS+=(--env GH_TOKEN)
     report_gh_token_blast_radius "${GH_TOKEN_SOURCE}"
 
-    # Whatever survived the profile/effort shift belongs to bluefin-review.
-    CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE" "$IMAGE_MODE" "$@")
+    # Whatever survived the profile/effort shift belongs to the dashboard.
+    CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE" queue "$@")
 
-    echo "✓ starting the PR queue walk (no Hive)."
-    echo "  q or Ctrl-C stops; the walk is the only thing running."
+    echo "✓ starting the maintainer review dashboard (no Hive)."
+    echo "  q or Ctrl-C stops; the dashboard is the only thing running."
     exec "${CONTAINER_ARGS[@]}"
 
 # Preflight check: is this machine actually ready for 'just review-container'?
 # Never starts the container — read-only diagnostics only.
+[doc("Read-only preflight diagnostics for this machine. Starts nothing.")]
 review-doctor:
     #!/usr/bin/env bash
     set -uo pipefail

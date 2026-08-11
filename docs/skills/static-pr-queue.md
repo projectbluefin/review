@@ -1,7 +1,7 @@
 ---
 name: static-pr-queue
-version: "1.7"
-last_updated: 2026-08-08
+version: "1.9"
+last_updated: 2026-08-10
 id: static-pr-queue
 one_line_purpose: Publish a safe, static queue of public pull requests.
 entry_point: docs/skills/static-pr-queue.md
@@ -14,7 +14,7 @@ tags: [github, actions, queue, static, pullrequest]
 description: "Publishes the public static PR queue without creating queue authority. Use when changing queue generation, ranking, artifacts, or refresh automation."
 metadata:
   type: procedure
-  context7-sources: [/websites/github_en_actions, /websites/github_en_rest]
+  context7-sources: [/websites/github_en_actions, /websites/github_en_rest, /textualize/textual]
 ---
 
 # Static PR Queue
@@ -71,25 +71,48 @@ GitHub owns pull-request state and merge decisions.
 
 ## Consuming The Queue
 
-`bluefin-review queue` is the one shipped consumer. It reads the snapshot only
-to decide **what to show a human next**, and re-reads every displayed fact from
-GitHub live, because the snapshot can be hours old and a stale "clean" reading
-is the one most likely to mislead a reviewer. Treat that split as the rule for
-any future consumer: the queue orders the walk, GitHub supplies the evidence.
+The maintainer dashboard is the one shipped consumer. It reads the snapshot
+only to decide **what to show a human next**, and re-reads every displayed fact
+from GitHub live, because the snapshot can be hours old and a stale "clean"
+reading is the one most likely to mislead a reviewer. Treat that split as the
+rule for any future consumer: the queue orders the work, GitHub supplies the
+evidence.
 
 A consumer's mutations stay gated and narrow. `ready-for-human-merge` is a
-recommendation to a person; the walk's `m` and `M` keys execute that person's
-decision — never the queue's — through one confirmed call site: the exact
-command is printed, the maintainer types the pull request number, and every
-merge is `--squash --auto --match-head-commit`, so GitHub's required checks
-and branch protections still gate the actual merge. `tests/bluefin-review.sh`
-fails if a mutation appears outside that gate, or if `--admin`,
-`--delete-branch`, a push, or a `gh pr review` submission appears at all.
+recommendation to a person; the dashboard's keys execute that person's
+decision — never the queue's — through confirmed call sites: the exact
+commands are printed and the maintainer types the pull request number. There
+are three distinct paths, and conflating them is the error to avoid: `a`
+approves and applies `lgtm`, an opt-in to Hive's governor sweep, which
+enforces the self-merge ban and requires green CI; `m` squashes directly and
+is gated on GitHub's `push` permission read per repository; `L` leaves an
+ordinary review and merges nothing. The review engine has no mutation path at
+all, and `tests/bluefin-review.sh` fails if one appears there.
+
+Batch mutations reuse that gate one pull request at a time — never stack
+confirmation modals — but every command belonging to a single decision goes
+into one gate. Splitting them asks the maintainer to confirm the same decision
+twice and can leave the action half-applied.
+
+The snapshot's own state fields are the consumer's cheapest signal:
+`mergeable_state`, `check_state`, `review_state` and `labels` arrive for every
+item, so a consumer can colour, group and meter a queue of any size without a
+single extra request. Live re-reads remain for the stop being acted on.
+
+A gate the maintainer cannot leave is a broken gate. Bind Esc to abort every
+confirmation modal, and never run a confirmed `gh` mutation on the UI thread:
+Textual's event loop is single-threaded, so a synchronous `subprocess.run`
+blocks repaints and keystrokes for the call's full duration, and an unbounded
+call strands the maintainer in a frozen modal with no way out. Run mutations in
+a `@work(thread=True)` worker with an explicit `timeout=`, report results back
+through `call_from_thread`, and surface the timeout as an error notification.
+Exercise the gate in tests with real keystrokes; assigning `Input.value`
+directly passes even when the widget never had focus.
 
 The snapshot carries each pull request's `author` so a consumer can skip the
-walker's own work. Authorship is the one field that never changes after
+maintainer's own work. Authorship is the one field that never changes after
 creation, so it is safe to trust from the snapshot where state like
-mergeability is not; a walk is for reviewing other people's work.
+mergeability is not; the dashboard is for reviewing other people's work.
 
 ### Duplicates Are Evidence, Overlap Is Not
 
@@ -108,9 +131,9 @@ real duplicate behind noise from one busy workflow file.
 Normalise a Renovate title to the dependency it updates before comparing;
 `update module <path>`, `update dependency <name>`, `<image> docker digest`,
 and `<action> action` are all the same shape wearing different words. Fetch
-each repository's open pull requests once per walk and cache them.
+each repository's open pull requests once per session and cache them.
 
-A duplicate cluster is reviewed once, not walked twice: `bluefin-review`
+A duplicate cluster is reviewed once, not twice: `bluefin-review`
 fetches every duplicate's diff beside the checkout, and the Review Draft must
 name which pull request merges and which close as superseded. Overlaps are
 named in the review as ordering hazards and keep their own stops.

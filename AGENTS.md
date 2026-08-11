@@ -161,6 +161,12 @@ just --list
 pre-commit run --all-files
 ```
 
+`tests/dashboard-contract.sh` drives the real Textual app through
+`tests/dashboard_pilot.py`, so it builds a hash-locked Textual virtualenv from
+`image/tui/requirements.lock` at `.cache/tui-venv` on first run (`uv` when
+present, `python3 -m venv` otherwise) and reuses it until the lock changes.
+`BLUEFIN_REVIEW_TUI_VENV` points it elsewhere.
+
 `tests/image-audit.sh` needs a container engine and network. It defaults to
 `docker`; on a podman host pass `CONTAINER_ENGINE=podman`. Check the pinned
 FSDK input alone with `--verify-base-evidence`; audit a built or published
@@ -169,6 +175,12 @@ as native or unavailable, and `--report image-audit-report.md` writes the
 Markdown report to a git-ignored file.
 
 `pre-commit run --all-files` runs the socket-free hygiene checks locally.
+`scripts/check-commit-message.sh` runs as a `commit-msg` hook and refuses a
+message containing one of GitHub's CI-skip directives: GitHub reads those
+anywhere in the head commit message, so a commit that merely writes about one
+lands with no validation and no published image, and no failed check to show
+for it. This cannot be a CI check — the message that skips CI skips the check
+that would catch it.
 ShellCheck is a CI-only manual hook because its upstream hook runs in a
 container; CI invokes it explicitly.
 

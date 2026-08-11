@@ -101,3 +101,10 @@ repos:
         entry: bash tests/generate-skills.sh
         files: ^(scripts/generate-skills\.py|tests/generate-skills\.sh)$
         pass_filenames: false
+      # A commit that merely writes about GitHub's CI-skip directive silently
+      # skips its own validation and publish. Catch it at commit time.
+      - id: check-commit-message
+        name: commit message does not silently skip CI
+        language: system
+        entry: bash scripts/check-commit-message.sh
+        stages: [commit-msg]

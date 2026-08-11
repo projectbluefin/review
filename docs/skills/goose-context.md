@@ -82,16 +82,24 @@ The pinned Hive runtime links its refreshed knowledge export to Goose-native
 `AGENTS.md` and `.goosehints`. Do not add `CONTEXT_FILE_NAMES` merely to retain
 the legacy `CLAUDE.md` link; keep auto-loaded files concise.
 
-Queue mode (`bluefin-review queue`) has no Hive session, so the entrypoint
-acquires the same context through Hive's own seam: it sources
-`/etc/hive/entrypoint.d/*.sh` (whose hook owns the hosted hub URL and the
-authenticated curl rewrite), fetches the export with upstream's exact
-`api/knowledge/export` expression, and creates the same `AGENTS.md` /
-`.goosehints` symlinks. Do not hardcode the hub URL or the hosted API path
-anywhere else — the hook is the single definition. Upstream writes a
-non-empty "Knowledge base not yet available." placeholder on fetch failure,
-so `bluefin-review` checks content, not just size, before naming the export
-in its instructions.
+Dashboard mode has no Hive session, so the entrypoint acquires the same context
+through Hive's own seam: it sources `/etc/hive/entrypoint.d/*.sh` (whose hook
+owns the hosted hub URL and the authenticated curl rewrite) and fetches the
+export with upstream's exact `api/knowledge/export` expression. Do not hardcode
+the hub URL or the hosted API path anywhere else — the hook is the single
+definition.
+
+**Auto-loaded context is charged per subprocess, so measure it before linking
+it.** The export lands at `~/agent.md` and is deliberately not linked to
+`AGENTS.md`, `.goosehints`, or `.goose-instructions.md`. Goose loads those
+files into every subprocess it starts and `goose review` starts one per check,
+so linking a 417 KB export spent a large fraction of each check's window
+before the diff was read; checks then answered with prose or an empty response
+instead of JSON, and `goose review` reported the resulting run as `0
+finding(s)` with exit 0. Name a large document by path and let the agent search
+it. Upstream writes a non-empty "Knowledge base not yet available." placeholder
+on fetch failure, so `bluefin-review` checks content, not just size, before
+naming the export in its instructions.
 
 ## Review Context Is Not Session Context
 

@@ -20,7 +20,7 @@ session logs, or design scratchpads as competing explanations.
 | **Contributor** | A contributor using the worker configuration to receive and complete Hive-assigned work. They are treated as a contributor, they just happen to specialize in the `clanker-queue`. It's a "subclass" of contributor like a video game RPG character. Same team, different specialization. | Hive assigns work; the worker implements only its assigned scope. |
 | **Maintainer/Reviewer** | A maintainer assessing an incoming pull request. This is a role, same team but this is an active review process, brainmeat needed. | The human decides review, approval, and merge. |
 | **Review Evidence** | Read-only pull-request, issue, verification, and merge-state context shown before a review. | Evidence informs a human; it never makes a decision. |
-| **Managed Reviewer Client** | A foreground, preconfigured Goose session that a Maintainer Reviewer may choose after examining Review Evidence. | It prepares a Review Draft; it cannot approve or submit a review. Its merge keys only execute a typed, human-confirmed decision by arming GitHub's own gated auto-merge. |
+| **Managed Reviewer Client** | A foreground, preconfigured Goose session that a Maintainer Reviewer may choose after examining Review Evidence. | It prepares a Review Draft. Its merge keys only execute a typed, human-confirmed decision: queueing for Hive's governor sweep (approval + `lgtm`, an opt-in to automation), or a maintainer's direct squash merge, which requires GitHub's `push` permission and never overrides branch protection. It decides nothing itself. It can also submit the maintainer's own review — approve, request changes, or comment — which merges nothing and arms nothing. |
 | **Portable Reviewer Prompt** | Markdown Review Evidence and queue instructions for a maintainer's own client. | It is context, not an assignment. |
 | **Bluefin PR Queue** | A generated read-only snapshot of open factory pull requests and suggested next actions. | GitHub is authoritative; the queue does not assign work or merge. |
 | **Review Draft** | Analysis, review text, or commands prepared for a Maintainer Reviewer. | A human explicitly considers and submits it. |
@@ -77,9 +77,24 @@ view, so a reviewer never receives their own authored pull requests.
 The human Maintainer Reviewer is the decision point. A Factory Worker,
 Managed Reviewer Client, Portable Reviewer Prompt, Review Evidence view, or
 Bluefin PR Queue must never claim approval, queue-management, or
-task-selection authority, and must never decide a merge: the Managed Reviewer
+task-selection authority. The merge decision is the human's: the Managed
+Reviewer
 Client's merge keys exist to execute the human's typed, per-number-confirmed
-decision through GitHub's own gated auto-merge, nothing more.
+decision, nothing more. That decision has two shapes, and the distinction is
+the point. Queueing applies `lgtm`, which is an explicit opt-in to automation:
+it hands the pull request to Hive's governor sweep, which re-verifies and
+merges on green CI. Merging directly performs the same squash immediately,
+without arming anything. `lgtm` is therefore a choice to automate, never a
+toll a maintainer must pay to land a change. The direct path is a maintainer
+power — gated on GitHub's `push` permission, read from GitHub per repository
+rather than assumed — and it never overrides branch protection, so a
+repository that requires review or green checks still refuses.
+
+Recording a verdict is a third, smaller thing, and it is neither of those: a
+Maintainer Reviewer may leave an ordinary GitHub review — approve, request
+changes, or comment — which merges nothing and arms nothing. A review that can
+only be given by also queueing or merging is not a review, and the verdict a
+reviewer most needs to give is the one that says no.
 
 The pinned FSDK base owns the contributor toolchain. `review` consumes the
 tools the image ships and does not reimplement them: a missing utility is

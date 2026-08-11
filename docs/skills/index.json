@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-08",
+  "generated_at": "2026-08-10",
   "schema_version": "1.0",
   "skills": [
     {
@@ -127,15 +127,33 @@
       "tags": [
         "git",
         "pullrequest",
-        "conventional",
-        "hooks",
         "branches",
-        "worktree"
+        "labels",
+        "testing"
       ],
-      "description": "Defines protected-branch pull request, branch, title, trailer, and validation requirements, how to commit without clobbering uncommitted work, and how to reconcile a long-lived branch with a squash-merged main. Use before branching or committing.",
-      "version": "1.7",
-      "last_updated": "2026-08-07",
+      "description": "Defines pull request, branch, title, trailer, and validation requirements, the factory's seven-label contract and this repository's three automation labels, how to reconcile a long-lived branch with squash-merged main, and why a test must run a feature.",
+      "version": "1.9",
+      "last_updated": "2026-08-09",
       "doc_type": "policy"
+    },
+    {
+      "id": "review-dashboard",
+      "name": "review-dashboard",
+      "one_line_purpose": "Change the maintainer dashboard without weakening its gate or hiding the queue.",
+      "entry_point": "docs/skills/review-dashboard.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "textual",
+        "tui",
+        "dashboard",
+        "review",
+        "maintainer"
+      ],
+      "description": "Maintains image/tui/bluefin_review_tui.py: the mutation gate, the queue view, and its Textual patterns. Use when editing the dashboard or its pilot tests.",
+      "version": "1.0",
+      "last_updated": "2026-08-09",
+      "doc_type": "runbook"
     },
     {
       "id": "skill-improvement",
@@ -170,8 +188,8 @@
         "pullrequest"
       ],
       "description": "Publishes the public static PR queue without creating queue authority. Use when changing queue generation, ranking, artifacts, or refresh automation.",
-      "version": "1.7",
-      "last_updated": "2026-08-08",
+      "version": "1.9",
+      "last_updated": "2026-08-10",
       "doc_type": "procedure"
     },
     {

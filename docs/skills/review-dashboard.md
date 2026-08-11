@@ -1,0 +1,159 @@
+---
+name: review-dashboard
+version: "1.0"
+last_updated: 2026-08-09
+id: review-dashboard
+one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
+entry_point: docs/skills/review-dashboard.md
+category: ci-ops
+mcp_compliance_level: partial
+optimization_status: draft
+status: active
+dependencies: []
+tags: [textual, tui, dashboard, review, maintainer]
+description: "Maintains image/tui/bluefin_review_tui.py: the mutation gate, the queue view, and its Textual patterns. Use when editing the dashboard or its pilot tests."
+metadata:
+  type: runbook
+  context7-sources: [/websites/textual_textualize_io]
+---
+
+# Review Dashboard
+
+## When to Use
+
+Load this before editing `image/tui/bluefin_review_tui.py`,
+`tests/dashboard_pilot.py`, or `tests/dashboard-contract.sh` — the maintainer
+surface `just review-queue` opens.
+
+## When Not to Use
+
+Do not use this for the launcher that starts the container
+([`launcher.md`](launcher.md)), the image it runs in
+([`image-build.md`](image-build.md)), the snapshot generator
+([`static-pr-queue.md`](static-pr-queue.md)), or Hive's contributor protocol
+([`hive-runtime.md`](hive-runtime.md)).
+
+## Core Process
+
+1. **Every mutation goes through `mutate_all()`.** It shows the exact `gh`
+   commands and runs nothing until the maintainer types the pull request
+   number. The read-only `gh()` helper must never carry a mutating verb.
+2. **One decision is one gate.** An action needing several `gh` calls passes
+   them all to a single `mutate_all()` so the whole sequence is confirmed
+   once and then runs to completion. Never chain gated calls through a
+   completion callback: it asks the maintainer to confirm the same decision
+   twice, which trains the number as a reflex.
+3. **Order a sequence so its first failure is harmless.** `mutate_all()`
+   stops at the first non-zero exit. Put the step that can fail without
+   consequence first — creating a missing `lgtm` label before submitting the
+   approval means a failure leaves no approval that nothing will act on.
+4. **A failure must survive the notification.** Record it on the `Stop`, mark
+   the row, count it in the status line, and keep the stop selected so a
+   batch carries it forward. A toast is gone before a batch of eight
+   finishes.
+5. **Batch every action that a maintainer repeats.** Queueing, merging and
+   updating branches all take the batch selection when one exists, one gate
+   per pull request.
+6. **Add the behaviour to `tests/dashboard_pilot.py`**, which drives the real
+   app through `run_test()`. The static greps in
+   `tests/dashboard-contract.sh` are for proving *absence* — a power the
+   dashboard must not have. Presence is proven by pressing the key.
+
+## Textual Patterns
+
+Verified against `/websites/textual_textualize_io`.
+
+**Escaping is not optional, and upstream's `escape` is not sufficient.** Both
+`rich.markup.escape` and `textual.markup.escape` compile
+`(\\*)(\[[a-z#/@][^[]*?])` — the tag pattern matches **lowercase only** — while
+the renderer consumes `[H]` and `[WIP]` all the same. A pull request titled
+`[WIP] fix the thing` silently lost its prefix. Use the module's own
+`escape()`, which escapes every opening bracket:
+
+```python
+def escape(text: str) -> str:
+    return str(text).replace("\\", "\\\\").replace("[", "\\[")
+```
+
+Upstream's own recommendation for mixing variables into markup is template
+substitution, which sidesteps the question entirely:
+
+```python
+Content.from_markup("hello [bold]$name[/bold]!", name=name)
+```
+
+**Links need a quoted URL.** `[link=https://…]` fails the markup value parser
+at the colon; `[link="https://…"]` is correct, and reaches the terminal as
+OSC 8.
+
+**Never touch the DOM from a thread worker — including the query.** Textual
+is not thread-safe. `self.call_from_thread(self.query_one(...).update, text)`
+looks safe and is not: the query runs on the worker thread and can race a
+repaint. Hand the whole operation over:
+
+```python
+@work(thread=True)
+def render_context(self, stop: Stop) -> None:
+    ...
+    self.call_from_thread(self.paint_context, "\n".join(lines))
+
+def paint_context(self, text: str) -> None:
+    self.query_one("#context", Static).update(text)
+```
+
+**Diffs get Pygments through Rich**: `Syntax(text, "diff", theme="ansi_dark")`.
+`ansi_dark` resolves to the terminal's own palette instead of assuming a
+background colour.
+
+## Design Rules
+
+- **Show the whole queue by default.** Defaulting to one
+  `recommended_action` rendered a 121-stop queue as five and hid every
+  merge-ready pull request. When a view is filtered, the status line says how
+  many stops are hidden.
+- **Colour is never the only carrier of a fact.** Rows colour by state *and*
+  carry `⚑ CONFLICTS` / `✗ CI` / `✓ approved`.
+- **Prefer the snapshot already in memory.** `mergeable_state`, `check_state`,
+  `review_state`, `labels` and every duplicate's title arrive with the queue
+  and the cluster listing. Colour, the merge-queue meter and the duplicate
+  summaries all cost zero extra requests.
+- **Distinguish the three merge paths.** `a` approves and applies `lgtm`, an
+  opt-in to Hive's sweep. `m` squashes now and is gated on GitHub's `push`
+  permission, read per repository. `L` leaves a review and merges nothing.
+  A review that can only be given by also queueing or merging is not a review.
+- **Never bypass branch protection.** No `--admin`, no `--delete-branch`, no
+  push.
+
+## Common Rationalizations
+
+| Rationalization | Reality |
+|---|---|
+| "Two confirmations is safer than one." | It is the same decision twice. The second prompt teaches the number as a reflex, and an abort at it leaves half the action applied. |
+| "The notification reports the failure." | It is gone before a batch finishes. Mark the row. |
+| "A grep proves the feature works." | It proves the source contains a string. The pilot presses the key. |
+| "I know this Textual API." | `escape` misses uppercase tags and `[link=…]` needs quotes — both were found by running it, not by remembering it. |
+
+## Red Flags
+
+- `then=lambda: self.mutate(...)` — a chained gate; the contract fails on it.
+- Interpolating any GitHub-sourced text into markup without `escape()`.
+- `self.query_one(...)` evaluated inside an `@work(thread=True)` body.
+- A new mutating verb passed to the read-only `gh()` helper.
+- A default view that filters the queue without saying so.
+- A feature added with only a `tests/dashboard-contract.sh` grep behind it.
+
+## Verification
+
+```bash
+bash tests/dashboard-contract.sh     # static contract + the Textual pilot
+bash tests/image-contract.sh
+pre-commit run --all-files
+```
+
+- [ ] Every new mutation runs through `mutate_all()` and shows its commands.
+- [ ] Multi-command actions are one gate, ordered so the first failure is
+      harmless.
+- [ ] Failures mark the row and keep the stop selected.
+- [ ] All GitHub-sourced text passes through `escape()`.
+- [ ] No DOM access inside a thread worker.
+- [ ] The pilot presses the key and asserts the result.

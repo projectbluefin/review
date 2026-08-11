@@ -6,12 +6,6 @@ on:
       - main
     tags:
       - "v*.*.*"
-  # Hourly canary tracking: Goose's `canary` tag moves without any commit
-  # here, and ':stable' only picked it up on the next merge. Scheduled runs
-  # still skip the build when the published image already carries the
-  # current asset digests.
-  schedule:
-    - cron: "42 * * * *"
   workflow_dispatch:
 
 # Branch builds are a moving pointer, so a superseded run has nothing left to
@@ -128,37 +122,7 @@ jobs:
             echo "aarch64_sha256=$(asset_digest goose-aarch64-unknown-linux-musl.tar.gz)"
           } >>"$GITHUB_OUTPUT"
 
-      - name: Skip scheduled builds when stable already tracks this snapshot
-        id: current
-        if: github.event_name == 'schedule'
-        shell: bash
-        run: |
-          set -euo pipefail
-          # GHCR serves public package manifests to an anonymous pull token.
-          # A lookup failure resolves to "build": a pointless republish is
-          # cheap, a skipped refresh is the defect this schedule exists to fix.
-          published="$(
-            token="$(curl -fsS "https://ghcr.io/token?scope=repository:${GITHUB_REPOSITORY}:pull" | jq -er .token)"
-            auth="Authorization: Bearer ${token}"
-            base="https://ghcr.io/v2/${GITHUB_REPOSITORY}"
-            index_accept="application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json"
-            manifest_accept="application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json"
-            index="$(curl -fsS -H "$auth" -H "Accept: ${index_accept}" "$base/manifests/stable")"
-            amd64="$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest][0]' <<<"$index")"
-            config="$(curl -fsS -H "$auth" -H "Accept: ${manifest_accept}" "$base/manifests/${amd64}" | jq -er .config.digest)"
-            curl -fsSL -H "$auth" "$base/blobs/${config}" \
-              | jq -er '.config.Labels["io.projectbluefin.review.goose.x86_64-unknown-linux-musl.sha256"]'
-          )" || published=""
-          if [[ "$published" == "${{ steps.goose.outputs.x86_64_sha256 }}" ]]; then
-            echo "stable already carries goose snapshot ${published}; nothing to publish."
-            echo "refresh_needed=false" >>"$GITHUB_OUTPUT"
-          else
-            echo "stable carries '${published:-unreadable}', canary is at ${{ steps.goose.outputs.x86_64_sha256 }}; building."
-            echo "refresh_needed=true" >>"$GITHUB_OUTPUT"
-          fi
-
       - name: Build review image for smoke test
-        if: steps.current.outputs.refresh_needed != 'false'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
@@ -175,7 +139,6 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Inspect review image
-        if: steps.current.outputs.refresh_needed != 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -189,7 +152,6 @@ jobs:
             -lc 'TERM=xterm-256color infocmp xterm-256color >/dev/null; infocmp tmux-direct >/dev/null; TERM=xterm-256color tmux new-session -d -s terminfo-smoke "sleep 30"; tmux has-session -t terminfo-smoke; test "$(tmux show -gv default-terminal)" = tmux-direct; tmux kill-session -t terminfo-smoke'
 
       - name: Log in to GHCR
-        if: steps.current.outputs.refresh_needed != 'false'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
@@ -197,7 +159,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish immutable image tags
-        if: steps.current.outputs.refresh_needed != 'false'
         id: publish
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
@@ -240,7 +201,6 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Attest published review image digest
-        if: steps.current.outputs.refresh_needed != 'false'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-name: ${{ env.IMAGE }}
@@ -248,14 +208,12 @@ jobs:
           push-to-registry: true
 
       - name: Install image audit tooling
-        if: steps.current.outputs.refresh_needed != 'false'
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --yes skopeo
 
       - name: Audit published image composition and attestations
-        if: steps.current.outputs.refresh_needed != 'false'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -273,7 +231,6 @@ jobs:
             --expected-version "${{ steps.tags.outputs.version || steps.tags.outputs.sha }}"
 
       - name: Verify published digest
-        if: steps.current.outputs.refresh_needed != 'false'
         shell: bash
         env:
           DIGEST: ${{ steps.publish.outputs.digest }}

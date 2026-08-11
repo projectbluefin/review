@@ -24,6 +24,21 @@ Load this when a contributor has connected successfully but remains idle before
 receiving an assignment. Use [`hive-runtime.md`](hive-runtime.md) when work
 arrived and the session then failed.
 
+## When Not to Use
+
+Do not use this to change contributor runtime behaviour
+([`hive-runtime.md`](hive-runtime.md)), and do not use it to file an upstream
+issue — collect the evidence here, then follow
+[`upstream-hive.md`](upstream-hive.md).
+
+## Common Rationalizations
+
+| Rationalization | Reality |
+|---|---|
+| "No task arrived, so Hive is down." | Far more often the contributor is registered against a different hub, or the trust tier admits no matching task. Check the hub the launch printed. |
+| "I will skip this assignment and take the next." | Hive is the sole authority for task selection. Skipping mid-protocol is out of contract; report the problem instead. |
+| "The agent looked idle, so nothing is running." | An idle pane is not an idle worker. Read the contributor state before concluding. |
+
 ## Core Process
 
 1. Confirm the launcher reached a ready contributor session. Resolve local

@@ -179,12 +179,34 @@ fix.
     cold/warm builds, and native amd64/arm64 runtime behavior before and after
     each composition change. Deleting inherited files in a later layer does not
     reclaim the base layer.
-The publish workflow moves `:stable` on main and re-runs hourly on a
-schedule so a moved Goose `canary` asset reaches `:stable` without waiting
-for a merge; a scheduled run that resolves the same asset digests the
-published image already carries skips the build. It also publishes immutable
-`sha-<commit>` tags; use an immutable tag or digest when reproducibility is
-required. Do not use `:latest`.
+The publish workflow moves `:stable` on every push to main, and can be run by
+hand with `workflow_dispatch`. It also publishes immutable `sha-<commit>`
+tags; use an immutable tag or digest when reproducibility is required. Do not
+use `:latest`.
+
+Goose's `canary` asset moves without a commit here, so `:stable` tracks it
+only as far as the last push. That is deliberate: it was previously chased by
+an hourly scheduled rebuild, which shared a concurrency group with the push
+build and cancelled it, then skipped its own build because the Goose digests
+had not changed — reporting success while leaving a merged commit unpublished.
+A publish that only runs when the source changes cannot do that. Run the
+workflow by hand when a canary refresh is wanted without a commit.
+
+Two rules follow, and both are about trusting the wrong signal:
+
+- **A scheduled run must never share `cancel-in-progress` with a push.** The
+  schedule's whole purpose is a condition the push does not know about, so
+  when it cancels a push it substitutes a run that cannot publish the source.
+- **Verify the published image, never the green check.** After any change that
+  must reach users, read the revision back:
+
+  ```bash
+  skopeo inspect docker://ghcr.io/projectbluefin/review:stable \
+    | jq -r '.Labels["org.opencontainers.image.revision"]'
+  ```
+
+  A green publish workflow has meant "nothing was published" twice — once from
+  the cancelled schedule, once from a commit message that skipped CI entirely.
 ## Pin Maintenance
 **An unmaintainable pin is a stale pin.** A pin's strictness is worthless if
 no automation can see past it, and a frozen pin raises no failing check — it
@@ -299,13 +321,14 @@ bash tests/hive-compatibility.sh
 bash tests/generate-skills.sh
 bash tests/image-audit.sh --verify-base-evidence
 grep -Fq "$(sed -n 's/^hive_commit := "\(.*\)"$/\1/p' justfile)" README.md
+ref="ghcr.io/projectbluefin/review:sha-$(git rev-parse HEAD)"
 GH_TOKEN="$(gh auth token)" podman build \
   --secret id=github_token,env=GH_TOKEN \
   --build-arg GOOSE_REFRESH="$(date +%s)" \
-  -f image/Containerfile -t review:dev .
-bash tests/image-audit.sh --derived review:dev
+  -f image/Containerfile -t "$ref" .
+bash tests/image-audit.sh --derived "$ref"
 # Optional: keep the Markdown report (generated output, git-ignored).
-bash tests/image-audit.sh --derived review:dev --report image-audit-report.md
+bash tests/image-audit.sh --derived "$ref" --report image-audit-report.md
 git diff --check
 ```
 

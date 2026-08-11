@@ -23,6 +23,21 @@ metadata:
 Load this before changing code near a Hive session boundary or when an
 assigned contributor session behaves unexpectedly.
 
+## When Not to Use
+
+Do not use this to diagnose a specific stuck or missing assignment — that is
+[`hive-triage.md`](hive-triage.md) — or to report a finding upstream, which is
+[`upstream-hive.md`](upstream-hive.md). Do not use it for the launcher's own
+credential handling ([`launcher.md`](launcher.md)).
+
+## Common Rationalizations
+
+| Rationalization | Reality |
+|---|---|
+| "A local shim will unblock this now." | It outlives the gap it was written for and shadows the real tool once upstream lands the fix. Report it and wait. |
+| "Upstream is slow; we can patch our copy." | A patched copy of a pinned upstream file silently diverges at the next bump, and nothing fails to say so. |
+| "The pin is close enough to upstream." | `tests/hive-compatibility.sh` compares the consumed files; run it rather than assuming. |
+
 ## Core Process
 
 1. Let Hive own the WebSocket protocol, assignment selection, `contributor`

@@ -61,14 +61,14 @@ Goose, or image build skill documents.
    Hive's `contributor` session.
    `review-queue` is the exception that proves the rule: it mounts nothing at
    all and starts the image with the `queue` argument, which the entrypoint
-   dispatches to `bluefin-review queue` before the Hive config gate. The walk
-   needs a GitHub token from the first keystroke, so the recipe fails without
-   one rather than warning. Leading non-flag arguments are the model profile
-   and thinking effort — the same closed set `review-container` takes — and
-   everything from the first `-` flag onward forwards verbatim to
-   `bluefin-review queue`. Its instance name is `review-queue`, overridable
-   with `REVIEW_QUEUE_NAME` — the queue walk's analogue of
-   `REVIEW_CONTAINER_NAME`, and likewise the only instance knob it gets.
+   dispatches to the maintainer dashboard before the Hive config gate. The
+   dashboard needs a GitHub token from the first keystroke, so the recipe
+   fails without one rather than warning. Leading non-flag arguments are the
+   model profile and thinking effort — the same closed set `review-container`
+   takes — and everything from the first `-` flag onward forwards verbatim to
+   the dashboard. Its instance name is `review-queue`, overridable with
+   `REVIEW_QUEUE_NAME` — the dashboard's analogue of `REVIEW_CONTAINER_NAME`,
+   and likewise the only instance knob it gets.
    Which hive a launch contributes to is launcher configuration, not task
    selection: `~/.config/hive/contributor.<name>.env` registrations sit
    beside the default `contributor.env`, and the launch picks `REVIEW_HIVE`
@@ -78,6 +78,15 @@ Goose, or image build skill documents.
    registration is never clobbered. Every launch prints the hub it will
    talk to; a silent default is how a contributor ends up watching one
    hub's dashboard while their agent asks another for work.
+   Mount the selected registration and nothing else. Bind-mounting
+   `~/.config/hive` and overlaying the selected file on top of it looks
+   equivalent and is not: rootless Podman prepares the nested target through
+   the already-mounted host directory, so a named registration made target
+   creation escape to the host and leave a zero-byte `contributor.env` owned
+   by a subordinate uid, which the container then failed on. Use the shared
+   `:z` relabel, never `:Z` — concurrent named workers may share one
+   registration, and a private MCS category revokes the running container's
+   access when the next one starts.
 4. Keep Goose Copilot-only. The launcher resolves a Copilot credential for the
    provider secret and recomputes the provider and model from the environment
    at every launch. Nothing is persisted: not a secret, not a provider, not a
@@ -174,9 +183,12 @@ maps onto `dev`. Never answer this by loosening the host file's mode; it holds
 Hive credentials.
 
 A locally built image has no registry behind it and is not a moving tag.
-`podman build -t review:dev` stores `localhost/review:dev`, and refreshing
-that emits pull retries and an always-false "may be out of date" warning.
-Detect the local build before deciding a ref is refreshable.
+`podman build -t <name>:<tag>` stores the result under `localhost/`, and
+refreshing that emits pull retries and an always-false "may be out of date"
+warning. Detect the local build before deciding a ref is refreshable. Build
+local images under the `sha-<commit>` tag CI mints for that commit: it names
+exactly one build, so it is never re-pulled over, and it says which commit is
+in the image.
 
 The same reasoning governs the missing case. `localhost/` is podman's local
 storage namespace, never a registry host, so pulling a `localhost/` ref that

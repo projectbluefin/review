@@ -40,31 +40,25 @@ if [ -n "${GOOSE_PROVIDER:-}" ] && [ "$GOOSE_PROVIDER" != github_copilot ]; then
   exit 1
 fi
 
-# A queue walk is the PR-review launch path: `bluefin-review queue` needs
-# GH_TOKEN and Goose but no Hive registration, so it skips the contributor.env
-# gate and the Hive handover below. `dashboard` is the same launch path
-# rendered as the maintainer TUI instead of the line-mode walk.
-queue_walk=false
-dashboard=false
+# The maintainer review surface is the PR-review launch path: the dashboard
+# needs GH_TOKEN and Goose but no Hive registration, so it skips the
+# contributor.env gate and the Hive handover below.
+review_dashboard=false
 if [ "${1:-}" = queue ]; then
-  queue_walk=true
-  shift
-elif [ "${1:-}" = dashboard ]; then
-  queue_walk=true
-  dashboard=true
+  review_dashboard=true
   shift
 fi
 
 hive_config="${HOME}/.config/hive"
-if [ "$queue_walk" = false ] && [ ! -f "${hive_config}/contributor.env" ]; then
+if [ "$review_dashboard" = false ] && [ ! -f "${hive_config}/contributor.env" ]; then
   note "missing ${hive_config}/contributor.env"
   note "  mount your Hive config, or run: just contribute-setup goose"
-  note "  walking the PR queue needs no Hive: run the image with 'queue'"
+  note "  reviewing the PR queue needs no Hive: run the image with 'queue'"
   exit 1
 fi
 
-if [ "$queue_walk" = true ]; then
-  note 'Bluefin Operations | PR queue walk starting (no Hive)'
+if [ "$review_dashboard" = true ]; then
+  note 'Bluefin Operations | review dashboard starting (no Hive)'
 else
   note 'Bluefin Operations | contributor runtime starting'
 fi
@@ -91,8 +85,8 @@ export GOOSE_MODEL
 
 export GOOSE_THINKING_EFFORT="${GOOSE_THINKING_EFFORT:-high}"
 
-if [ "$queue_walk" = true ]; then
-  banner 'PR queue walk (no Hive)'
+if [ "$review_dashboard" = true ]; then
+  banner 'PR queue dashboard (no Hive)'
 else
   banner 'Hive contributor'
 fi
@@ -148,8 +142,8 @@ if ((${#missing_validation_tools[@]})); then
   note "validation tools unavailable: ${missing_validation_tools[*]} (fsdk-containers#89)"
 fi
 
-if [ "$queue_walk" = true ]; then
-  # A queue walk gets its context the way a Hive session does, minus Hive:
+if [ "$review_dashboard" = true ]; then
+  # The dashboard gets its context the way a Hive session does, minus Hive:
   # source the pinned runtime's extension seam (/etc/hive/entrypoint.d), whose
   # hook owns the hosted hub URL and the curl rewrite to its authenticated
   # endpoint, then fetch the knowledge export with upstream's own expression.
@@ -171,21 +165,18 @@ if [ "$queue_walk" = true ]; then
       hub_http="${HIVE_HUB/wss:\/\//https://}"
       curl -sf --max-time 30 "${hub_http%/contribute}/api/knowledge/export" \
         -o "${HOME}/agent.md" || rm -f "${HOME}/agent.md"
-      # Goose-native delivery, as upstream's runtime does it: a review
-      # subprocess then inherits hub context without relying on the
-      # --instructions pointer alone.
-      if [ -s "${HOME}/agent.md" ]; then
-        ln -sf agent.md "${HOME}/AGENTS.md"
-        ln -sf agent.md "${HOME}/.goosehints"
-        ln -sf agent.md "${HOME}/.goose-instructions.md"
-      fi
+      # The export stays a file the agent can search, and is deliberately NOT
+      # linked to AGENTS.md/.goosehints/.goose-instructions.md. Goose loads
+      # those into EVERY subprocess it starts, and 'goose review' starts one
+      # per check: linking them spent the live export — 417 KB of scraped
+      # documentation — of each check's context window before the diff was
+      # read, and checks answered with prose or an empty response instead of
+      # a verdict. The review scope's REVIEW.md names the path instead, so
+      # the knowledge base is reachable at the cost of one line.
     fi
   fi
-  note 'Bluefin Operations | PR queue walk (no Hive)'
-  if [ "$dashboard" = true ]; then
-    exec /opt/bluefin/tui/.venv/bin/python /opt/bluefin/tui/bluefin_review_tui.py "$@"
-  fi
-  exec bluefin-review queue "$@"
+  note 'Bluefin Operations | maintainer review dashboard (no Hive)'
+  exec /opt/bluefin/tui/.venv/bin/python /opt/bluefin/tui/bluefin_review_tui.py "$@"
 fi
 
 # --- Hand over to Hive -------------------------------------------------------

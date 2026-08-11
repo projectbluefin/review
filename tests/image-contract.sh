@@ -460,16 +460,15 @@ require image/entrypoint.sh \
   'truecolor | 24bit) tmux_fallback_term=xterm-direct ;;' \
   'TERM=${TERM:-<unset>} has no terminfo; using ${tmux_fallback_term}' \
   '/usr/local/bin/contributor-agent.sh "$@" &' \
-  'queue_walk=false' \
+  'review_dashboard=false' \
   '${1:-}" = queue' \
-  '$queue_walk" = false' \
-  'walking the PR queue needs no Hive' \
-  'PR queue walk starting (no Hive)' \
+  '$review_dashboard" = false' \
+  'reviewing the PR queue needs no Hive' \
+  'review dashboard starting (no Hive)' \
   'for hook in /etc/hive/entrypoint.d/*.sh; do' \
   'export HIVE_HUB="$hosted_hub"' \
   'api/knowledge/export' \
-  'ln -sf agent.md "${HOME}/AGENTS.md"' \
-  'exec bluefin-review queue "$@"' \
+  'exec /opt/bluefin/tui/.venv/bin/python /opt/bluefin/tui/bluefin_review_tui.py "$@"' \
   'tmux has-session -t contributor' \
   'tmux readiness diagnostics' \
   'tmux attach-session -t contributor' \
@@ -481,10 +480,16 @@ require image/entrypoint.sh \
   "note 'tmux detached; the agent remains foreground in this terminal. Press Ctrl-C or close this terminal to stop it.'" \
   'wait "$agent_pid"' \
   'tmux kill-session -t contributor'
+# The hub knowledge export stays a file the agent can search. Linking it to
+# Goose's context-file names loaded all 417 KB of it into every subprocess
+# 'goose review' starts — one per check — and checks began answering with
+# prose or an empty response instead of a verdict.
 forbid image/entrypoint.sh \
   'context7' \
   'mcp.context7.com' \
-  'CONTEXT_FILE_NAMES'
+  'CONTEXT_FILE_NAMES' \
+  'ln -sf agent.md' \
+  'bluefin-review queue'
 
 require README.md \
   'Goose canary snapshot' \

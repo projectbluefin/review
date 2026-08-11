@@ -28,6 +28,21 @@ observe is expected work, not a favor. The standard is to be the downstream an
 upstream maintainer wants: precise, evidence-first, and never presuming their
 decisions.
 
+## When Not to Use
+
+Do not use this for a gap owned by this repository, by
+`projectbluefin/fsdk-containers` (base-image content), or by
+`projectbluefin/common` (org skills). Route by who owns the broken thing, not
+by which repository is easiest to file in.
+
+## Common Rationalizations
+
+| Rationalization | Reality |
+|---|---|
+| "A local workaround is faster than an upstream fix." | It is, once. Then it is permanent, undocumented, and diverges at the next pin bump. Accepted upstream gaps get no local workaround. |
+| "They will not act on it, so why file?" | An unreported gap is indistinguishable from one nobody hit. Evidence with a reproduction is what makes it actionable. |
+| "I will file it and move on." | Filed issues are followed up here. An abandoned issue is a gap that stopped being tracked. |
+
 ## Upstream Facts
 
 Verified 2026-08-04 against `kubestellar/hive`:

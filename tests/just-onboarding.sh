@@ -411,8 +411,8 @@ assert_eq "$(wc -c <"$gum_log")" 0 "the launcher must never prompt for a model"
 assert_file_contains "--env GOOSE_MODEL=gpt-5.6-luna" "$runner_log"
 assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
 
-# ══ 2b. Queue walk: no Hive, GH_TOKEN required, args pass through ════════
-begin "review-queue: launches the walk with no Hive config at all"
+# ══ 2b. Dashboard: no Hive, GH_TOKEN required, args pass through ═════════
+begin "review-queue: launches the dashboard with no Hive config at all"
 reset_logs
 mv "$home/.config/hive" "$home/.config/hive.saved"
 RECIPE_ARGS=(--repo bluefin)
@@ -425,12 +425,12 @@ assert_file_contains "--env GOOSE_PROVIDER=github_copilot" "$runner_log"
 assert_file_not_contains ".config/hive" "$runner_log"
 assert_file_contains "GH_TOKEN:present" "$credential_log"
 assert_not_contains "contributor.env" "$OUT"
-assert_contains "starting the PR queue walk (no Hive)" "$OUT"
+assert_contains "starting the maintainer review dashboard (no Hive)" "$OUT"
 
 begin "review-queue: no GitHub token is one actionable error"
 reset_logs
 run_recipe review-queue GH_READY=1
-assert_nonzero_status "$STATUS" "a queue walk without a token must not launch"
+assert_nonzero_status "$STATUS" "the dashboard without a token must not launch"
 assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
 assert_contains "cannot run without a token" "$OUT"
 assert_eq "$(wc -c <"$runner_log")" 0 "no container may start without a token"
@@ -487,8 +487,12 @@ run_recipe review-container GH_READY=1 \
 assert_nonzero_status "$STATUS" "the fake podman always exits non-zero"
 assert_eq "$(wc -l <"$runner_log")" 1 "expected exactly one podman invocation"
 assert_file_contains "run --rm --interactive --tty --replace --name review-container" "$runner_log"
-assert_file_contains "--volume ${home}/.config/hive:/home/dev/.config/hive:ro" "$runner_log"
-assert_file_contains "--volume ${home}/.config/hive/contributor.env:/home/dev/.config/hive/contributor.env:ro" "$runner_log"
+# Only the selected registration is mounted. The directory mount it used to
+# sit on top of made rootless Podman create a bogus host contributor.env when
+# a named registration was selected (#143), and nothing in the image reads
+# anything else from that directory.
+assert_file_not_contains "--volume ${home}/.config/hive:/home/dev/.config/hive" "$runner_log"
+assert_file_contains "--volume ${home}/.config/hive/contributor.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
 assert_file_contains "--env AGENT_BACKEND=goose" "$runner_log"
 assert_file_contains "--env GOOSE_PROVIDER=github_copilot" "$runner_log"
 assert_file_contains "--env GOOSE_MODEL=gpt-test" "$runner_log"
@@ -558,7 +562,9 @@ EOF
 # The tests run with the review repository as cwd, so the repo-derived
 # registration name is 'review'.
 run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test
-assert_file_contains "--volume ${home}/.config/hive/contributor.review.env:/home/dev/.config/hive/contributor.env:ro" "$runner_log"
+assert_file_contains "--volume ${home}/.config/hive/contributor.review.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
+# The named launch must not require, create, or mutate the default (#143).
+assert_file_not_contains "--volume ${home}/.config/hive:/home/dev/.config/hive" "$runner_log"
 assert_contains "hive: wss://named-hive.invalid/contribute (registration 'review')" "$OUT"
 assert_not_contains "super-secret-registration-token" "$OUT"
 assert_not_contains "named-secret-token" "$OUT"
@@ -568,7 +574,7 @@ rm -f "$home/.config/hive/contributor.review.env"
 begin "hive selection: no repo registration falls back to the default and says so"
 reset_logs
 run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test
-assert_file_contains "--volume ${home}/.config/hive/contributor.env:/home/dev/.config/hive/contributor.env:ro" "$runner_log"
+assert_file_contains "--volume ${home}/.config/hive/contributor.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
 assert_contains "hive: wss://example.invalid/contribute (default registration)" "$OUT"
 assert_contains "REVIEW_HIVE=review" "$OUT"
 
@@ -578,7 +584,7 @@ cp "$home/.config/hive/contributor.env" "$home/.config/hive/contributor.otherhiv
 sed -i 's|wss://example.invalid/contribute|wss://other-hive.invalid/contribute|' \
   "$home/.config/hive/contributor.otherhive.env"
 run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test REVIEW_HIVE=otherhive
-assert_file_contains "--volume ${home}/.config/hive/contributor.otherhive.env:/home/dev/.config/hive/contributor.env:ro" "$runner_log"
+assert_file_contains "--volume ${home}/.config/hive/contributor.otherhive.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
 assert_contains "hive: wss://other-hive.invalid/contribute (registration 'otherhive')" "$OUT"
 rm -f "$home/.config/hive/contributor.otherhive.env"
 

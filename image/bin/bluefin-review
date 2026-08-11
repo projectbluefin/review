@@ -1,16 +1,27 @@
 #!/usr/bin/env bash
-# Managed Reviewer Client.
+# The review engine.
 #
-# Two modes, one contract: this prepares a Review Draft for a human. It never
-# approves, submits, or merges. Every state-changing action below is one the
-# maintainer explicitly selects from the menu, and the destructive ones are
-# simply not offered.
+# One contract, two entry points: this prepares a Review Draft for a human. It
+# never approves, submits, or merges, and it offers no state-changing action at
+# all — the maintainer surface (the dashboard) owns those, behind its own
+# typed-number gate.
 #
-#   bluefin-review [range]   review a local diff through Goose (default)
-#   bluefin-review queue     walk the Bluefin PR queue one pull request at a time
+#   bluefin-review [range]           review a local diff through Goose
+#   bluefin-review pr <repo> <num>   review one pull request through Goose
+#
+# The dashboard shells out to 'pr' for its review key, so both surfaces judge a
+# change through exactly one code path.
 set -euo pipefail
 
-QUEUE_URL="${BLUEFIN_REVIEW_QUEUE_URL:-https://projectbluefin.github.io/review/queue.json}"
+# 'goose review' exits 0 even when a check never returned a verdict: the model
+# answers with prose or an empty response, the orchestrator prints
+# "check '<name>' failed: parse check JSON: ..." and then reports the run's
+# finding count as though that check had simply found nothing. Reading
+# "0 finding(s)" off such a run and calling it clean is the worst outcome this
+# tool can produce, so an incomplete review gets its own exit status.
+REVIEW_INCOMPLETE=65
+CHECK_FAILURE_PATTERN='^goose review: .+ failed: '
+
 WORKSPACE="${HIVE_WORKSPACE_DIR:-${HOME}/workspace}"
 
 # Goose discovers session skills under ~/.agents/skills, but 'goose review'
@@ -66,8 +77,10 @@ review_instructions() {
     listing+="- hive knowledge base (refreshed from the hub): ${KNOWLEDGE_FILE}"$'\n'
   fi
   if [[ -z "$listing" ]]; then
-    # No doctrine on disk, but a duplicate cluster still needs to reach Goose.
+    # No doctrine on disk, but a duplicate cluster and the maintainer's own
+    # steering still need to reach Goose.
     [[ -n "${BLUEFIN_REVIEW_RELATED:-}" ]] && printf '%s' "$BLUEFIN_REVIEW_RELATED"
+    [[ -n "${BLUEFIN_REVIEW_STEER:-}" ]] && printf '%s' "$(steer_instructions)"
     return 0
   fi
 
@@ -82,17 +95,66 @@ recommendation as one."
   if [[ -n "${BLUEFIN_REVIEW_RELATED:-}" ]]; then
     printf '\n\n%s' "$BLUEFIN_REVIEW_RELATED"
   fi
+  if [[ -n "${BLUEFIN_REVIEW_STEER:-}" ]]; then
+    printf '\n\n%s' "$(steer_instructions)"
+  fi
 }
 
-# Every review goes through here so both modes carry the same context. With
-# the image overlay present, context travels as a check scope: --check-scope
-# REPLACES repo-root discovery, so the scratch scope always carries the full
-# static overlay plus the per-stop cluster-resolution check when a duplicate
-# cluster exists. Without the overlay, the --instructions pointer carries the
-# same doctrine.
+# The maintainer's own words for this one review, typed into the dashboard's
+# steering box. Additive: it directs attention within the review, and can
+# never license an approval, a merge, or any other state change.
+steer_instructions() {
+  printf '%s' "The maintainer is steering this review. Give this their explicit
+attention, in addition to — never instead of — the checks above:
+
+${BLUEFIN_REVIEW_STEER}
+
+If the steering cannot be answered from the diff and the evidence available,
+say so plainly rather than guessing. This still produces a Review Draft only:
+a human makes every approval and merge decision."
+}
+
+# Run Goose and hold its output to account. 'goose review' reports a per-check
+# failure on its own progress stream and then exits 0 regardless, so the run is
+# scanned for checks that produced no verdict before its status is believed.
+run_reviewed() {
+  local log status=0 incomplete=0
+  log="$(mktemp "${TMPDIR:-/tmp}/bluefin-review-log.XXXXXX")"
+  # Merged, because the verdict and the progress reporting have to be read
+  # together — and tee'd, because the reviewer still watches it stream.
+  "$@" 2>&1 | tee "$log" || status=$?
+  incomplete="$(grep -cE "$CHECK_FAILURE_PATTERN" "$log" 2>/dev/null)" || incomplete=0
+  if ((incomplete > 0)); then
+    report_incomplete_review "$log" "$incomplete"
+    if ((status == 0)); then status="$REVIEW_INCOMPLETE"; fi
+  fi
+  rm -f "$log"
+  return "$status"
+}
+
+# Name the parts of the review that never answered. A reviewer who is told
+# "0 findings" by a run where two checks died has been handed a false clean.
+report_incomplete_review() {
+  local log="$1" failures="$2"
+  printf '\n'
+  rule
+  printf ' REVIEW INCOMPLETE — %s part(s) of this review returned no verdict:\n' "$failures"
+  grep -E "$CHECK_FAILURE_PATTERN" "$log" | sed -E 's/^goose review: /   - /' | cut -c1-160
+  printf '\n This run'"'"'s finding count is not a clean bill of health: a check\n'
+  printf ' that failed to answer cannot have found nothing. Re-run the review.\n'
+  rule
+}
+
+# Every review goes through here so both entry points carry the same context.
+# With the image overlay present, context travels as a check scope:
+# --check-scope REPLACES repo-root discovery, so the scratch scope always
+# carries the full static overlay plus the per-review cluster-resolution check
+# when a duplicate cluster exists. Without the overlay, the --instructions
+# pointer carries the same doctrine.
 goose_review() {
+  local -a argv=(goose review)
+  local scope=""
   if [[ -d "${SCOPE_ROOT}/.agents" ]]; then
-    local scope status=0
     scope="$(mktemp -d "${TMPDIR:-/tmp}/bluefin-review-scope.XXXXXX")"
     mkdir -p "${scope}/.agents/checks"
     cp "${SCOPE_ROOT}/.agents/REVIEW.md" "${scope}/.agents/REVIEW.md"
@@ -104,17 +166,24 @@ goose_review() {
         printf '\nName explicitly which pull request should merge and which should close as superseded, with evidence from the diffs.\n'
       } >"${scope}/.agents/checks/cluster-resolution.md"
     fi
-    goose review --check-scope "$scope" "$@" || status=$?
-    rm -rf "$scope"
-    return "$status"
-  fi
-  local instructions
-  instructions="$(review_instructions)"
-  if [[ -n "$instructions" ]]; then
-    goose review --instructions "$instructions" "$@"
+    if [[ -n "${BLUEFIN_REVIEW_STEER:-}" ]]; then
+      {
+        printf -- '---\nname: maintainer-steering\n---\n\n'
+        steer_instructions
+        printf '\n'
+      } >"${scope}/.agents/checks/maintainer-steering.md"
+    fi
+    argv+=(--check-scope "$scope")
   else
-    goose review "$@"
+    local instructions
+    instructions="$(review_instructions)"
+    if [[ -n "$instructions" ]]; then argv+=(--instructions "$instructions"); fi
   fi
+
+  local status=0
+  run_reviewed "${argv[@]}" "$@" || status=$?
+  if [[ -n "$scope" ]]; then rm -rf "$scope"; fi
+  return "$status"
 }
 
 banner() {
@@ -136,23 +205,19 @@ usage() {
   cat <<'EOF'
 Usage:
   bluefin-review [range]              review a local diff through Goose
-  bluefin-review queue [options]      walk the Bluefin PR queue
+  bluefin-review pr <repo> <number>   review one pull request through Goose
 
-Queue options:
-  --action <name>   only this recommended_action (default: review)
-  --all             every action, not just one
-  --repo <name>     only this repository (short name or owner/repo)
-  --url <url>       read the queue from somewhere else
+'pr' clones the repository into the workspace, checks the pull request out,
+and reviews it against its base. Pull requests doing the same work are
+detected and judged as one cluster.
 
-Pull requests authored by the GH_TOKEN owner are skipped: a walk is for
-reviewing other people's work.
+This command only ever produces a Review Draft for a human. It has no
+approve, merge, comment, or close path. The maintainer surface — the
+dashboard, 'just review-queue' — owns every state-changing action, behind a
+typed pull-request-number confirmation.
 
-The queue is a recommendation snapshot. GitHub stays authoritative for pull
-request state. The maintainer action keys [m] and [M] arm auto-merge and
-resolve duplicate clusters; every state-changing command is printed first and
-runs only after the maintainer types the pull request number, and a merge is
-always '--auto --match-head-commit', so GitHub's required checks and branch
-protections still gate the actual merge.
+Exit status: 0 review complete, 65 review incomplete (a check returned no
+verdict — the finding count cannot be read as clean), other on failure.
 EOF
 }
 
@@ -253,98 +318,6 @@ repo_pulls() {
   printf '%s' "$cache"
 }
 
-show_related() {
-  local repo="$1" number="$2" cache
-  [[ -n "${CACHE_DIR:-}" ]] || return 0
-  if ! cache="$(repo_pulls "$repo")"; then
-    printf ' %-8s %s\n' 'related' "could not read open pull requests for ${repo}"
-    return 0
-  fi
-  python3 -c "$DUPLICATE_ANALYZER" "$number" "$cache" 2>/dev/null |
-    while IFS=$'\t' read -r kind detail; do
-      printf ' %-8s %s\n' "$kind" "$detail"
-    done
-}
-
-# --- queue mode --------------------------------------------------------------
-
-# Read the queue into a compact TSV so the loop never re-parses JSON. Fields are
-# tab-separated because a pull request title can contain anything else. $self
-# is the walker's login: a walk reviews other people's work, so their own pull
-# requests never enter the list. Authorship never changes, which makes it the
-# one snapshot field safe to filter on without a live re-read; snapshots from
-# before the field existed pass everything through.
-load_queue() {
-  local url="$1" action="$2" repo="$3" self="$4" raw
-  # Report once, at the call site: this runs in a command substitution, so a
-  # 'die' here would print and the caller would print again.
-  raw="$(curl --fail --location --show-error --silent --max-time 60 "$url")" || return 1
-
-  printf '%s' "$raw" | jq -r --arg action "$action" --arg repo "$repo" --arg self "$self" '
-    .items
-    | map(select($action == "" or .recommended_action == $action))
-    | map(select($repo == "" or .repository == $repo or (.repository | split("/") | last) == $repo))
-    | map(select($self == "" or (.author // "") != $self))
-    | .[]
-    | [.repository, (.number | tostring), .recommended_action, .title] | @tsv
-  '
-}
-
-# Read-only Review Evidence. Live GitHub state, not the snapshot's copy of it,
-# because the snapshot can be hours old and a stale "clean" reading is exactly
-# the one that misleads a reviewer.
-#
-# The live read also feeds the maintainer actions: EVIDENCE_STATE drives the
-# auto-skip of stops that are no longer open, and EVIDENCE_HEAD_OID pins any
-# merge to the exact commit the reviewer looked at. GitHub is the state; there
-# is no local ledger, so these are reset on every stop.
-show_evidence() {
-  local repo="$1" number="$2" position="$3" total="$4" action="$5" title="$6"
-
-  EVIDENCE_STATE=""
-  EVIDENCE_HEAD_OID=""
-  EVIDENCE_IS_DRAFT=""
-
-  rule
-  printf ' [%s/%s]  %s#%s\n' "$position" "$total" "$repo" "$number"
-  printf ' %s\n' "$title"
-  printf ' queue says: %s\n' "$action"
-  rule
-
-  local json
-  if ! json="$(gh pr view "$number" --repo "$repo" \
-    --json author,state,headRefOid,isDraft,mergeable,mergeStateStatus,reviewDecision,additions,deletions,changedFiles,updatedAt,statusCheckRollup 2>&1)"; then
-    printf ' (could not read live state from GitHub: %s)\n' "$json"
-    return 0
-  fi
-
-  EVIDENCE_STATE="$(printf '%s' "$json" | jq -r '.state // ""')"
-  EVIDENCE_HEAD_OID="$(printf '%s' "$json" | jq -r '.headRefOid // ""')"
-  EVIDENCE_IS_DRAFT="$(printf '%s' "$json" | jq -r '.isDraft // ""')"
-
-  printf '%s' "$json" | jq -r '
-    def dash: if . == null or . == "" then "-" else . end;
-    " author   \(.author.login // "-")",
-    " state    \(.state // "-")    head   \(.headRefOid // "-" | .[0:12])",
-    " updated  \(.updatedAt // "-")",
-    " draft    \(.isDraft)    review   \(.reviewDecision // "-")",
-    " merge    \(.mergeable // "-") / \(.mergeStateStatus // "-")",
-    " size     +\(.additions) -\(.deletions) across \(.changedFiles) files",
-    " checks   " + (
-      (.statusCheckRollup // [])
-      | map(.conclusion // .state // "PENDING")
-      | if length == 0 then "none reported"
-        else
-          (map(select(. == "SUCCESS" or . == "NEUTRAL" or . == "SKIPPED")) | length | tostring) + " ok, " +
-          (map(select(. == "FAILURE" or . == "ERROR" or . == "TIMED_OUT" or . == "CANCELLED")) | length | tostring) + " failed, " +
-          (map(select(. == "PENDING" or . == "IN_PROGRESS" or . == "QUEUED")) | length | tostring) + " pending"
-        end
-    )
-  '
-  show_related "$repo" "$number"
-  rule
-}
-
 # Put the pull request on disk in the Hive workspace and hand the diff to Goose.
 # Clone once per repository, then reuse it; a review loop that re-cloned every
 # time would spend its life in git rather than in review.
@@ -413,315 +386,42 @@ run_goose_review() {
   )
 }
 
-# --- maintainer actions --------------------------------------------------------
-
-# Every mutation invalidates the repository's pull cache: the walk's duplicate
-# evidence must reflect what the maintainer just changed, and GitHub — not a
-# local ledger — is the state.
-invalidate_repo_cache() {
-  local repo="$1"
-  rm -f "${CACHE_DIR}/${repo//\//_}.json"
-}
-
-# The ONLY mutation call site in queue mode. Every state-changing gh call is
-# executed here, behind a typed-number confirmation: the exact command is
-# printed, buffered terminal input is drained, and the maintainer types the
-# pull request number. One attempt; an empty or wrong answer aborts. Never a
-# y/yes prompt (too easy to type reflexively), never a timeout (a decision
-# must not expire into either outcome).
-gh_mutate() {
-  local repo="$1" expected="$2"
-  shift 2
-  printf '\n will run: %s\n' "$*"
-  # Drain buffered tty input first. 'read -t 0' probes without consuming, so
-  # each successful probe needs its own consuming read; a keystroke typed
-  # while review output scrolled past must not answer this confirmation.
-  while IFS= read -r -t 0 -u 3; do
-    IFS= read -r -u 3 || break
-  done
-  local answer=""
-  printf ' type the pull request number (%s) to run it, empty aborts: ' "$expected"
-  IFS= read -r answer <&3 || answer=""
-  if [[ -z "$answer" || "$answer" != "$expected" ]]; then
-    printf ' aborted; nothing was run.\n'
-    return 1
-  fi
-  "$@" || return 1
-  invalidate_repo_cache "$repo"
-}
-
-# Arm auto-merge for the pull request on screen. --match-head-commit pins the
-# merge to the exact commit the reviewer looked at, and --auto leaves GitHub's
-# own required checks and branch protections as the gate — this never forces a
-# merge past them.
-merge_current() {
-  local repo="$1" number="$2"
-  if [[ "${EVIDENCE_IS_DRAFT:-}" == "true" ]]; then
-    printf ' %s#%s is a draft; not merging.\n' "$repo" "$number"
-    return 1
-  fi
-  if [[ -z "${EVIDENCE_HEAD_OID:-}" ]]; then
-    printf ' live head commit is unknown; not merging without --match-head-commit.\n'
-    return 1
-  fi
-  if gh_mutate "$repo" "$number" \
-    gh pr merge "$number" --repo "$repo" --squash --auto --match-head-commit "$EVIDENCE_HEAD_OID"; then
-    printf ' auto-merge armed for %s#%s at %.12s; GitHub'\''s checks still gate the merge.\n' \
-      "$repo" "$number" "$EVIDENCE_HEAD_OID"
-  fi
-}
-
-# Resolve a duplicate cluster around the pull request on screen: arm the
-# survivor, then comment and close each superseded duplicate, then recheck for
-# issues the closed duplicates referenced that the survivor does not. Halts on
-# the first failed or aborted step so a half-resolved cluster is visible, not
-# silent.
-resolve_cluster() {
-  local repo="$1" survivor="$2"
-  local cache dup_numbers="" kind nums
-  if ! cache="$(repo_pulls "$repo")"; then
-    printf ' could not read open pull requests for %s; not resolving.\n' "$repo"
-    return 1
-  fi
-  while IFS=$'\t' read -r kind nums; do
-    [[ "$kind" == dupes ]] && dup_numbers="$nums"
-  done < <(python3 -c "$DUPLICATE_ANALYZER" --numbers "$survivor" "$cache" 2>/dev/null)
-  if [[ -z "${dup_numbers// /}" ]]; then
-    printf ' no duplicates of %s#%s among the open pull requests; nothing to resolve.\n' \
-      "$repo" "$survivor"
-    return 0
-  fi
-  printf ' cluster: survivor %s#%s; superseded: %s\n' "$repo" "$survivor" "$dup_numbers"
-
-  # Compute the orphan recheck from the pre-mutation snapshot: the closes
-  # below invalidate the cache, and the answer must describe the cluster that
-  # was actually resolved.
-  local orphans
-  # shellcheck disable=SC2086 # dup_numbers is a space-separated number list by construction
-  orphans="$(python3 - "$cache" "$survivor" $dup_numbers <<'PY' 2>/dev/null || true
-import json, sys
-prs = json.load(open(sys.argv[1]))
-survivor = int(sys.argv[2])
-dups = {int(n) for n in sys.argv[3:]}
-def issues(number):
-    for pr in prs:
-        if pr["number"] == number:
-            return {r["number"] for r in (pr.get("closingIssuesReferences") or [])}
-    return set()
-kept = issues(survivor)
-orphaned = sorted(set().union(set(), *[issues(d) for d in dups]) - kept)
-print(" ".join("#%d" % n for n in orphaned))
-PY
-)"
-
-  merge_current "$repo" "$survivor" || return 1
-
-  local dup note
-  for dup in $dup_numbers; do
-    note="${CACHE_DIR}/superseded-${dup}.md"
-    printf 'Superseded by #%s, which is armed to merge. Closing as a duplicate; the surviving change lands there.\n' \
-      "$survivor" >"$note"
-    gh_mutate "$repo" "$dup" gh pr comment "$dup" --repo "$repo" --body-file "$note" || return 1
-    gh_mutate "$repo" "$dup" gh pr close "$dup" --repo "$repo" || return 1
-  done
-
-  if [[ -n "$orphans" ]]; then
-    printf ' recheck by hand — issues referenced only by the closed duplicates: %s\n' "$orphans"
-  else
-    printf ' no orphaned issues: the survivor covers everything the duplicates closed.\n'
-  fi
-}
-
-# Handoff: put the stop's identity, live evidence, and cluster verdicts on
-# the reviewer's clipboard so it can be pasted into an issue, a chat, or
-# another agent. OSC 52 rides the attached terminal, so this works from
-# inside the container without any display server; the terminal (or an
-# intermediate tmux) must support it. Read-only — nothing is sent to GitHub.
-handoff_stop() {
-  local repo="$1" number="$2" action="$3" title="$4"
-  local text related
-  text="${repo}#${number} — ${title}
-https://github.com/${repo}/pull/${number}
-queue says: ${action}"
-  if [[ -n "${EVIDENCE_STATE:-}" ]]; then
-    local head="${EVIDENCE_HEAD_OID:-}"
-    text+="
-state: ${EVIDENCE_STATE}  head: ${head:0:12}  draft: ${EVIDENCE_IS_DRAFT:-}"
-  fi
-  related="$(show_related "$repo" "$number")"
-  [[ -n "$related" ]] && text+="
-${related}"
-  if printf '\033]52;c;%s\a' "$(printf '%s' "$text" | base64 -w0)" >/dev/tty; then
-    printf ' handoff copied to the clipboard (OSC 52; the terminal must support it).\n'
-  else
-    printf ' could not reach the terminal to copy; here is the handoff:\n%s\n' "$text"
-  fi
-}
-
-menu() {
-  printf '\n [Enter] next   [r] review   [d] diff   [o] browser   [c] comment   [m] merge   [M] resolve duplicates   [h] handoff   [p] previous   [q] quit\n'
-  printf ' > '
-}
-
-queue_mode() {
-  local action=review repo="" url="$QUEUE_URL"
-
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --action)
-        action="${2:?--action needs a value}"
-        shift 2
-        ;;
-      --all)
-        action=""
-        shift
-        ;;
-      --repo)
-        repo="${2:?--repo needs a value}"
-        shift 2
-        ;;
-      --url)
-        url="${2:?--url needs a value}"
-        shift 2
-        ;;
-      -h | --help)
-        usage
-        return 0
-        ;;
-      *) die "unknown queue option: $1" ;;
-    esac
-  done
-
-  command -v gh >/dev/null || die "gh is required for queue mode"
-  command -v jq >/dev/null || die "jq is required for queue mode"
-
-  # Per-session cache of each repository's open pull requests, used to spot
-  # duplicates. Removed on the way out so a later walk sees current state.
-  CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bluefin-review.XXXXXX")"
-  trap 'rm -rf "$CACHE_DIR"' EXIT INT TERM
-
-  local -a items=()
-  local line queue_tsv
-  # Resolve the walker's identity once: their own pull requests are not work
-  # for them. An unresolvable identity disables the filter rather than
-  # emptying the queue on a transient API failure.
-  local self_login
-  self_login="$(gh api user --jq .login 2>/dev/null || true)"
-  # Capture before the loop: reading from a process substitution discards the
-  # producer's exit status, so a failed fetch or a malformed snapshot would
-  # otherwise surface as "Nothing in the queue" and a success exit.
-  if ! queue_tsv="$(load_queue "$url" "$action" "$repo" "$self_login")"; then
-    die "could not read the queue from ${url}"
-  fi
-  while IFS= read -r line; do
-    [[ -n "$line" ]] && items+=("$line")
-  done <<<"$queue_tsv"
-
-  local total="${#items[@]}"
-  if ((total == 0)); then
-    printf 'Nothing in the queue for that filter.\n'
-    return 0
-  fi
-
-  printf '%s pull request(s) to walk. Ctrl-C or q stops.\n' "$total"
-
-  # A TTY read, not stdin: goose and gh both consume stdin, so a plain `read`
-  # would swallow the next keystroke or hit EOF mid-loop. Probe in a subshell
-  # first -- a failed 'exec' redirection is fatal to the shell that runs it, so
-  # it cannot be guarded with '||', and '[[ -r /dev/tty ]]' is not a usable
-  # test because the path exists and passes it in contexts where opening still
-  # fails with ENXIO. Never attach '2>/dev/null' to the real exec: with only
-  # redirections, exec applies them to THIS shell permanently, silencing every
-  # later diagnostic.
-  if ! (exec 3</dev/tty) 2>/dev/null; then
-    die "queue mode needs an interactive terminal"
-  fi
-  exec 3</dev/tty
-
-  local index=0 item pr_repo pr_number pr_action pr_title key body note_file
-  while ((index < total)); do
-    item="${items[index]}"
-    IFS=$'\t' read -r pr_repo pr_number pr_action pr_title <<<"$item"
-
-    printf '\n'
-    show_evidence "$pr_repo" "$pr_number" "$((index + 1))" "$total" "$pr_action" "$pr_title"
-
-    # The snapshot can be hours old; a stop that is no longer open is not
-    # reviewable work. GitHub is the state, so skip it instead of offering a
-    # menu whose every action would fail.
-    if [[ -n "${EVIDENCE_STATE:-}" && "$EVIDENCE_STATE" != OPEN ]]; then
-      printf ' %s#%s is %s on GitHub; skipping.\n' "$pr_repo" "$pr_number" "$EVIDENCE_STATE"
-      index=$((index + 1))
-      continue
-    fi
-
-    menu
-    IFS= read -r -n1 key <&3 || key=q
-    printf '\n'
-
-    case "$key" in
-      '')
-        index=$((index + 1))
-        ;;
-      r)
-        # A failed checkout or a failed Goose run must not be announced as a
-        # finished draft; the reviewer would judge output that never appeared.
-        if run_goose_review "$pr_repo" "$pr_number"; then
-          printf '\nThe Review Draft above is for you to judge. Nothing was submitted.\n'
-        else
-          printf '\nReview did not complete for %s#%s. Nothing was submitted.\n' \
-            "$pr_repo" "$pr_number"
-        fi
-        ;;
-      d)
-        gh pr diff "$pr_number" --repo "$pr_repo" | ${PAGER:-less -R} || true
-        ;;
-      o)
-        gh pr view "$pr_number" --repo "$pr_repo" --web || true
-        ;;
-      c)
-        printf ' comment (empty aborts): '
-        IFS= read -r body <&3 || body=""
-        if [[ -n "$body" ]]; then
-          note_file="${CACHE_DIR}/comment-${pr_number}.md"
-          printf '%s\n' "$body" >"$note_file"
-          gh_mutate "$pr_repo" "$pr_number" \
-            gh pr comment "$pr_number" --repo "$pr_repo" --body-file "$note_file" || true
-        else
-          printf ' skipped\n'
-        fi
-        ;;
-      m)
-        merge_current "$pr_repo" "$pr_number" || true
-        ;;
-      M)
-        resolve_cluster "$pr_repo" "$pr_number" || true
-        ;;
-      h)
-        handoff_stop "$pr_repo" "$pr_number" "$pr_action" "$pr_title"
-        ;;
-      p)
-        ((index > 0)) && index=$((index - 1))
-        ;;
-      q)
-        printf 'Stopped at %s of %s.\n' "$((index + 1))" "$total"
-        return 0
-        ;;
-      *)
-        printf ' unknown key: %s\n' "$key"
-        ;;
-    esac
-  done
-
-  printf '\nEnd of queue.\n'
-}
-
 # --- entry -------------------------------------------------------------------
 
+# Review one pull request. The cache directory backs the duplicate analysis, so
+# a cluster is resolved from a single snapshot of the repository's open pull
+# requests rather than one fetch per question.
+pr_mode() {
+  local repo="${1:-}" number="${2:-}"
+  [[ -n "$repo" && -n "$number" ]] || die "usage: bluefin-review pr <owner/repo> <number>"
+  [[ "$number" =~ ^[0-9]+$ ]] || die "not a pull request number: ${number}"
+  command -v gh >/dev/null || die "gh is required to review a pull request"
+  command -v jq >/dev/null || die "jq is required to review a pull request"
+
+  CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bluefin-review.XXXXXX")"
+  # A stopped review must actually stop. The EXIT trap cleans up; the signal
+  # traps also leave, because a handler that only cleans up returns control to
+  # the script and the run continues after the maintainer asked for it to end.
+  trap 'rm -rf "$CACHE_DIR"' EXIT
+  trap 'rm -rf "$CACHE_DIR"; trap - EXIT; exit 143' TERM
+  trap 'rm -rf "$CACHE_DIR"; trap - EXIT; exit 130' INT
+
+  local status=0
+  run_goose_review "$repo" "$number" || status=$?
+  if ((status == 0)); then
+    printf '\nThe Review Draft above is for you to judge. Nothing was submitted.\n'
+  elif ((status == REVIEW_INCOMPLETE)); then
+    printf '\nThis review is INCOMPLETE — do not read it as clean. Nothing was submitted.\n'
+  else
+    printf '\nReview did not complete for %s#%s. Nothing was submitted.\n' "$repo" "$number"
+  fi
+  return "$status"
+}
+
 case "${1-}" in
-  queue)
+  pr)
     shift
-    queue_mode "$@"
+    pr_mode "$@"
     ;;
   -h | --help)
     usage

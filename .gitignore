@@ -13,3 +13,7 @@ public/queue.md
 # per-run evidence, never source.
 image-audit-report.md
 __pycache__/
+
+# tests/dashboard-contract.sh builds a pinned Textual venv here to drive the
+# dashboard pilot; it is a build artifact, never source.
+.cache/
