@@ -57,7 +57,8 @@ class CodexHarness:
             f"{binding.owner}/{binding.repository}#{binding.pull_request_number} "
             f"base={binding.base_sha} head={binding.head_sha}"
         )
-        return [self.executable, "exec", "--ignore-user-config", "--json",
+        return [self.executable, "exec", "--ignore-user-config", "--config",
+                "mcp_servers={}", "--json",
                 "--model", selected_model,
                 "--config", f"model_reasoning_effort={selected_effort}",
                 f"Review exact binding {context}. {prompt}"

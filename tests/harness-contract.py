@@ -48,7 +48,10 @@ class HarnessContract(unittest.TestCase):
     def test_codex_command_binds_context_model_effort_and_json(self):
         adapter = CodexHarness(availability=Availability.READY)
         command = adapter.command(self.binding, prompt="inspect", effort="low")
-        self.assertEqual(command[:4], ["codex", "exec", "--ignore-user-config", "--json"])
+        self.assertEqual(
+            command[:6],
+            ["codex", "exec", "--ignore-user-config", "--config", "mcp_servers={}", "--json"],
+        )
         self.assertIn("--model", command)
         self.assertIn("gpt-5.6-luna", command)
         self.assertIn("model_reasoning_effort=low", command)
