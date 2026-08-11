@@ -1,5 +1,5 @@
 """Review harness capability contracts and adapters."""
 
-from .registry import Availability, Harness, HarnessRegistry
+from .registry import Availability, Harness, HarnessBranding, HarnessRegistry
 
-__all__ = ["Availability", "Harness", "HarnessRegistry"]
+__all__ = ["Availability", "Harness", "HarnessBranding", "HarnessRegistry"]

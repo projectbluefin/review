@@ -2,12 +2,15 @@
 
 from dataclasses import dataclass
 
-from .registry import Availability, Binding, HarnessCapabilities
+from .registry import Availability, Binding, HarnessBranding, HarnessCapabilities
 
 
 @dataclass
 class GooseHarness:
     name: str = "goose"
+    branding: HarnessBranding = HarnessBranding(
+        "goose", "Goose", "GS", "Goose", "aaif-goose/goose", None
+    )
     availability: Availability = Availability.READY
     capabilities: HarnessCapabilities = HarnessCapabilities(
         binary_readiness=True, auth_preflight=True, invocation=True,

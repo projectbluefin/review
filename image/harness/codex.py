@@ -7,7 +7,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Callable
 
-from .registry import Availability, Binding, HarnessCapabilities
+from .registry import Availability, Binding, HarnessBranding, HarnessCapabilities
 
 try:
     from tui.review_result import ReviewResult, parse_review_result
@@ -18,8 +18,11 @@ except ImportError:
 @dataclass
 class CodexHarness:
     name: str = "codex"
+    branding: HarnessBranding = HarnessBranding(
+        "codex", "Codex CLI", "CX", "OpenAI Codex CLI", "openai/codex", None
+    )
     model: str = "gpt-5.6-luna"
-    effort: str = "max"
+    effort: str = "low"
     availability: Availability = Availability.UNAVAILABLE_BINARY
     executable: str = "codex"
     capabilities: HarnessCapabilities = HarnessCapabilities(
@@ -55,10 +58,12 @@ class CodexHarness:
                 "--config", f"model_reasoning_effort={selected_effort}",
                 f"Review exact binding {context}. {prompt}"]
 
-    def convert(self, payload: str, binding: Binding) -> ReviewResult:
+    def convert(self, payload: str, binding: Binding, exit_code: int = 0) -> ReviewResult:
         # ``codex exec --json`` is a JSONL progress stream; the final object
         # is the ReviewResult payload.
         result = parse_review_result(payload.splitlines()[-1] if payload.splitlines() else payload)
+        if exit_code != 0:
+            return ReviewResult(1, "failed", raw_evidence=payload.splitlines())
         provenance = dict(result.provenance)
         provenance.update({
             "backend": "codex", "model": self.model,
@@ -83,7 +88,7 @@ class CodexHarness:
             lines.append(line.rstrip("\n"))
             on_line(lines[-1])
         process.wait()
-        return self.convert("\n".join(lines), binding)
+        return self.convert("\n".join(lines), binding, process.returncode)
 
     @staticmethod
     def cancel(process: subprocess.Popen) -> None:

@@ -24,6 +24,12 @@ class Binding:
     base_sha: str
     head_sha: str
 
+    def __post_init__(self) -> None:
+        shas = self.base_sha + self.head_sha
+        if (len(self.base_sha) != 40 or len(self.head_sha) != 40 or
+                any(char not in "0123456789abcdef" for char in shas.lower())):
+            raise ValueError("base and head must be 40-character Git SHAs")
+
 
 @dataclass(frozen=True)
 class HarnessCapabilities:
@@ -37,6 +43,22 @@ class HarnessCapabilities:
     cancellation: bool = False
     result_conversion: bool = False
     provenance: bool = False
+
+
+@dataclass(frozen=True)
+class HarnessBranding:
+    harness_id: str
+    display_name: str
+    terminal_badge: str
+    accessible_label: str
+    attribution: str
+    asset_ref: str | None = None
+
+    def __post_init__(self) -> None:
+        if len(self.terminal_badge) != 2:
+            raise ValueError("terminal badge must contain exactly two characters")
+        if not self.accessible_label.strip() or self.accessible_label == self.terminal_badge:
+            raise ValueError("accessible label must identify the full product")
 
 
 class Harness(Protocol):

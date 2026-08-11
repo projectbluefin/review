@@ -13,7 +13,7 @@ from harness.registry import Availability, Binding, HarnessRegistry  # noqa: E40
 
 class HarnessContract(unittest.TestCase):
     def setUp(self):
-        self.binding = Binding("project/review", 166, "base", "head")
+        self.binding = Binding("project/review", 166, "a" * 40, "b" * 40)
 
     def test_registry_exposes_both_adapters_without_fallback(self):
         registry = HarnessRegistry()
@@ -35,14 +35,14 @@ class HarnessContract(unittest.TestCase):
     def test_codex_defaults_and_provenance_capability(self):
         adapter = CodexHarness()
         self.assertEqual(adapter.model, "gpt-5.6-luna")
-        self.assertEqual(adapter.effort, "max")
+        self.assertEqual(adapter.effort, "low")
         self.assertTrue(adapter.capabilities.exact_binding)
         self.assertTrue(adapter.capabilities.provenance)
 
     def test_binding_is_exact_context_shape(self):
         self.assertEqual(self.binding.repository, "project/review")
         self.assertEqual(self.binding.pull_request, 166)
-        self.assertEqual((self.binding.base_sha, self.binding.head_sha), ("base", "head"))
+        self.assertEqual((self.binding.base_sha, self.binding.head_sha), ("a" * 40, "b" * 40))
 
     def test_codex_command_binds_context_model_effort_and_json(self):
         adapter = CodexHarness(availability=Availability.READY)
@@ -51,7 +51,7 @@ class HarnessContract(unittest.TestCase):
         self.assertIn("--model", command)
         self.assertIn("gpt-5.6-luna", command)
         self.assertIn("model_reasoning_effort=low", command)
-        self.assertIn("project/review#166 base=base head=head", command[-1])
+        self.assertIn("project/review#166 base=" + "a" * 40 + " head=" + "b" * 40, command[-1])
 
     def test_codex_stream_converts_into_merged_review_result(self):
         adapter = CodexHarness(availability=Availability.READY)
@@ -63,6 +63,28 @@ class HarnessContract(unittest.TestCase):
         self.assertEqual(result.provenance["backend"], "codex")
         self.assertEqual(result.provenance["model"], "gpt-5.6-luna")
         self.assertEqual(result.provenance["repository"], "project/review")
+
+    def test_nonzero_codex_exit_fails_closed(self):
+        adapter = CodexHarness(availability=Availability.READY)
+        result = adapter.convert('{"version":1,"state":"complete","counts":{"critical":0,"high":0,"medium":0,"low":0},"findings":[]}', self.binding, 1)
+        self.assertEqual(result.state, "failed")
+
+    def test_binding_rejects_non_sha_placeholders(self):
+        with self.assertRaises(ValueError):
+            Binding("project/review", 166, "?" * 40, "b" * 40)
+
+    def test_branding_has_badge_full_name_accessible_label_and_source(self):
+        for harness in (GooseHarness(), CodexHarness()):
+            branding = harness.branding
+            self.assertEqual(len(branding.terminal_badge), 2)
+            self.assertEqual(branding.accessible_label, branding.accessible_label.strip())
+            self.assertNotEqual(branding.accessible_label, branding.terminal_badge)
+            self.assertTrue(branding.attribution)
+
+    def test_missing_rich_asset_falls_back_to_full_name(self):
+        branding = CodexHarness().branding
+        self.assertIsNone(branding.asset_ref)
+        self.assertIn("Codex", branding.display_name)
 
     def test_codex_cancellation_uses_process_group(self):
         adapter = CodexHarness(availability=Availability.READY)

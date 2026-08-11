@@ -27,7 +27,7 @@ class Discovery:
 
 @dataclass(frozen=True)
 class Preference:
-    backend: str
+    harness_id: str
     model: str
     effort: str
 
@@ -45,8 +45,8 @@ def load_preferences() -> dict[str, Preference]:
         return {}
     result: dict[str, Preference] = {}
     for key, value in data.items() if isinstance(data, dict) else ():
-        if isinstance(value, dict) and all(isinstance(value.get(k), str) for k in ("backend", "model", "effort")):
-            result[key] = Preference(value["backend"], value["model"], value["effort"])
+        if isinstance(value, dict) and all(isinstance(value.get(k), str) for k in ("harness_id", "model", "effort")):
+            result[key] = Preference(value["harness_id"], value["model"], value["effort"])
     return result
 
 
@@ -88,7 +88,7 @@ def choose(repository: str, preferences: dict[str, Preference], discovery: Disco
     candidates = [preferences.get(repository), preferences.get("*"), configured,
                   Preference("codex", "gpt-5.6-luna", "low")]
     for candidate in candidates:
-        if candidate and candidate.backend == discovery.backend and discovery.availability is Availability.READY:
+        if candidate and candidate.harness_id == discovery.backend and discovery.availability is Availability.READY:
             return candidate
     return None
 
@@ -97,7 +97,7 @@ def stale_choice(repository: str, preferences: dict[str, Preference],
                  discovery: Discovery) -> str | None:
     remembered = preferences.get(repository) or preferences.get("*")
     if remembered and discovery.availability is not Availability.READY:
-        return (f"Remembered {remembered.backend}/{remembered.model} is "
+        return (f"Remembered {remembered.harness_id}/{remembered.model} is "
                 f"{discovery.availability.value}; confirm a replacement.")
     return None
 

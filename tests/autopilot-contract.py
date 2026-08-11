@@ -25,10 +25,10 @@ class AutopilotContract(unittest.TestCase):
         self.assertIn("confirm a replacement", stale_choice("org/repo", {"*": Preference("codex", "gpt-5.6-luna", "low")}, missing))
 
     def test_only_valid_terminal_exact_bound_result_can_be_remembered(self):
-        binding = Binding("org/repo", 166, "base", "head")
+        binding = Binding("org/repo", 166, "a" * 40, "b" * 40)
         result = ReviewResult(1, "complete", provenance={
             "backend": "codex", "repository": "org/repo", "pull_request": 166,
-            "base_sha": "base", "head_sha": "head",
+            "base_sha": "a" * 40, "head_sha": "b" * 40,
         })
         self.assertTrue(can_remember(result, binding))
         self.assertFalse(can_remember(ReviewResult(1, "incomplete", provenance=result.provenance), binding))
@@ -40,12 +40,19 @@ class AutopilotContract(unittest.TestCase):
             try:
                 remember_success({}, "org/repo", Preference("codex", "gpt-5.6-luna", "low"))
                 saved = json.loads(Path(directory, "bluefin-review", "harness.json").read_text())
-                self.assertEqual(set(saved["*"]), {"backend", "model", "effort"})
+                self.assertEqual(set(saved["*"]), {"harness_id", "model", "effort"})
                 self.assertNotIn("token", json.dumps(saved).lower())
-                self.assertEqual(load_preferences()["org/repo"].backend, "codex")
+                self.assertEqual(load_preferences()["org/repo"].harness_id, "codex")
             finally:
                 if old is None: os.environ.pop("XDG_CONFIG_HOME", None)
                 else: os.environ["XDG_CONFIG_HOME"] = old
+
+    def test_takeoff_state_names_are_visible_and_terminal_safe(self):
+        tui = Path(__file__).parents[1] / "image" / "tui" / "bluefin_review_tui.py"
+        service = Path(__file__).parents[1] / "image" / "harness" / "autopilot.py"
+        text = tui.read_text() + service.read_text()
+        for state in ("CHECKING", "READY", "UNAVAILABLE_BINARY", "Sign in", "Diagnostics"):
+            self.assertIn(state, text)
 
 
 if __name__ == "__main__":

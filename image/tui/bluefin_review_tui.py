@@ -45,7 +45,7 @@ from review_result import adapt_current_engine
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from harness.codex import CodexHarness
 from harness.autopilot import discover
-from harness.registry import Availability, Binding
+from harness.registry import Availability, Binding as HarnessBinding
 
 QUEUE_URL = os.environ.get(
     "BLUEFIN_REVIEW_QUEUE_URL",
@@ -704,7 +704,7 @@ class ReviewScreen(Screen):
     @work(thread=True)
     def run_review(self) -> None:
         stop = self.stop_record
-        binding = Binding(
+        binding = HarnessBinding(
             stop.repository, stop.number,
             str(stop.live.get("baseRefOid") or "?"),
             str(stop.live.get("headRefOid") or "?"),
@@ -717,7 +717,13 @@ class ReviewScreen(Screen):
                     f"Codex unavailable: {adapter.availability.value}",
                 )
                 return
-            command = adapter.command(binding, prompt="Produce the ReviewResult JSON.")
+            if "?" in (binding.base_sha, binding.head_sha):
+                self.app.call_from_thread(
+                    self.finish, None,
+                    "Codex unavailable: exact PR base/head is unavailable",
+                )
+                return
+            command = adapter.command(binding, prompt="Produce the ReviewResult JSON.", effort="low")
         else:
             command = [REVIEW_COMMAND, "pr", stop.repository, str(stop.number)]
         # Maintainer steering rides the documented additive seam: it is added
@@ -769,7 +775,7 @@ class ReviewScreen(Screen):
         if ACTIVE_BACKEND == "codex":
             result = CodexHarness(availability=Availability.READY).convert(
                 "\n".join(self.output),
-                Binding(stop.repository, stop.number,
+                HarnessBinding(stop.repository, stop.number,
                         str(stop.live.get("baseRefOid") or "?"),
                         str(stop.live.get("headRefOid") or "?")),
             )
