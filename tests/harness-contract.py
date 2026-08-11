@@ -49,8 +49,11 @@ class HarnessContract(unittest.TestCase):
         adapter = CodexHarness(availability=Availability.READY)
         command = adapter.command(self.binding, prompt="inspect", effort="low")
         self.assertEqual(
-            command[:6],
-            ["codex", "exec", "--ignore-user-config", "--config", "mcp_servers={}", "--json"],
+            command[:8],
+            [
+                "codex", "exec", "--ignore-user-config", "--disable", "apps",
+                "--config", "mcp_servers={}", "--json",
+            ],
         )
         self.assertIn("--model", command)
         self.assertIn("gpt-5.6-luna", command)
