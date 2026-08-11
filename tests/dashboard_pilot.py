@@ -1671,6 +1671,7 @@ async def main() -> int:
             await pilot.pause(0.05)
         app.stops[0].live = {"isDraft": False, "headRefOid": "bad"}
         await pilot.press("r")
+        await pilot.press("tab", "enter")
         await pilot.pause()
         check(
             isinstance(app.screen, tui.ReviewScreen) and app.screen.finished,
