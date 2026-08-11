@@ -1661,29 +1661,34 @@ async def main() -> int:
     # ── the review path never mutates GitHub ─────────────────────────────
     # Invalid live refs disable Codex start honestly and never invoke it.
     tui.ACTIVE_BACKEND = "codex"
+    real_probe = tui.CodexHarness.probe
+    tui.CodexHarness.probe = classmethod(lambda cls: tui.Availability.READY)
     review_log.write_text("")
-    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        for _ in range(200):
-            if app.stops:
-                break
-            await pilot.pause(0.05)
-        app.stops[0].live = {"isDraft": False, "headRefOid": "bad"}
-        await pilot.press("r")
-        await pilot.press("tab", "enter")
-        for _ in range(200):
-            if isinstance(app.screen, tui.ReviewScreen) and app.screen.finished:
-                break
-            await pilot.pause(0.05)
-        check(
-            isinstance(app.screen, tui.ReviewScreen) and app.screen.finished,
-            "invalid live refs must finish as unavailable",
-        )
-        check(
-            review_log.read_text() == "",
-            "invalid live refs must not invoke Codex",
-        )
+    try:
+        app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for _ in range(200):
+                if app.stops:
+                    break
+                await pilot.pause(0.05)
+            app.stops[0].live = {"isDraft": False, "headRefOid": "bad"}
+            await pilot.press("r")
+            await pilot.press("tab", "enter")
+            for _ in range(200):
+                if isinstance(app.screen, tui.ReviewScreen) and app.screen.finished:
+                    break
+                await pilot.pause(0.05)
+            check(
+                isinstance(app.screen, tui.ReviewScreen) and app.screen.finished,
+                "invalid live refs must finish as unavailable",
+            )
+            check(
+                review_log.read_text() == "",
+                "invalid live refs must not invoke Codex",
+            )
+    finally:
+        tui.CodexHarness.probe = real_probe
     tui.ACTIVE_BACKEND = "goose"
 
     # ── the review path never mutates GitHub ─────────────────────────────
