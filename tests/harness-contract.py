@@ -54,6 +54,15 @@ class HarnessContract(unittest.TestCase):
         self.assertIn("model_reasoning_effort=low", command)
         self.assertIn("project/review#166 base=" + "a" * 40 + " head=" + "b" * 40, command[-1])
 
+    def test_codex_invoke_arguments_reach_cli_command(self):
+        adapter = CodexHarness(availability=Availability.READY)
+        command = adapter.command(
+            self.binding, prompt="inspect", model="gpt-5.6-luna",
+            effort="low", steer="focus on exact-head evidence",
+        )
+        self.assertIn("gpt-5.6-luna", command)
+        self.assertIn("focus on exact-head evidence", command[-1])
+
     def test_codex_stream_converts_into_merged_review_result(self):
         adapter = CodexHarness(availability=Availability.READY)
         result = adapter.convert(

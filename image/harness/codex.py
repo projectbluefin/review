@@ -47,17 +47,20 @@ class CodexHarness:
         return Availability.READY if check.returncode == 0 else Availability.UNAVAILABLE_AUTH
 
     def command(self, binding: ReviewRequest, *, prompt: str,
-                effort: str | None = None) -> list[str]:
+                effort: str | None = None, model: str | None = None,
+                steer: str | None = None) -> list[str]:
         selected_effort = effort or self.effort
+        selected_model = model or self.model
         if selected_effort not in self.SUPPORTED_EFFORTS:
             raise ValueError(f"unsupported Codex reasoning effort: {selected_effort}")
         context = (
             f"{binding.owner}/{binding.repository}#{binding.pull_request_number} "
             f"base={binding.base_sha} head={binding.head_sha}"
         )
-        return [self.executable, "exec", "--json", "--model", self.model,
+        return [self.executable, "exec", "--json", "--model", selected_model,
                 "--config", f"model_reasoning_effort={selected_effort}",
-                f"Review exact binding {context}. {prompt}"]
+                f"Review exact binding {context}. {prompt}"
+                + (f" Maintainer steering: {steer}" if steer else "")]
 
     def convert(self, payload: str, binding: ReviewRequest, exit_code: int = 0) -> ReviewResult:
         # ``codex exec --json`` is a JSONL progress stream; the final object
@@ -77,9 +80,10 @@ class CodexHarness:
                             result.overlap, result.live, result.raw_evidence)
 
     def stream(self, binding: ReviewRequest, *, prompt: str,
-               on_line: Callable[[str], None], effort: str | None = None) -> ReviewResult:
+               on_line: Callable[[str], None], effort: str | None = None,
+               model: str | None = None, steer: str | None = None) -> ReviewResult:
         process = subprocess.Popen(
-            self.command(binding, prompt=prompt, effort=effort),
+            self.command(binding, prompt=prompt, effort=effort, model=model, steer=steer),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             bufsize=1, start_new_session=True,
         )
@@ -96,8 +100,8 @@ class CodexHarness:
         os.killpg(process.pid, signal.SIGTERM)
 
     def invoke(self, binding: ReviewRequest, *, prompt: str, model: str | None = None,
-               effort: str | None = None, steer: str | None = None) -> None:
+               effort: str | None = None, steer: str | None = None) -> ReviewResult:
         if self.availability is not Availability.READY:
             raise RuntimeError(f"codex unavailable: {self.availability.value}")
         return self.stream(binding, prompt=prompt, on_line=lambda _line: None,
-                           effort=effort)
+                           effort=effort, model=model, steer=steer)
