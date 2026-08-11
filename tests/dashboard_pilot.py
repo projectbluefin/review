@@ -1672,7 +1672,10 @@ async def main() -> int:
         app.stops[0].live = {"isDraft": False, "headRefOid": "bad"}
         await pilot.press("r")
         await pilot.press("tab", "enter")
-        await pilot.pause()
+        for _ in range(200):
+            if isinstance(app.screen, tui.ReviewScreen) and app.screen.finished:
+                break
+            await pilot.pause(0.05)
         check(
             isinstance(app.screen, tui.ReviewScreen) and app.screen.finished,
             "invalid live refs must finish as unavailable",
