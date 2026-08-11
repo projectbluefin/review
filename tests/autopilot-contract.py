@@ -62,7 +62,7 @@ class AutopilotContract(unittest.TestCase):
         self.assertTrue(all(len(option.harness.branding.terminal_badge) == 2 for option in options))
         selected = choose_option("org/repo", {}, options)
         self.assertIsNotNone(selected)
-        self.assertEqual(selected.harness.branding.harness_id, "codex")
+        self.assertEqual(selected.discovery.availability.value, "READY")
 
     def test_remembered_unavailable_choice_does_not_silently_fallback(self):
         options = discover_all()

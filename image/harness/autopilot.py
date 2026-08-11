@@ -111,7 +111,13 @@ def choose_option(repository: str, preferences: dict[str, Preference],
     by_id = {option.harness.branding.harness_id: option for option in options}
     candidates = [preferences.get(repository), preferences.get("*"), configured,
                   Preference("codex", "gpt-5.6-luna", "low")]
-    for candidate in candidates:
+    for candidate in candidates[:2]:
+        option = by_id.get(candidate.harness_id) if candidate else None
+        if option:
+            if option.discovery.availability is Availability.READY:
+                return option
+            return option
+    for candidate in candidates[2:]:
         option = by_id.get(candidate.harness_id) if candidate else None
         if option and option.discovery.availability is Availability.READY:
             return option
