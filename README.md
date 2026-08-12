@@ -628,7 +628,7 @@ Use an immutable `sha-<commit>` tag or digest with
 ## Image and context
 
 The image derives from the digest-pinned Project Bluefin FSDK lab runner and
-layers the pinned Hive runtime at `98781c252cefb2f2193832a701abd8d0728ea18b`,
+layers the pinned Hive runtime at `a66927df7b5dff14423cdd2a31826b79a2c1ddc9`,
 the current Goose canary snapshot, GitHub CLI, tmux, uv with the Textual
 dashboard runtime, hooks, generated
 organization skills, and the pinned `projectbluefin/lab` skills (projected as
