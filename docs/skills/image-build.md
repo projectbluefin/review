@@ -319,6 +319,12 @@ resolves under `/usr/local/bin` — the shape a reintroduced shim would take.
   claim costs the same as a missing tool and is invisible in a passing test.
 - A base gap described in a document instead of filed as an issue, or any
   section that exists to explain a known-broken thing.
+- A multi-file payload copied one named file at a time, or a build proof that
+  only compiles it. Compiling resolves no imports, so `py_compile` on the
+  dashboard entry point passed while `review_result.py` was never copied, and
+  `just review-queue` died at startup with `ModuleNotFoundError` against the
+  published `:stable`. Copy the whole set with a glob and prove each module by
+  importing it.
 
 ## Verification
 

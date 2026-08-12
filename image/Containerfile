@@ -137,7 +137,11 @@ ARG UV_X86_64_SHA256
 ARG UV_AARCH64_SHA256
 ARG TEXTUAL_VERSION
 COPY image/tui/requirements.lock /opt/bluefin/tui/requirements.lock
-COPY image/tui/bluefin_review_tui.py /opt/bluefin/tui/bluefin_review_tui.py
+# Every module, not just the entrypoint: the dashboard imports its siblings
+# (review_result, and theirs in turn) by bare name off sys.path[0]. A glob so
+# a new module ships the moment it exists, rather than the next time someone
+# remembers to extend this line.
+COPY image/tui/*.py /opt/bluefin/tui/
 RUN set -eu; \
     arch="$(uname -m)"; \
     case "$arch" in \
@@ -162,7 +166,11 @@ RUN set -eu; \
       --require-hashes --no-deps \
       -r /opt/bluefin/tui/requirements.lock; \
     /opt/bluefin/tui/.venv/bin/python -c "import textual; print(textual.__version__)"; \
-    /opt/bluefin/tui/.venv/bin/python -m py_compile /opt/bluefin/tui/bluefin_review_tui.py; \
+    /opt/bluefin/tui/.venv/bin/python -m compileall -q /opt/bluefin/tui/*.py; \
+    for tui_module in /opt/bluefin/tui/*.py; do \
+      PYTHONPATH=/opt/bluefin/tui /opt/bluefin/tui/.venv/bin/python \
+        -c "import $(basename "$tui_module" .py)"; \
+    done; \
     test ! -e /root/.cache/uv
 
 ARG GOOSE_CHANNEL
