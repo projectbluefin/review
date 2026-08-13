@@ -504,7 +504,11 @@ require image/config/local-agent-policy.md \
   'Probe with' \
   'are not installed' \
   'gh run watch' \
-  'that is an evidenced finding' \
+  'that is an evidenced finding'
+# The policy must state the image's own tooling delta, so the agent knows rg
+# and shellcheck are there to use.
+# shellcheck disable=SC2016 # Literal policy text, not shell expansion.
+require image/config/local-agent-policy.md \
   'The image adds `rg` and `shellcheck` on top' \
   'keep their standard behavior'
 # The policy tells the agent what the runtime lacks, so a tool the base
