@@ -16,6 +16,9 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
+  # 'artifact-metadata: write' lets actions/attest persist its storage record;
+  # without it every attestation step warns and the record is dropped.
+  artifact-metadata: write
   attestations: write
   contents: read
   id-token: write
@@ -255,8 +258,18 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          printf '%s' "$GITHUB_TOKEN" |
-            podman login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+          # Two consumers, two explicit paths, no reliance on lookup order.
+          # podman gets an authfile it is told about by name; actions/attest
+          # reads ~/.docker/config.json and nothing else, which is why writing
+          # only podman's own default location left the attest steps with
+          # "No credentials found for registry ghcr.io".
+          mkdir -p "${HOME}/.docker"
+          for authfile in "${RUNNER_TEMP}/ghcr-auth.json" "${HOME}/.docker/config.json"; do
+            printf '%s' "$GITHUB_TOKEN" |
+              podman login ghcr.io --username "${GITHUB_ACTOR}" \
+                --authfile "$authfile" --password-stdin
+            chmod 0600 "$authfile"
+          done
 
       - name: Push the per-architecture image
         id: push
@@ -272,7 +285,7 @@ jobs:
           # those digests into ':stable'. GHCR paths are lowercase.
           staging="ghcr.io/${GITHUB_REPOSITORY,,}"
           target="${staging}:sha-${GITHUB_SHA}-${ARCH}"
-          podman push --format oci \
+          podman push --format oci --authfile "${RUNNER_TEMP}/ghcr-auth.json" \
             --digestfile "${RUNNER_TEMP}/digest-${ARCH}.txt" \
             review:smoke "docker://${target}"
           digest="$(cat "${RUNNER_TEMP}/digest-${ARCH}.txt")"
@@ -371,13 +384,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # An explicit authfile: the buildah container that assembles the
-          # index gets this file read-only rather than the runner's whole
-          # container configuration.
-          printf '%s' "$GITHUB_TOKEN" |
-            podman login ghcr.io --username "${GITHUB_ACTOR}" \
-              --authfile "${RUNNER_TEMP}/ghcr-auth.json" --password-stdin
-          chmod 0600 "${RUNNER_TEMP}/ghcr-auth.json"
+          # Two consumers, two explicit paths: the buildah container gets the
+          # first file read-only, and actions/attest reads
+          # ~/.docker/config.json and nothing else.
+          mkdir -p "${HOME}/.docker"
+          for authfile in "${RUNNER_TEMP}/ghcr-auth.json" "${HOME}/.docker/config.json"; do
+            printf '%s' "$GITHUB_TOKEN" |
+              podman login ghcr.io --username "${GITHUB_ACTOR}" \
+                --authfile "$authfile" --password-stdin
+            chmod 0600 "$authfile"
+          done
 
       - name: Publish the multi-architecture index
         id: publish
