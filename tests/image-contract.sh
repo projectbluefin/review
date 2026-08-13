@@ -161,6 +161,7 @@ require image/Containerfile \
   'image/config/goose.yaml /opt/bluefin/goose/config/config.yaml' \
   'COPY --chmod=0644 image/review-scope/REVIEW.md /opt/bluefin/review-scope/.agents/REVIEW.md' \
   'COPY --chmod=0644 image/review-scope/checks/ /opt/bluefin/review-scope/.agents/checks/' \
+  'chmod 0755 /opt/bluefin /opt/bluefin/tui /opt/bluefin/harness' \
   'chmod 0755 /opt/bluefin/review-scope /opt/bluefin/review-scope/.agents /opt/bluefin/review-scope/.agents/checks' \
   'COPY --chmod=0755 image/git-hooks/ /opt/bluefin/git-hooks/' \
   'COPY --chmod=0755 image/hive-entrypoint.d/ /etc/hive/entrypoint.d/' \

@@ -176,7 +176,15 @@ COPY --chmod=0644 image/tui/requirements.lock /opt/bluefin/tui/requirements.lock
 COPY --chmod=0644 image/tui/*.py /opt/bluefin/tui/
 COPY --chmod=0644 image/harness/*.py /opt/bluefin/harness/
 RUN set -eu; \
-    chmod 0755 /opt/bluefin/harness; \
+    # BuildKit gives every parent directory a COPY --chmod creates the mode
+    # of the copied file, so the 0644 copies above created /opt/bluefin and
+    # /opt/bluefin/tui with no execute bit. Root ignores that for the rest of
+    # the build; the unprivileged 'dev' user the image runs as could not
+    # traverse into any image-owned tree underneath, and Goose died reading
+    # its GOOSE_PATH_ROOT config. Any 0644 COPY that creates a new directory
+    # under /opt/bluefin needs the same correction -- see the review-scope
+    # chmod below.
+    chmod 0755 /opt/bluefin /opt/bluefin/tui /opt/bluefin/harness; \
     chmod 0644 /opt/bluefin/harness/*.py; \
     arch="$(uname -m)"; \
     case "$arch" in \
@@ -373,6 +381,20 @@ RUN chmod 0755 /opt/bluefin/review-scope /opt/bluefin/review-scope/.agents /opt/
 # only -- `git commit --no-verify` bypasses every one of them.
 COPY --chmod=0755 image/git-hooks/ /opt/bluefin/git-hooks/
 COPY --chmod=0755 image/hive-entrypoint.d/ /etc/hive/entrypoint.d/
+
+# The image runs as the unprivileged 'dev' user, and every tree under
+# /opt/bluefin is image-owned policy that user must read: the Goose config at
+# GOOSE_PATH_ROOT, the TUI venv, the harness, the review scope, the git hooks.
+# Root ignores a missing execute bit, so a directory BuildKit created at 0644
+# passes the rest of the build and only fails once a real session tries to
+# traverse it. Assert the whole tree here instead.
+RUN set -eu; \
+    unreadable="$(find /opt/bluefin \( \( -type d ! -perm -o=rx \) -o \( -type f ! -perm -o=r \) \) -print)"; \
+    [ -z "$unreadable" ] || { \
+      echo 'not reachable by the dev user:' >&2; \
+      echo "$unreadable" >&2; \
+      exit 1; \
+    }
 
 # Project the org's skill documents into Goose's native Agent Skills layout.
 #

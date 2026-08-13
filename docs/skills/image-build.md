@@ -337,6 +337,18 @@ resolves under `/usr/local/bin` — the shape a reintroduced shim would take.
   published `:stable`. Copy the whole set with a glob and prove each module by
   importing it.
 
+- A `COPY --chmod=0644` that creates its own parent directory. BuildKit gives
+  every implicitly-created parent the copied file's mode, so `COPY
+  --chmod=0644 image/tui/requirements.lock /opt/bluefin/tui/requirements.lock`
+  created `/opt/bluefin` and `/opt/bluefin/tui` with no execute bit. Root
+  ignores that for the rest of the build and every layer passed; the `dev`
+  user the image runs as could not traverse into `/opt/bluefin/goose`, and
+  Goose died at startup with `Failed to read config file: Permission denied`.
+  Rootless podman does not reproduce it — the published image is built by
+  BuildKit, so verify against the real builder. Assert the mode in a layer
+  (`find /opt/bluefin \( -type d ! -perm -o=rx \) ...`), never in a string
+  match on the Containerfile alone.
+
 ## Verification
 
 ```bash
