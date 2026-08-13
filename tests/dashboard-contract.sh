@@ -50,12 +50,39 @@ if grep -nE 'gh\("pr", "(merge|close|comment|edit|review)"' "$tui"; then
   fail "mutating gh verbs must go through self.mutate(), not the gh() reader"
 fi
 
-# Exactly three process-execution sites: the read-only gh() reader, the gated
-# executor inside mutate(), and the review engine the review screen streams.
+# Process-execution sites: the read-only gh() reader, the gated executor
+# inside mutate(), the review engine the review screen streams, and the
+# batch landing agent the queue drains one at a time.
 [[ "$(grep -c 'subprocess.run' "$tui")" -eq 2 ]] ||
   fail "expected exactly two subprocess.run sites (gh() reader and mutate() executor)"
-[[ "$(grep -c 'subprocess.Popen(' "$tui")" -eq 1 ]] ||
-  fail "expected exactly one subprocess.Popen site (the streamed review)"
+[[ "$(grep -c 'subprocess.Popen(' "$tui")" -eq 2 ]] ||
+  fail "expected exactly two subprocess.Popen sites (the streamed review and the landing agent)"
+
+# The batch path: a selected batch opens the proportionate plan gate (Enter,
+# no typed count) and dispatches one agent for the whole selection.
+grep -q 'class BatchPlanScreen' "$tui" ||
+  fail "the batch plan gate must exist"
+grep -q 'class LandingScreen' "$tui" ||
+  fail "the live batch queue screen must exist"
+grep -q 'landing.new_task(batch, self.self_login)' "$tui" ||
+  fail "a selected batch must become one landing task"
+grep -q 'self.enqueue_landing(task)' "$tui" ||
+  fail "a confirmed batch must enter the landing queue"
+grep -q 'def drain_landings' "$tui" ||
+  fail "the landing queue must drain one agent at a time"
+
+# The landing agent's brief keeps the mutation rules: no drafts, no failing
+# required checks, no branch-protection bypass, per-PR JSONL status the
+# screen polls instead of scraped prose.
+landing_py="$repo_root/image/tui/landing.py"
+grep -q 'never pass' "$landing_py" && grep -q -- '--admin' "$landing_py" ||
+  fail "the landing brief must forbid branch-protection bypass"
+grep -q 'Never merge a draft' "$landing_py" ||
+  fail "the landing brief must forbid merging drafts"
+grep -q 'def parse_status' "$landing_py" ||
+  fail "the landing module must parse the agent's JSONL status report"
+grep -q 'BLUEFIN_REVIEW_LANDING_COMMAND' "$landing_py" ||
+  fail "the landing command must be overridable for tests"
 
 # The gate is the typed pull request number: no y/yes, no timeout.
 grep -q 'class ConfirmMutation' "$tui" || fail "the ConfirmMutation gate must exist"

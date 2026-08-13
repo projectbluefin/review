@@ -44,6 +44,7 @@ from textual.widgets import (
     Select,
 )
 from review_result import ReviewResult, adapt_current_engine
+import landing
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from harness.codex import CodexHarness
 from harness.autopilot import (HarnessOption, Preference, can_remember,
@@ -77,11 +78,11 @@ QUEUE_LABEL_DESCRIPTION = "This PR has been approved by a maintainer"
 # typed-number gate.
 KEYS_READING = (
     " [b]r[/b] review [b]v[/b] diff [b]o[/b] open [b]h[/b] handoff"
-    " [b]/[/b] steer [b]f[/b] filter [b]b[/b] batch [b]H[/b] hive"
+    " [b]/[/b] steer [b]f[/b] filter [b]b[/b] batch [b]A[/b] agents [b]H[/b] hive"
     " [b]R[/b] refresh [b]q[/b] quit"
 )
 KEYS_ACTING = (
-    " [b]L[/b] leave review [b]a[/b] approve+queue [b]m[/b] merge"
+    " [b]L[/b] leave review [b]a[/b] approve+queue · land batch [b]m[/b] merge"
     " [b]u[/b] update [b]x[/b] reject [b]M[/b] dupes"
 )
 
@@ -441,6 +442,127 @@ def live_review_verification(live: dict) -> list[dict]:
             }
         )
     return records
+
+
+class BatchPlanScreen(ModalScreen[bool]):
+    """The batch gate: the whole plan on one screen, one Enter to dispatch.
+
+    The typed-number gate earns its ceremony on a single irreversible
+    command. On a batch the maintainer has already reviewed row by row —
+    the selection was the review — typing the count back teaches nothing
+    and only slows the loop. This gate is proportionate: every pull request
+    and the exact agent command are shown, Enter dispatches, Esc aborts.
+    There is no default and no timer; dispatch is still a decision, not a
+    typing exercise.
+    """
+
+    BINDINGS = [
+        Binding("enter", "dispatch", "dispatch the batch"),
+        Binding("escape", "dismiss(False)", "abort"),
+    ]
+
+    def __init__(self, task: "landing.LandingTask") -> None:
+        super().__init__()
+        self.plan = task
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-box"):
+            yield Label(
+                f"one agent will land {len(self.plan.stops)} pull requests:",
+                id="confirm-heading",
+            )
+            for stop in self.plan.stops:
+                yield Static(
+                    f"  {stop.key} — {stop.title}", classes="confirm-command"
+                )
+            yield Static(" ".join(self.plan.command), classes="confirm-command")
+            yield Label("[enter] dispatch · [esc] abort")
+
+    def action_dispatch(self) -> None:
+        self.dismiss(True)
+
+
+class LandingScreen(Screen):
+    """The live batch queue: every dispatched batch, its agent, the per-PR
+    state the agent reports, and what Hive is doing alongside.
+
+    Status comes from the agent's JSONL report file, polled on a timer —
+    never scraped from its prose. The screen is read-only except [x], which
+    stops the running agent's process group the same way a review stop does.
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss(None)", "back to the queue"),
+        Binding("x", "stop_agent", "stop the running agent"),
+    ]
+
+    def __init__(self, dashboard: "ReviewDashboard") -> None:
+        super().__init__()
+        self.dashboard = dashboard
+
+    def compose(self) -> ComposeResult:
+        yield Static("batch queue", id="landing-status")
+        yield Static("", id="landing-rows")
+        yield Static("", id="landing-hive")
+        yield RichLog(highlight=False, markup=False, wrap=True, id="landing-log")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.poll()
+        self.set_interval(2.0, self.poll)
+
+    def poll(self) -> None:
+        lines: list[str] = []
+        for task in self.dashboard.landing_queue:
+            if task.returncode is None:
+                state = "running" if task.running else "queued"
+            else:
+                state = f"exited {task.returncode}"
+            lines.append(f"[b]batch {task.task_id}[/b] — {state}")
+            events = landing.parse_status(task.status_path)
+            done = events.get("", {})
+            for stop in task.stops:
+                event = events.get(stop.key, {})
+                note = event.get("note", "")
+                mark = event.get("state", "waiting")
+                lines.append(
+                    f"  {link(stop.key, pr_url(stop.repository, stop.number))}"
+                    f"  {mark}"
+                    + (f" — {escape(str(note))}" if note else "")
+                )
+            if done:
+                lines.append(f"  done — {escape(str(done.get('note', '')))}")
+        self.query_one("#landing-rows", Static).update("\n".join(lines))
+        self.query_one("#landing-hive", Static).update(
+            f" Hive: {self.dashboard.hive_state or 'asking…'}"
+        )
+        task = self.dashboard.landing_queue[-1]
+        try:
+            with open(task.log_path, encoding="utf-8") as handle:
+                tail = handle.readlines()[-200:]
+        except OSError:
+            tail = []
+        log = self.query_one("#landing-log", RichLog)
+        log.clear()
+        for line in tail:
+            log.write(line.rstrip("\n"))
+        running = sum(1 for t in self.dashboard.landing_queue if t.running)
+        self.query_one("#landing-status", Static).update(
+            f" batch queue: {len(self.dashboard.landing_queue)} batches, "
+            f"{running} running · [x] stop · [esc] back"
+        )
+
+    def action_stop_agent(self) -> None:
+        task = next(
+            (t for t in self.dashboard.landing_queue if t.running), None
+        )
+        if task is None or task.process is None:
+            self.app.notify("no agent is running.", severity="warning")
+            return
+        try:
+            os.killpg(os.getpgid(task.process.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, AttributeError) as error:
+            self.app.notify(f"stop failed: {error}", severity="error")
 
 
 class ConfirmMutation(ModalScreen[bool]):
@@ -1103,7 +1225,8 @@ class ReviewDashboard(App):
         Binding("o", "open_browser", "open"),
         Binding("v", "view_diff", "diff"),
         Binding("c", "comment", "comment"),
-        Binding("a", "merge", "approve and queue"),
+        Binding("a", "merge", "approve+queue / land batch"),
+        Binding("A", "agents", "batch queue"),
         Binding("m", "merge_now", "merge now"),
         Binding("x", "reject", "reject"),
         Binding("h", "handoff", "handoff"),
@@ -1146,6 +1269,10 @@ class ReviewDashboard(App):
         self.all_items: list[dict] = []
         self.harness_state = "CHECKING"
         self.harness_options: list[HarnessOption] = []
+        # Dispatched landing batches, oldest first. One agent runs at a time;
+        # a batch confirmed while another runs waits behind it — a proper
+        # queue, not a pile of concurrent agents mutating the same queue.
+        self.landing_queue: list[landing.LandingTask] = []
 
     # ── layout ────────────────────────────────────────────────────────────
 
@@ -1415,6 +1542,15 @@ class ReviewDashboard(App):
         selected = sum(1 for s in self.stops if s.selected)
         failed = sum(1 for s in self.stops if s.failure)
         stuck = f" | {failed} did not merge" if failed else ""
+        running = sum(1 for t in self.landing_queue if t.running)
+        queued = sum(
+            1 for t in self.landing_queue if t.process is None and t.returncode is None
+        )
+        agents = (
+            f" | agents: {running} running, {queued} queued [A]"
+            if self.landing_queue
+            else ""
+        )
         freshness = self.generated_at or "unknown"
         shown = len(self.stops)
         total = len(self.snapshot_items)
@@ -1435,7 +1571,7 @@ class ReviewDashboard(App):
         self.query_one("#status-bar", Static).update(
             f" Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
             f"| snapshot {freshness} | as {self.self_login or 'unknown'} "
-            f"| batch: {selected}{stuck} | Hive: {self.hive_state or 'asking…'}"
+            f"| batch: {selected}{stuck}{agents} | Hive: {self.hive_state or 'asking…'}"
         )
 
     def action_filter(self) -> None:
@@ -2040,28 +2176,115 @@ class ReviewDashboard(App):
 
     def action_merge(self) -> None:
         batch = [s for s in self.stops if s.selected]
-        if not batch and self.current:
-            batch = [self.current]
+        if batch:
+            self.plan_landing(batch)
+            return
+        stop = self.current
+        if not stop:
+            return
+        if not stop.live:
+            self.notify(f"{stop.key}: no live evidence yet; select it first.")
+            return
+        if self._queueable(stop):
+            self._queue_automerge(stop)
 
-        queue: list[Stop] = []
-        for stop in batch:
-            if not stop.live:
-                self.notify(f"{stop.key}: no live evidence yet; select it first.")
-                continue
-            if self._queueable(stop):
-                queue.append(stop)
+    def plan_landing(self, batch: list[Stop]) -> None:
+        """Batch `a`: the reviewed selection becomes one agent's brief.
 
-        def queue_next(index: int = 0) -> None:
-            if index >= len(queue):
-                if len(queue) > 1:
-                    self.notify(f"batch queued: {len(queue)} PRs.")
-                return
-            self._queue_automerge(
-                queue[index],
-                then=lambda next_index=index + 1: queue_next(next_index),
+        The maintainer picked every row by hand; the BatchPlanScreen is the
+        proportionate gate — the whole plan and the exact command, confirmed
+        with Enter. The agent then owns the batch end to end: repair the
+        mechanical failures, wait for green, land what the rules allow, and
+        report each state change to the status file the queue screen polls.
+        """
+        if not self.self_login:
+            self.notify(
+                "your GitHub login is unknown; the landing approval needs it.",
+                severity="warning",
             )
+            return
+        task = landing.new_task(batch, self.self_login)
 
-        queue_next()
+        def finish(confirmed: bool | None) -> None:
+            if not confirmed:
+                self.notify("aborted; nothing was dispatched.", severity="warning")
+                return
+            self.enqueue_landing(task)
+            self.push_screen(LandingScreen(self))
+
+        self.push_screen(BatchPlanScreen(task), finish)
+
+    def enqueue_landing(self, task: "landing.LandingTask") -> None:
+        self.landing_queue.append(task)
+        self.refresh_status()
+        if not any(t.running for t in self.landing_queue):
+            self.drain_landings()
+
+    @work(thread=True)
+    def drain_landings(self) -> None:
+        """Run the landing queue FIFO, one agent at a time."""
+        while True:
+            task = next(
+                (
+                    t
+                    for t in self.landing_queue
+                    if t.process is None and t.returncode is None
+                ),
+                None,
+            )
+            if task is None:
+                return
+            self.run_landing_task(task)
+
+    def run_landing_task(self, task: "landing.LandingTask") -> None:
+        """One batch agent, off the UI thread, its own process group so
+        [x] stops the agent and everything it spawned together."""
+        try:
+            log = open(task.log_path, "a", encoding="utf-8")
+        except OSError as error:
+            task.returncode = 1
+            self.call_from_thread(
+                self.notify, f"landing log: {error}", severity="error"
+            )
+            return
+        with log:
+            try:
+                process = subprocess.Popen(
+                    task.command,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            except OSError as error:
+                task.returncode = 1
+                self.call_from_thread(
+                    self.notify, f"landing agent: {error}", severity="error"
+                )
+                return
+            task.process = process
+            task.returncode = process.wait()
+        self.call_from_thread(self.landing_finished, task)
+
+    def landing_finished(self, task: "landing.LandingTask") -> None:
+        """Fold the agent's report back onto the rows: landed work leaves
+        the batch; blocked and failed work stays selected with its reason."""
+        events = landing.parse_status(task.status_path)
+        for stop in task.stops:
+            event = events.get(stop.key, {})
+            state = event.get("state")
+            if state == "merged":
+                stop.selected = False
+                stop.failure = ""
+            elif state in ("blocked", "failed"):
+                stop.selected = True
+                stop.failure = f"{state}: {event.get('note', 'no reason given')}"
+        self.refresh_rows()
+
+    def action_agents(self) -> None:
+        if not self.landing_queue:
+            self.notify("no batch has been dispatched yet.", severity="warning")
+            return
+        self.push_screen(LandingScreen(self))
 
     def action_merge_now(self) -> None:
         """Merge this pull request now, as a maintainer, without `lgtm`.

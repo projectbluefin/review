@@ -284,7 +284,124 @@ async def main() -> int:
             check("hidden" in raw.classes, "[e] must return to the decision card")
             return str(status.render()), set(status.classes), str(card.render())
 
-    # ── batch queueing must gate each PR once, for the whole sequence ────
+    # ── a selected batch dispatches one landing agent behind one gate ────
+    # The selection is the review, so the batch gate is proportionate: the
+    # whole plan and the exact command on one screen, Enter to dispatch —
+    # not a typed count. One agent owns all selected pull requests, reports
+    # per-PR state to its status file, and the queue screen polls that file.
+    landing_log = workdir / "landing-argv.log"
+    landing_stub = write_stub(
+        workdir / "stub-landing",
+        f'printf "%s\\n" "$*" >>"{landing_log}"\n'
+        'prompt=""\n'
+        'for arg in "$@"; do case "$arg" in *.prompt.md) prompt="$arg" ;; esac; done\n'
+        'status="${prompt%.prompt.md}.jsonl"\n'
+        'grep -oE "[a-z]+/[a-z-]+#[0-9]+" "$prompt" | sort -u | while read -r pr; do\n'
+        '  printf "{\\"pr\\": \\"%s\\", \\"state\\": \\"merged\\", \\"note\\": \\"green\\"}\\n" "$pr" >>"$status"\n'
+        'done\n'
+        'printf "{\\"state\\": \\"done\\", \\"note\\": \\"all landed\\"}\\n" >>"$status"\n'
+        'echo "agent log line"\n',
+    )
+    os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{landing_stub} @PROMPT"
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        app.self_login = "castrojo"
+        await pilot.press("b")
+        await pilot.press("down")
+        await pilot.press("b")
+        await pilot.pause()
+        check(
+            [s.selected for s in app.stops] == [True, True],
+            f"[b] must select the highlighted row, got {[s.selected for s in app.stops]}",
+        )
+        await pilot.press("a")
+        await pilot.pause()
+        gate = app.screen
+        check(
+            isinstance(gate, tui.BatchPlanScreen),
+            f"a selected batch must open the plan gate, got {type(gate).__name__}",
+        )
+        if isinstance(gate, tui.BatchPlanScreen):
+            check(
+                len(gate.plan.stops) == 2,
+                f"the plan must cover the whole selection, got {gate.plan.keys}",
+            )
+            await pilot.press("enter")
+            for _ in range(200):
+                if isinstance(app.screen, tui.LandingScreen):
+                    break
+                await pilot.pause(0.05)
+            check(
+                isinstance(app.screen, tui.LandingScreen),
+                f"dispatch must open the live batch queue, got {type(app.screen).__name__}",
+            )
+            task = gate.plan
+            for _ in range(400):
+                if task.returncode is not None:
+                    break
+                await pilot.pause(0.05)
+            check(
+                task.returncode == 0,
+                f"the landing agent must exit 0, got {task.returncode}",
+            )
+            invocations = landing_log.read_text().splitlines()
+            check(
+                len(invocations) == 1,
+                f"one agent must run for the whole batch, got {invocations}",
+            )
+            prompt_text = Path(task.prompt_path).read_text()
+            check(
+                all(stop.key in prompt_text for stop in task.stops),
+                "the agent brief must name every selected pull request",
+            )
+            for _ in range(200):
+                if not any(s.selected for s in app.stops):
+                    break
+                await pilot.pause(0.05)
+            check(
+                not any(s.selected for s in app.stops),
+                "landed pull requests must leave the batch",
+            )
+            screen = app.screen
+            if isinstance(screen, tui.LandingScreen):
+                screen.poll()
+                rows = str(screen.query_one("#landing-rows", tui.Static).render())
+                check(
+                    rows.count("merged") == 2,
+                    f"the queue must show each landed PR, got {rows!r}",
+                )
+                check(
+                    "all landed" in rows,
+                    f"the queue must show the batch summary, got {rows!r}",
+                )
+            status = str(app.query_one("#status-bar", tui.Static).render())
+            check(
+                "agents:" in status,
+                f"the status bar must report the batch queue, got {status!r}",
+            )
+            await pilot.press("escape")
+            await pilot.pause()
+            check(
+                not isinstance(app.screen, tui.LandingScreen),
+                "escape must return to the review queue",
+            )
+            await pilot.press("A")
+            await pilot.pause()
+            check(
+                isinstance(app.screen, tui.LandingScreen),
+                "[A] must reopen the live batch queue",
+            )
+            await pilot.press("escape")
+            await pilot.pause()
+    gh_log.write_text("")
+
+    # ── aborting the plan gate dispatches nothing ────────────────────────
+    landing_log.write_text("")
     app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -295,75 +412,18 @@ async def main() -> int:
         app.self_login = "castrojo"
         for stop in app.stops:
             stop.selected = True
-            stop.live = {"isDraft": False}
         app.action_merge()
         await pilot.pause()
-
-        def confirmations():
-            return [
-                screen
-                for screen in app.screen_stack
-                if isinstance(screen, tui.ConfirmMutation)
-            ]
-
-        gates = confirmations()
         check(
-            len(gates) == 1,
-            f"batch queueing must show one confirmation at a time, got {len(gates)}",
+            isinstance(app.screen, tui.BatchPlanScreen),
+            "a selected batch must gate before dispatch",
         )
-        if len(gates) == 1:
-            seen = []
-            for _ in range(4):
-                for _ in range(200):
-                    if isinstance(app.screen, tui.ConfirmMutation):
-                        break
-                    await pilot.pause(0.05)
-                if not isinstance(app.screen, tui.ConfirmMutation):
-                    break
-                gate = app.screen
-                expected = gate.expected
-                seen.append(
-                    (expected, tuple(tuple(c[:3]) for c in gate.commands))
-                )
-                # type the number as a maintainer does; setting .value
-                # directly would hide an unfocused, unusable gate
-                await pilot.press(*expected)
-                check(
-                    gate.query_one(tui.Input).value == expected,
-                    "confirmation gate must accept typed keystrokes",
-                )
-                await pilot.press("enter")
-                for _ in range(200):
-                    if app.screen is not gate:
-                        break
-                    await pilot.pause(0.05)
-            numbers = [number for number, _ in seen]
-            commands = [command for _, command in seen]
-            check(
-                len(seen) == 2
-                and numbers[0] != numbers[1]
-                and commands
-                == [(("gh", "pr", "review"), ("gh", "pr", "edit"))] * 2,
-                "queueing must gate each PR exactly once, for the approval "
-                f"and the lgtm label together, got {seen}",
-            )
-            check(
-                not confirmations(),
-                "batch queueing must return to the dashboard after all gates",
-            )
-            for _ in range(200):
-                ran = [
-                    tuple(line.split()[:2])
-                    for line in gh_log.read_text().splitlines()
-                    if tuple(line.split()[:2]) in {("pr", "review"), ("pr", "edit")}
-                ]
-                if len(ran) >= 4:
-                    break
-                await pilot.pause(0.05)
-            check(
-                ran == [("pr", "review"), ("pr", "edit")] * 2,
-                f"both queueing commands must run after the one gate, got {ran}",
-            )
+        await pilot.press("escape")
+        await pilot.pause()
+        check(
+            not app.landing_queue and landing_log.read_text() == "",
+            "escape must abort the batch without dispatching an agent",
+        )
     gh_log.write_text("")
 
     # ── merging without lgtm is a maintainer power ───────────────────────
