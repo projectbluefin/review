@@ -85,7 +85,13 @@ fix.
 4. Preserve canonical command semantics. Never shadow `grep`, `find`, `cat`, or
    `ls` — with a modern alternative or with a hand-written one. If a modern
    tool is added, install it under its own native name (e.g. `rg`) beside the
-   canonical command, never as a replacement; none is installed today.
+   canonical command, never as a replacement. Two are installed today, `rg`
+   and ShellCheck, each from its official architecture-specific release with a
+   pinned checksum. The layer guards itself: it refuses to build if the base
+   already provides either name, and it re-proves after installing that
+   `grep`, `find`, `cat` and `ls` still resolve outside `/usr/local/bin`.
+   `just` and mikefarah `yq` v4 come from the base and must not be installed
+   again. `fd`, `bat`, `eza`, editors, pagers and compilers stay out.
 5. The rule, without exceptions: **use the tools already in the image; if a
    common tool is missing, add it at the FSDK seam; never hand-roll a
    reimplementation; and never leave a shim standing once the seam fix
@@ -297,14 +303,19 @@ content comes from BST elements, so a self-mutating runtime is a defect.
 `goose`) is forbidden in the base only, because a second copy means two
 versions and no way to know which an agent ran.
 
-**Ordinary userland is forbidden nowhere.** `find`, `cmp`, `diff`, `rg`, `fd`,
-`yq` and ShellCheck belong in the base when a contributor needs them; their
+**Ordinary userland is forbidden nowhere.** `find`, `cmp`, `diff`, `fd` and
+`yq` belong in the base when a contributor needs them; their
 absence is what made live agents fail with `command not found`. Add them at
 the BST seam, never here, and file the ones that are missing rather than
 describing them. For `find`, `cmp` and `diff` the audit checks provenance
 rather than presence: Hive's relay calls `find` and `cmp` directly, the base
 carries real GNU implementations, and the audit fails if any of the three
 resolves under `/usr/local/bin` — the shape a reintroduced shim would take.
+
+`rg` and ShellCheck are the two exceptions, because review installs them
+itself: they sit in the audit's review-owned list, forbidden in the base and
+required in the derived image. If the base ever ships one, the audit fails and
+the answer is to delete review's layer, not to carry a second copy.
 
 ## Red Flags
 

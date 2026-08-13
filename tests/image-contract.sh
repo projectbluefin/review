@@ -203,6 +203,46 @@ require image/Containerfile \
   "cmp -s \"\$probe/cmp-left\" \"\$probe/cmp-right\"" \
   '! cmp -s "$probe/cmp-left" "$probe/cmp-right"'
 
+# The approved agent-tooling delta: `rg` and `shellcheck` under their own
+# names, verified official release artifacts, and a build-time guard that
+# deletes the layer's reason to exist the moment the base ships either tool.
+# Standard command semantics stay the base's, so nothing may be substituted or
+# shadowed. `fd`, `bat` and `eza` are forbidden outright.
+# shellcheck disable=SC2016
+require image/Containerfile \
+  'ARG RIPGREP_VERSION=' \
+  'ARG RIPGREP_X86_64_SHA256=' \
+  'ARG RIPGREP_AARCH64_SHA256=' \
+  'ARG SHELLCHECK_VERSION=' \
+  'ARG SHELLCHECK_X86_64_SHA256=' \
+  'ARG SHELLCHECK_AARCH64_SHA256=' \
+  'https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/ripgrep-${RIPGREP_VERSION}-${rg_arch}.tar.gz' \
+  'https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.${shellcheck_arch}.tar.xz' \
+  'rg_arch=x86_64-unknown-linux-musl;' \
+  'rg_arch=aarch64-unknown-linux-musl;' \
+  'for provided in rg shellcheck; do' \
+  'delete this layer instead of shadowing it' \
+  'for canonical in grep find cat ls; do' \
+  'rg --version;' \
+  'shellcheck --version;'
+
+# shellcheck disable=SC2016
+forbid image/Containerfile \
+  '/usr/local/bin/fd' \
+  '/usr/local/bin/bat' \
+  '/usr/local/bin/eza' \
+  'alias grep=' \
+  'alias find=' \
+  'alias cat=' \
+  'alias ls='
+
+# The base already ships `just` and mikefarah `yq` v4, so a second copy on
+# PATH would be the duplication issue #75 forbids.
+# shellcheck disable=SC2016
+forbid image/Containerfile \
+  '/usr/local/bin/just' \
+  '/usr/local/bin/yq'
+
 # The probe uses `-user dev`, exactly as Hive's relay does, so it must come
 # after the layer that creates that user or the predicate cannot resolve.
 probe_user_layer="$(grep -n 'dev:x:1000:1000:Developer:' image/Containerfile | head -n 1 | cut -d: -f1)"
@@ -239,11 +279,16 @@ for name, archive in (
     ("codex", "codex.tar.gz"),
     ("codex code mode host", "codex-code-mode-host.tar.gz"),
     ("goose", "goose.tar.gz"),
+    ("ripgrep", "ripgrep.tar.gz"),
+    ("shellcheck", "shellcheck.tar.xz"),
 ):
     verify = container.find(f'"$workdir/{archive}" | sha256sum -c -')
     extract = container.find(f'"$workdir/{archive}" -C')
     if extract < 0:
         extract = container.find(f'-xOf "$workdir/{archive}"')
+    if extract < 0:
+        # Two-step form: decompress the verified archive, then select a member.
+        extract = container.find(f'< "$workdir/{archive}"')
     if verify < 0:
         errors.append(f"{name}: no sha256sum verification of {archive}")
     elif extract < 0:
@@ -459,14 +504,20 @@ require image/config/local-agent-policy.md \
   'Probe with' \
   'are not installed' \
   'gh run watch' \
-  'that is an evidenced finding'
+  'that is an evidenced finding' \
+  'The image adds `rg` and `shellcheck` on top' \
+  'keep their standard behavior'
 # The policy tells the agent what the runtime lacks, so a tool the base
 # actually ships must never be named as absent: that steers every task into a
 # hand-rolled substitute. These are present at the pinned base digest.
+# The image installs `rg` and `shellcheck`, so the policy must not send the
+# agent to a substitute for either.
 # shellcheck disable=SC2016 # Literal policy text, not shell expansion.
 forbid image/config/local-agent-policy.md \
   '`which`, `awk`' \
-  '`yq` and the PyYAML module'
+  '`yq` and the PyYAML module' \
+  'use `grep -r` for `rg`' \
+  '`rg` and `fd`'
 
 # GOOSE_PATH_ROOT keeps controlled policy/data/state out of Hive's runtime
 # config. The pinned runtime now links its knowledge export to Goose-native

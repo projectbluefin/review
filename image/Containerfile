@@ -36,6 +36,12 @@ ARG UV_VERSION=0.12.3
 ARG UV_X86_64_SHA256=0643b9fb8c9fb27458e709ce6ff939695013c41975ff7b02d3f3b138d8d4bdb3
 ARG UV_AARCH64_SHA256=fa513fca1eb2913334c944fe9adbdd410274a1cbe8dd05d03699a9eb85311d4e
 ARG TEXTUAL_VERSION=8.2.8
+ARG RIPGREP_VERSION=15.2.0
+ARG RIPGREP_X86_64_SHA256=33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c
+ARG RIPGREP_AARCH64_SHA256=800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915
+ARG SHELLCHECK_VERSION=0.11.0
+ARG SHELLCHECK_X86_64_SHA256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+ARG SHELLCHECK_AARCH64_SHA256=12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588
 ARG SKILLS_COMMIT=b6f5c370cca19398fbbbe43a0182dca6783a80cb
 
 FROM ${FSDK_RUNNER_IMAGE}
@@ -158,6 +164,80 @@ RUN set -eu; \
     tmux -V; \
     codex --version; \
     codex-code-mode-host --help >/dev/null
+
+# Approved agent tooling delta: `rg` and `shellcheck`, installed under their
+# own native names. Neither exists in the pinned base -- the guard below
+# proves that at build time rather than trusting this comment -- so nothing
+# here shadows a standard command. `just` and mikefarah `yq` v4 are
+# deliberately absent from this layer: the base already ships both, and
+# installing them again would put a second copy ahead of the base's on PATH.
+#
+# These are chosen capabilities, not load-bearing Hive dependencies: each is a
+# single static binary and either can be dropped from this layer alone.
+# Unpacked cost at the pinned versions: rg 5.4 MB, shellcheck 16.2 MB.
+#
+# The guard is the anti-duplication contract. If the base later gains either
+# tool, this build fails and this layer is deleted instead of quietly
+# shadowing the base's copy.
+ARG RIPGREP_VERSION
+ARG RIPGREP_X86_64_SHA256
+ARG RIPGREP_AARCH64_SHA256
+ARG SHELLCHECK_VERSION
+ARG SHELLCHECK_X86_64_SHA256
+ARG SHELLCHECK_AARCH64_SHA256
+RUN set -eu; \
+    for provided in rg shellcheck; do \
+      if command -v "$provided" >/dev/null 2>&1; then \
+        echo "$provided is already provided by the base at $(command -v "$provided"); delete this layer instead of shadowing it" >&2; \
+        exit 1; \
+      fi; \
+    done; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64) \
+        rg_arch=x86_64-unknown-linux-musl; \
+        rg_sha="${RIPGREP_X86_64_SHA256}"; \
+        shellcheck_arch=x86_64; \
+        shellcheck_sha="${SHELLCHECK_X86_64_SHA256}" ;; \
+      aarch64|arm64) \
+        rg_arch=aarch64-unknown-linux-musl; \
+        rg_sha="${RIPGREP_AARCH64_SHA256}"; \
+        shellcheck_arch=aarch64; \
+        shellcheck_sha="${SHELLCHECK_AARCH64_SHA256}" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    workdir="$(mktemp -d)"; \
+    trap 'rm -rf "$workdir"' EXIT; \
+    curl --fail --location --show-error --silent \
+      "https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/ripgrep-${RIPGREP_VERSION}-${rg_arch}.tar.gz" \
+      -o "$workdir/ripgrep.tar.gz"; \
+    printf '%s  %s\n' "$rg_sha" "$workdir/ripgrep.tar.gz" | sha256sum -c -; \
+    # Decompress whole, then select the member. Piping the codec into tar
+    # deadlocks here: `--occurrence=1` stops reading once it has `rg`, and the
+    # `python3 -m gzip` filter dies on the resulting SIGPIPE rather than
+    # exiting quietly the way the gzip binary would.
+    python3 -m gzip -d < "$workdir/ripgrep.tar.gz" > "$workdir/ripgrep.tar"; \
+    tar -xOf "$workdir/ripgrep.tar" --wildcards --occurrence=1 '*/rg' > /usr/local/bin/rg; \
+    chmod 0755 /usr/local/bin/rg; \
+    curl --fail --location --show-error --silent \
+      "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.${shellcheck_arch}.tar.xz" \
+      -o "$workdir/shellcheck.tar.xz"; \
+    printf '%s  %s\n' "$shellcheck_sha" "$workdir/shellcheck.tar.xz" | sha256sum -c -; \
+    tar -xOf "$workdir/shellcheck.tar.xz" --wildcards --occurrence=1 '*/shellcheck' > /usr/local/bin/shellcheck; \
+    chmod 0755 /usr/local/bin/shellcheck; \
+    rg --version; \
+    shellcheck --version; \
+    # Standard command semantics stay the base's. Nothing in this layer may
+    # resolve grep, find, cat, or ls out of /usr/local/bin.
+    for canonical in grep find cat ls; do \
+      case "$(command -v "$canonical")" in \
+        /usr/local/bin/*) echo "$canonical is shadowed from /usr/local/bin" >&2; exit 1 ;; \
+      esac; \
+    done; \
+    printf 'x\ny\n' > "$workdir/probe.txt"; \
+    test "$(rg --count-matches y "$workdir/probe.txt")" = 1; \
+    printf '#!/bin/sh\ntrue\n' > "$workdir/probe.sh"; \
+    shellcheck "$workdir/probe.sh"
 
 # The maintainer TUI runtime: uv (pinned, checksum-verified) creates a
 # self-contained virtual environment on the base's own CPython and installs
