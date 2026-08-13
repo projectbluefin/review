@@ -16,9 +16,8 @@ This runtime is a lean FSDK base, not a distribution, and it has no package
 manager. It does ship ordinary GNU userland: `awk`, `xargs`, `ps`, `tar`,
 `less`, `file`, `diff`, `patch`, `find`, `cmp`, `sed`, `grep`, `python3`,
 `git`, `curl` and `jq` are all present, and YAML is readable with both `yq`
-and the PyYAML module. The image adds `rg` and `shellcheck` on top: search a
-repository with `rg`, and check any shell you write or change with
-`shellcheck`. Probe with `command -v` rather than `which` — it is a
+and the PyYAML module. The image adds `rg` on top: search a repository with
+it. Probe with `command -v` rather than `which` — it is a
 shell builtin and reports shell functions too.
 `rg` is a preference for repository exploration, not a replacement: `grep`,
 `find`, `cat` and `ls` keep their standard behavior, so a command that needs

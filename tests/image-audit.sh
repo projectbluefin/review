@@ -603,27 +603,28 @@ base_required="bash cat chmod cp curl git grep jq ls mkdir mv python3 rm sed sh 
 # a second copy there means two versions of the same tool and no way to tell
 # which one an agent ran.
 #
-# Ordinary userland -- find, cmp, diff, and utilities such as fd and yq -- is
-# deliberately absent from both lists. Contributor agents need it, and its
-# absence is what made them fail with 'command not found'.
+# Ordinary userland -- find, cmp, diff, and utilities such as fd, yq and
+# ShellCheck -- is deliberately absent from both lists. Contributor agents
+# need it, and its absence is what made them fail with 'command not found'.
 # For 'find' and 'cmp' the real invariant is not absence but provenance:
 # Hive's relay calls both directly, the base carries real GNU implementations,
 # and review must not shadow them. That is asserted directly below rather than
 # approximated by forbidding the base copy.
 #
-# rg and ShellCheck sit with the review-owned tools instead, because review
-# installs them: the base ships neither at the selected digest. The day it
-# ships one, this audit fails, and the answer is to delete review's layer
-# rather than run two copies.
+# rg sits with the review-owned tools instead, because review installs it
+# (#75). The day the base ships rg, this audit fails, and the answer is to
+# delete review's layer rather than run two copies.
 package_managers="apt dnf apk"
-review_owned="node npm gh tmux codex codex-code-mode-host goose rg shellcheck"
+review_owned="node npm gh tmux codex codex-code-mode-host goose rg"
 base_forbidden="${review_owned} ${package_managers}"
-derived_required="bash node npm corepack gh tmux codex codex-code-mode-host goose rg shellcheck just yq find cmp diff infocmp"
+derived_required="bash node npm corepack gh tmux codex codex-code-mode-host goose rg find cmp diff grep cat ls infocmp"
 derived_forbidden="$package_managers"
 # Base commands Hive's relay calls directly and review must never shim over.
 # image/Containerfile proves their semantics at build time against the real
-# base; this checks the finished runtime still resolves them from it.
-derived_unshadowed="find cmp diff"
+# base; this checks the finished runtime still resolves them from it. grep,
+# cat and ls join the list with rg: a search tool in /usr/local/bin is exactly
+# the shape that let the old find/cmp shims shadow the base's GNU copies.
+derived_unshadowed="find cmp diff grep cat ls"
 
 append ""
 append "#### Native runtime audit"
