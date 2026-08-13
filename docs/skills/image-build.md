@@ -307,8 +307,8 @@ versions and no way to know which an agent ran.
 
 **Ordinary userland is forbidden nowhere unless review installs it.** `find`,
 `cmp`, `diff`, `fd`, `yq` and ShellCheck belong in the base when a
-contributor needs them; their
-absence is what made live agents fail with `command not found`. Add them at
+contributor needs them; their absence is what made live agents fail with
+`command not found`. Add them at
 the BST seam, never here, and file the ones that are missing rather than
 describing them. For `find`, `cmp`, `diff`, `grep`, `cat` and `ls` the audit
 checks provenance as well as presence: Hive's relay calls `find` and `cmp`
