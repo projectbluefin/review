@@ -16,10 +16,14 @@ This runtime is a lean FSDK base, not a distribution, and it has no package
 manager. It does ship ordinary GNU userland: `awk`, `xargs`, `ps`, `tar`,
 `less`, `file`, `diff`, `patch`, `find`, `cmp`, `sed`, `grep`, `python3`,
 `git`, `curl` and `jq` are all present, and YAML is readable with both `yq`
-and the PyYAML module. Probe with `command -v` rather than `which` — it is a
+and the PyYAML module. The image adds `rg` on top: search a repository with
+it. Probe with `command -v` rather than `which` — it is a
 shell builtin and reports shell functions too.
+`rg` is a preference for repository exploration, not a replacement: `grep`,
+`find`, `cat` and `ls` keep their standard behavior, so a command that needs
+one of them must call it by name.
 The tools that are not installed are `gzip` (GNU `tar` still reads `.tar.gz`
-here via `tar -I 'python3 -m gzip'`), `rg` and `fd`: use `grep -r` for `rg`.
+here via `tar -I 'python3 -m gzip'`) and `fd`: use `find` for `fd`.
 When a task needs a toolchain the runtime does not ship,
 that is an evidenced finding, not something to install;
 never reimplement a missing tool under its own name.

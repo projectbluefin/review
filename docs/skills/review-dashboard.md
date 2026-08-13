@@ -1,6 +1,6 @@
 ---
 name: review-dashboard
-version: "1.1"
+version: "1.3"
 last_updated: 2026-08-11
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
@@ -100,6 +100,14 @@ adapters. `ReviewStateView` owns the lifecycle states `READY`, `RUNNING`,
 7. **Completed reviews cross the `ReviewResult` contract.** The current Goose
    adapter accepts its JSONL findings and orchestrator progress records. An
    exit-zero transcript without that structure is `unparsable`, never clean.
+   The Codex adapter accepts one complete official JSONL run: one thread and
+   turn start, one final result-bearing `item.completed` agent message, and an
+   immediately following successful `turn.completed`. Bare results,
+   ambiguous result messages, and malformed, failed, cancelled, out-of-order,
+   or trailing terminal events are `unparsable` with bounded raw evidence.
+   It enables code-mode-only and the bundled official code-mode host, disables
+   direct-tool fallback, and uses the review container as the shell isolation
+   boundary so the CLI never depends on a nested bubblewrap sandbox.
    Keep the decision card concise and keep bounded raw evidence reachable with
    `e`; backend prose does not belong in Textual rendering code.
 8. **Keep the acting surface explicit.** The shipped keys cover review,

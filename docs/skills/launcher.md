@@ -1,7 +1,7 @@
 ---
 name: launcher
-version: "3.0"
-last_updated: 2026-08-08
+version: "3.1"
+last_updated: 2026-08-11
 id: launcher
 one_line_purpose: Change review just recipes without breaking the launch contract.
 entry_point: docs/skills/launcher.md
@@ -59,9 +59,10 @@ Goose, or image build skill documents.
 3. Keep the container path narrow. It mounts only the read-only Hive
    contributor configuration and runs the image entrypoint, which attaches to
    Hive's `contributor` session.
-   `review-queue` is the exception that proves the rule: it mounts nothing at
-   all and starts the image with the `queue` argument, which the entrypoint
-   dispatches to the maintainer dashboard before the Hive config gate. The
+   `review-queue` is the exception that proves the rule: it mounts no Hive or
+   host configuration directory and starts the image with the `queue`
+   argument, which the entrypoint dispatches to the maintainer dashboard
+   before the Hive config gate. The
    dashboard needs a GitHub token from the first keystroke, so the recipe
    fails without one rather than warning. Leading non-flag arguments are the
    model profile and thinking effort — the same closed set `review-container`
@@ -69,6 +70,12 @@ Goose, or image build skill documents.
    the dashboard. Its instance name is `review-queue`, overridable with
    `REVIEW_QUEUE_NAME` — the dashboard's analogue of `REVIEW_CONTAINER_NAME`,
    and likewise the only instance knob it gets.
+   An explicitly set `BLUEFIN_REVIEW_BACKEND` is validated as `goose` or
+   `codex` and forwarded only to this recipe. Unset preserves the dashboard's
+   default; explicit Codex preselects the existing takeoff panel but never
+   starts inference without Enter/click confirmation. Invalid values fail
+   before a container starts, and this selector never reaches
+   `review-container` or changes Hive's backend.
    Which hive a launch contributes to is launcher configuration, not task
    selection: `~/.config/hive/contributor.<name>.env` registrations sit
    beside the default `contributor.env`, and the launch picks `REVIEW_HIVE`
@@ -121,6 +128,15 @@ Goose, or image build skill documents.
    environment (`--env NAME`), not command-line values or host configuration
    mounts. Resolve the GitHub token from `REVIEW_GH_TOKEN`, existing
    `GH_TOKEN`, then `gh auth token`.
+   Codex subscription OAuth is the one file-shaped exception for
+   `review-queue`: locate `${CODEX_HOME:-$HOME/.codex}/auth.json`, copy it with
+   mode `0600` into a private runtime directory, mount only that disposable
+   copy at `/home/dev/.codex/auth.json`, and remove it when the foreground run
+   exits. The official CLI may refresh the staged copy; it must never receive
+   the host Codex configuration directory or mutate the host login cache.
+   An explicitly selected Codex review requires no host Goose installation,
+   configuration, or Copilot credential. Missing auth remains a visible
+   `NEEDS SIGN-IN` state and never selects a fallback harness.
 6. When renaming launcher-facing product identifiers, do a tracked-file sweep
    for both active names and legacy spellings in code, comments, workflow
    assertions, fixture image names, and environment variables. Keep only the
@@ -213,6 +229,9 @@ want to be certain which launcher you are invoking.
   break; aliases preserve stale instructions and weaken test coverage.
 - "Passing `--env NAME=value` is equivalent." For secrets it is not: inherited
   `--env NAME` avoids printing values into the Podman command line.
+- "Mounting `~/.codex` is simpler." It also passes provider configuration and
+  lets a container mutate the host login. Stage only `auth.json`; never mount
+  the directory or the original file.
 
 ## Red Flags
 
@@ -223,8 +242,9 @@ want to be certain which launcher you are invoking.
   stray `podman run -d`, or a background job that silently outlives the run.
   A background job the shell `wait`s on and reaps by trap is not this, and
   removing one can break signal handling.
-- A host directory mount beyond the read-only Hive
-  configuration for the contributor container.
+- A host directory mount beyond the read-only Hive configuration for the
+  contributor container, or a host Codex config/login mount instead of the
+  one-run staged auth file.
 - A token in output, files, Podman arguments, or any persisted launcher file.
 - Ownership inferred from `pgrep` rather than a label plus a live, same-boot,
   still-naming PID.

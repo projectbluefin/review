@@ -1,7 +1,7 @@
 ---
 name: image-build
-version: "2.17"
-last_updated: 2026-08-11
+version: "2.22"
+last_updated: 2026-08-13
 id: image-build
 one_line_purpose: Derive and pin the review contributor image safely.
 entry_point: docs/skills/image-build.md
@@ -72,14 +72,28 @@ fix.
    source, image labels, and SBOM package records can disagree with the
    filesystem; command execution and file inspection against the pinned digest
    define the base interface.
-3. Add only the contributor delta: Goose, tmux, GitHub CLI, Node with `ws`, the
-   pinned Hive runtime, controlled policy/configuration, and approved agent
-   tools. Do not duplicate a capability already present in the verified base.
+3. Add only the contributor delta: Goose, the pinned official Codex CLI,
+   tmux, GitHub CLI, Node with `ws`, the pinned Hive runtime, controlled
+   policy/configuration, and approved agent tools. Do not duplicate a
+   capability already present in the verified base.
+   Give copied runtime files explicit image modes; never inherit readability
+   from the checkout's umask or filesystem defaults.
+   Create `/home/dev/Downloads` for Textual's built-in SVG screenshot
+   delivery; a runtime home without that standard destination makes the
+   authentic command-palette capture fail.
    Do not turn the image into a general-purpose distribution.
 4. Preserve canonical command semantics. Never shadow `grep`, `find`, `cat`, or
    `ls` — with a modern alternative or with a hand-written one. If a modern
    tool is added, install it under its own native name (e.g. `rg`) beside the
-   canonical command, never as a replacement; none is installed today.
+   canonical command, never as a replacement. `rg` is the only one installed
+   today, from its official architecture-specific release with a pinned
+   checksum. The layer guards itself: it refuses to build if `rg` is already
+   on PATH or in any standard binary directory, and re-proves after
+   installing that `grep`, `find`, `cat` and `ls` still resolve outside
+   `/usr/local/bin`.
+   `just` and mikefarah `yq` v4 come from the base and must not be installed
+   again. Linters are fsdk-containers#89, not a layer here; `fd`, `bat`,
+   `eza`, editors, pagers and compilers stay out.
 5. The rule, without exceptions: **use the tools already in the image; if a
    common tool is missing, add it at the FSDK seam; never hand-roll a
    reimplementation; and never leave a shim standing once the seam fix
@@ -115,7 +129,10 @@ fix.
    `tests/image-audit.sh` checks provenance in the built runtime.
    `tests/find-semantics.sh` is deleted -- the shim it read no longer exists,
    and the build is now the gate.
-6. Pin Node, GitHub CLI, and tmux versions and verify their checksums. For
+6. Pin Node, GitHub CLI, tmux, and Codex CLI versions and verify their
+   checksums. Codex comes only from OpenAI's official architecture-specific
+   Linux release assets, installs as the upstream binary without repacking,
+   and is executable in the final runtime as `codex`. For
    mutable Goose `canary`, CI resolves official `unknown-linux-musl` asset
    digests before each build, passes them as build inputs, and records them in
    image configuration and provenance. The build verifies the selected archive
@@ -124,13 +141,20 @@ fix.
    changing an image. Extract safely; never compile, strip, repack, or fork
    Goose; preserve glibc loader links for dynamic Node and GitHub CLI. Lock
    `ws` in root `package-lock.json` with `npm ci --omit=dev --ignore-scripts`;
-   keep fixed Node/gh/tmux/ws ahead of mutable Goose. Unpack with the base's
+   keep fixed Node/gh/tmux/Codex/ws ahead of mutable Goose. Unpack with the base's
    own GNU tar, never a hand-rolled extractor — `tar -xO ... --occurrence=1`
    for a single binary, `--strip-components=1` for Node's versioned tree — and
-   keep each `sha256sum -c -` ahead of its extraction. A missing member then
+   keep each `sha256sum -c -` ahead of the archive's first read. A missing
+   member then
    fails the build with `Not found in archive` rather than writing an empty
    binary. The `tar -I 'python3 -m gzip'` filter supplies the one codec the
-   base lacks; see fsdk-containers#87, which deletes it. Remove only Node
+   base lacks; see fsdk-containers#87, which deletes it. Do not combine that
+   filter with `--occurrence=1` on an archive whose wanted member is followed
+   by others: tar stops reading as soon as it has the member, and the Python
+   codec dies on the resulting `BrokenPipeError` where the gzip binary would
+   have exited quietly, so the build fails with `tar: Child returned status 1`.
+   Decompress whole first (`python3 -m gzip -d < x.tar.gz > x.tar`), then
+   select the member from the plain tar. Remove only Node
    headers and verified-unused npm cache; retain `node`, `npm`, and
    `corepack`.
 7. Place controlled Goose configuration under `/opt/bluefin/goose` as the
@@ -147,7 +171,9 @@ fix.
 9. Keep credentials, workspaces, and host configuration out of image layers.
    Supply the GitHub token used for canary provenance verification as the
    required `github_token` build secret; it is available only to that `RUN`
-   step and must not be an argument or environment layer.
+   step and must not be an argument or environment layer. Codex subscription
+   OAuth is likewise runtime-only: the image carries the CLI and an empty
+   `/home/dev/.codex`, never an auth cache or provider configuration.
 10. Treat the image as a task runtime, not a general validation distribution.
    At startup, probe the baseline validation commands (`bats`, `shellcheck`,
    `hadolint`, `systemd-analyze`, `pre-commit`, `just`, `podman`, and
@@ -170,18 +196,18 @@ fix.
     a QEMU substitute (native arm64 runtime measurement is #77). `--report
     FILE` writes the Markdown report to a file; reports are generated output
     and stay out of git (`image-audit-report.md` is ignored).
-    Publishing requires BuildKit `provenance: mode=max` and `sbom: true`, a
-    GitHub artifact attestation for the pushed digest, and post-publish
-    verification of both platforms, OCI labels/annotations, both BuildKit
-    attestations, and the GitHub attestation. Never call QEMU runtime proof
-    native.
-    The publish workflow's `arm64-runtime` job runs on GitHub's
-    `ubuntu-24.04-arm` runner, proves the host, Docker engine, and container
-    architecture, builds an immutable arm64 smoke image from the shared Goose
-    identities, and runs the base and derived audit modes. Its generated report
-    in the GitHub Actions step summary is the native acceptance artifact.
-    The `publish` job needs that native job before it can move `:stable`; the
-    existing amd64 smoke and validation remain separate evidence.
+    Publishing requires a signed SLSA provenance bundle and a signed SPDX SBOM
+    attached to the published index digest, a GitHub artifact attestation for
+    that digest, and post-publish verification of both platforms, OCI
+    labels/annotations, both signed bundles, and the GitHub attestation. Never
+    call QEMU runtime proof native.
+    The publish workflow builds each architecture on a runner of that
+    architecture — `ubuntu-24.04` and `ubuntu-24.04-arm` — with podman, proving
+    the host, podman engine, and container architecture in each job before it
+    pushes and audits its own image. Those generated reports in the GitHub
+    Actions step summary are the acceptance artifact. The `publish` job
+    assembles an OCI index from the two native digests with buildah and cannot
+    move `:stable` without both.
 12. Measure compressed manifest, unpacked filesystem, layer/directory deltas,
     cold/warm builds, and native amd64/arm64 runtime behavior before and after
     each composition change. Deleting inherited files in a later layer does not
@@ -282,18 +308,24 @@ Do not use this runbook to change Hive assignment, checkout, or contributor prot
 `tests/image-audit.sh` keeps two rules apart that are easy to conflate. A
 **package manager** (`apt`, `dnf`, `apk`) is forbidden in both images always:
 content comes from BST elements, so a self-mutating runtime is a defect.
-**Anything review installs itself** (`node`, `npm`, `gh`, `tmux`, `goose`) is
-forbidden in the base only, because a second copy means two versions and no
-way to know which an agent ran.
+**Anything review installs itself** (`node`, `npm`, `gh`, `tmux`, `codex`,
+`goose`) is forbidden in the base only, because a second copy means two
+versions and no way to know which an agent ran.
 
-**Ordinary userland is forbidden nowhere.** `find`, `cmp`, `diff`, `rg`, `fd`,
-`yq` and ShellCheck belong in the base when a contributor needs them; their
-absence is what made live agents fail with `command not found`. Add them at
+**Ordinary userland is forbidden nowhere unless review installs it.** `find`,
+`cmp`, `diff`, `fd`, `yq` and ShellCheck belong in the base when a
+contributor needs them; their absence is what made live agents fail with
+`command not found`. Add them at
 the BST seam, never here, and file the ones that are missing rather than
-describing them. For `find`, `cmp` and `diff` the audit checks provenance
-rather than presence: Hive's relay calls `find` and `cmp` directly, the base
-carries real GNU implementations, and the audit fails if any of the three
-resolves under `/usr/local/bin` — the shape a reintroduced shim would take.
+describing them. For `find`, `cmp`, `diff`, `grep`, `cat` and `ls` the audit
+checks provenance as well as presence: Hive's relay calls `find` and `cmp`
+directly, the base carries real GNU implementations, and the audit fails if
+any of those six resolves under `/usr/local/bin` — the shape a
+reintroduced shim would take.
+
+`rg` is the one exempt from that check, because review installs it there
+(#75). It is forbidden in the base and required in the derived image, so if
+the base ever ships it the audit fails and review's layer is deleted.
 
 ## Red Flags
 
@@ -319,12 +351,62 @@ resolves under `/usr/local/bin` — the shape a reintroduced shim would take.
   claim costs the same as a missing tool and is invisible in a passing test.
 - A base gap described in a document instead of filed as an issue, or any
   section that exists to explain a known-broken thing.
+- An anti-duplication guard that probes only one of PATH or a fixed directory
+  list. Each misses what the other catches: `ENV PATH=/opt/node/bin:${PATH}`
+  puts a directory ahead of `/usr/local/bin` that no standard-directory walk
+  names, while a copy outside the build user's PATH is still a duplicate the
+  runtime user resolves. Probe both, or the guard passes while two copies ship
+  and nothing records which one an agent ran.
 - A multi-file payload copied one named file at a time, or a build proof that
   only compiles it. Compiling resolves no imports, so `py_compile` on the
   dashboard entry point passed while `review_result.py` was never copied, and
   `just review-queue` died at startup with `ModuleNotFoundError` against the
   published `:stable`. Copy the whole set with a glob and prove each module by
   importing it.
+
+- Reaching for BuildKit, `docker buildx`, `docker/build-push-action`, or QEMU
+  cross-building. The toolchain is podman, buildah and skopeo — the engines
+  that actually run this image — and each architecture is built by a runner of
+  that architecture. Building with an engine no contributor runs hides
+  engine-specific defects: BuildKit gives every parent directory a `COPY
+  --chmod` creates the copied file's mode, so `COPY --chmod=0644
+  image/tui/requirements.lock /opt/bluefin/tui/requirements.lock` created
+  `/opt/bluefin` and `/opt/bluefin/tui` with no execute bit. Root ignored it
+  for the rest of the build and every layer passed; the unprivileged `dev`
+  user could not traverse into `/opt/bluefin/goose`, and Goose died at startup
+  with `Failed to read config file: Permission denied`. Podman creates those
+  parents `0755`, so no contributor could reproduce the published image's
+  defect locally. The mode is now asserted in a layer of its own (`find
+  /opt/bluefin \( -type d ! -perm -o=rx \) ...`), never by a string match on
+  the Containerfile.
+
+- Assuming a GitHub runner's tool versions. `ubuntu-24.04` and
+  `ubuntu-24.04-arm` ship podman 4.9.3 and buildah 1.33.7, which predate both
+  `--secret id=NAME,env=VAR` and `buildah manifest annotate --index`. The
+  publish path therefore passes the token as a `0600` file
+  (`--secret id=github_token,src=FILE`) and assembles the index in a
+  digest-pinned `quay.io/buildah/stable` container, unprivileged, moving
+  descriptors rather than layers. Every job prints `podman --version`,
+  `buildah --version` and `skopeo --version` so a mutated runner image fails
+  with the tool's own name in the log rather than inside the step that needed
+  it.
+- Relying on credential lookup order. podman falls back to
+  `$HOME/.docker/config.json` when no containers auth file exists, but
+  `actions/attest` reads *only* that path — so writing podman's own default
+  left both build jobs green through push and scan, then failing on
+  `Error: No credentials found for registry ghcr.io`. Write both files and
+  name the file at every use (`--authfile`), rather than depending on which
+  one a given tool searches first. `actions/attest` also needs
+  `artifact-metadata: write`, or every attestation step warns and its storage
+  record is dropped.
+- Attaching one SBOM to a multi-architecture index. An SBOM describes one root
+  filesystem, and syft scanning an index reports whichever platform it
+  resolved. Generate the SBOM in the job that built that architecture and
+  attest it against that platform's digest; the index carries provenance.
+- Assembling an index without checking the digests differ. buildah keys index
+  entries by digest, so two identical digests collapse into a single entry and
+  `--arch` silently relabels it: the result claims one platform while looking
+  like a normal push. The publish job refuses equal digests instead.
 
 ## Verification
 
@@ -335,9 +417,19 @@ bash tests/generate-skills.sh
 bash tests/image-audit.sh --verify-base-evidence
 grep -Fq "$(sed -n 's/^hive_commit := "\(.*\)"$/\1/p' justfile)" README.md
 ref="ghcr.io/projectbluefin/review:sha-$(git rev-parse HEAD)"
+# `canary` is mutable, so the Containerfile's Goose checksum defaults go stale
+# and a local build fails at `sha256sum -c -` even though nothing is wrong.
+# CI resolves these per build; resolve them the same way by hand.
+goose_sha() {
+  curl -fsSL "https://github.com/aaif-goose/goose/releases/download/canary/goose-$1-unknown-linux-musl.tar.gz" |
+    sha256sum | cut -d' ' -f1
+}
 GH_TOKEN="$(gh auth token)" podman build \
+  --format oci \
   --secret id=github_token,env=GH_TOKEN \
   --build-arg GOOSE_REFRESH="$(date +%s)" \
+  --build-arg GOOSE_X86_64_SHA256="$(goose_sha x86_64)" \
+  --build-arg GOOSE_AARCH64_SHA256="$(goose_sha aarch64)" \
   -f image/Containerfile -t "$ref" .
 bash tests/image-audit.sh --derived "$ref"
 # Optional: keep the Markdown report (generated output, git-ignored).
@@ -351,5 +443,7 @@ time against the real base and the build fails if either regresses.
 ## Sources
 - Hive `v2`: `bin/contributor-agent.sh`, `bin/contributor-relay.sh`,
   `config/backends.conf`; Goose `canary` assets; Context7 `/npm/cli`,
-  `/websites/podman_io_en`, `/websites/cli_github_manual`,
-  `/websites/github_en_actions`, `/docker/docs`, `/docker/build-push-action`.
+  `/websites/podman_io_en` (`--secret` forms, authfile lookup order),
+  `/podman-container-tools/buildah` (`manifest annotate --index`),
+  `/podman-container-tools/skopeo`, `/websites/cli_github_manual`,
+  `/websites/github_en_actions`.

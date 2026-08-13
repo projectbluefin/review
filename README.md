@@ -5,7 +5,8 @@ enslaving the oppressors since 2026
 
 ![img](https://github.com/user-attachments/assets/6b8425b8-dedf-4dc9-aa54-60fa9e6cfd91)
 
-`review` comes with goose prebundled and will passthrough client creds. PRs accepted for other clients, the design supports doing local side containers - but we don't want to ship a huge container either.
+`review` comes with Goose and the official Codex CLI prebundled and passes
+through only the credential each selected client needs.
 
 **These are NOT anonymous "donations"** - it's tied to the person's github account, reputation in the queue is based on your real life reputation in the project. The cream will rise to the top.
 
@@ -48,7 +49,8 @@ silently create a second workflow, authority path, or task queue.
    feedback. `REVIEW_DETACH=1` runs it detached, with `just review-stop` as
    its lifecycle verb.
 2. **Interactive maintainer dashboard** (`review-queue`): the review surface.
-   Goose reviews a pull request in place and streams its verdict, alongside
+   Goose or an explicitly selected Codex harness reviews a pull request in
+   place and streams its verdict, alongside
    high-velocity triage with batching, agent-assisted
    documentation updates (#134), and Ghost Cluster build dispatch (#133).
 
@@ -130,12 +132,18 @@ an operations task outside this repository automation.
 - `gh auth login --web --hostname github.com --scopes repo,read:org` is a hard
   prerequisite for every recipe.
 - `podman`.
-- Goose configured for GitHub Copilot, or `GITHUB_COPILOT_TOKEN`.
+- Goose configured for GitHub Copilot, or `GITHUB_COPILOT_TOKEN`, for
+  contributor work and Goose reviews.
+- `codex login` with file credential storage completed on the host for Codex
+  subscription reviews. The image already contains the pinned official CLI;
+  explicitly selected Codex reviews do not require host Goose or Copilot.
 - For contributor Git operations, a separate GitHub token via
   `REVIEW_GH_TOKEN`.
 
-Goose is the only agent backend and GitHub Copilot is the only supported
-provider. `GOOSE_PROVIDER` may be unset or `github_copilot`; `GOOSE_MODEL`
+Goose is the default Hive contributor backend and GitHub Copilot is its only
+supported provider. Maintainer-side `review-queue` may explicitly preselect
+Codex with `BLUEFIN_REVIEW_BACKEND=codex`; that choice never changes Hive's
+backend. `GOOSE_PROVIDER` may be unset or `github_copilot`; `GOOSE_MODEL`
 optionally overrides the `gpt-5.6-luna` default, and
 `GOOSE_THINKING_EFFORT` optionally overrides the default `max` reasoning
 effort. A `gh auth
@@ -207,15 +215,22 @@ changes your view; Hive still owns task and output handling.
 ### Reviewing the queue
 
 `just review-queue` runs the dashboard in the contributor container — no Hive
-registration. It needs only a GitHub token (the dashboard reads live
-pull-request state) and, for `r`, the same Copilot credential the other launch
-paths pass through. Arguments pass straight through to the dashboard:
+registration. It needs a GitHub token because the dashboard reads live
+pull-request state. Goose reviews use the Copilot credential; Codex reviews
+use the host's official subscription login through one private staged
+`auth.json` copy. The host file and Codex configuration directory are never
+mounted, and the staged copy is removed when the foreground run exits. Codex
+reviews run code-mode-only through the bundled official code-mode host and
+fail closed instead of falling back to direct shell tools; the review
+container is the command-execution isolation boundary.
+Arguments pass straight through to the dashboard:
 
 ```bash
 just review-queue                      # the whole queue, merge-ready first
 just review-queue kimi high            # pick the model profile and effort
 just review-queue --repo bluefin       # one repository
 just review-queue --action review      # one recommended action
+BLUEFIN_REVIEW_BACKEND=codex just review-queue luna low --repo projectbluefin/review
 ```
 
 The default is the **whole** queue. It used to default to the `review` action
@@ -592,6 +607,8 @@ All configuration is read at launch.
 | `REVIEW_HIVE_COMMIT` | Full Hive commit used for contributor setup. |
 | `REVIEW_CONTAINER_NAME` | Contributor container name; defaults to `review-container`. Give a second concurrent instance its own name. |
 | `REVIEW_GH_TOKEN` | Optional GitHub token override for container-only mode. |
+| `BLUEFIN_REVIEW_BACKEND` | Optional `review-queue` preselection: `goose` or `codex`; unset preserves the current default. Never affects `review-container`. |
+| `CODEX_HOME` | Optional host Codex state root used only to locate `auth.json`; no configuration directory is mounted. |
 | `BLUEFIN_REVIEW_QUEUE_URL` | Queue snapshot the dashboard reads; defaults to the published `queue.json`. |
 | `BLUEFIN_REVIEW_CONTEXT_SKILLS` | Skill ids named as review context; defaults to `pr-review queue-feed hive-review human-gates`. |
 | `BLUEFIN_REVIEW_SKILLS_ROOT` | Projected org skills root; defaults to `~/.agents/skills`. |
@@ -629,7 +646,8 @@ Use an immutable `sha-<commit>` tag or digest with
 
 The image derives from the digest-pinned Project Bluefin FSDK lab runner and
 layers the pinned Hive runtime at `a66927df7b5dff14423cdd2a31826b79a2c1ddc9`,
-the current Goose canary snapshot, GitHub CLI, tmux, uv with the Textual
+the current Goose canary snapshot, the pinned official Codex CLI, GitHub CLI,
+tmux, uv with the Textual
 dashboard runtime, hooks, generated
 organization skills, and the pinned `projectbluefin/lab` skills (projected as
 `lab-<id>` so the Ghost Cluster operating knowledge rides along). Goose
@@ -662,18 +680,21 @@ silently changing an image. Use an immutable contributor image digest or
 Every published contributor digest carries review-specific OCI title,
 description, project URL/source, revision, version, creation time, license,
 and exact FSDK base name/digest metadata in both platform labels and manifest
-annotations. Publishing produces maximal BuildKit provenance and an SBOM, then
-adds a GitHub artifact attestation for that exact digest. CI verifies the FSDK
-input's GitHub attestation and its linux/amd64+linux/arm64 manifest before a
-build; after publication it verifies both review attestations, labels,
-annotations, subject digest, and exactly those two platforms.
+annotations. Publishing attaches a signed SLSA provenance bundle and a signed
+SPDX SBOM to the published index digest, verifiable with `gh attestation
+verify`. CI verifies the FSDK input's GitHub attestation and its
+linux/amd64+linux/arm64 manifest before a build; after publication it verifies
+both review attestations, labels, annotations, subject digest, and exactly
+those two platforms.
 
-Before `:stable` advances, `publish-compat-image.yml` runs the native
-`arm64-runtime` job on GitHub's `ubuntu-24.04-arm` runner. It proves the host,
-Docker engine, and container architecture, builds an immutable arm64 smoke
-image from the same resolved Goose identities as the final publish, and runs
-the existing base and derived image audits. The generated arm64 audit report in
-the GitHub Actions step summary is the native acceptance artifact; local amd64
+The image is built with podman and buildah, the same engines that run it, and
+each architecture is built by a runner of that architecture: `ubuntu-24.04`
+for amd64 and `ubuntu-24.04-arm` for arm64. Each build job proves its host,
+podman engine, and container architecture, runs the shipped runtime, and audits
+the image it just pushed. The published `:stable` is an OCI index assembled by
+buildah from those two native digests, so no shipped layer is ever produced
+under emulation. The generated per-architecture audit reports in the GitHub
+Actions step summary are the acceptance artifact; local single-architecture
 validation cannot supply that evidence.
 
 The pinned Hive runtime preserves an existing `~/.config/goose/config.yaml`.
@@ -767,16 +788,16 @@ pre-commit run --all-files
 ```
 
 `tests/image-audit.sh` inspects a real image, so it needs a container engine
-and network access. It defaults to `docker`; on a podman host set
-`CONTAINER_ENGINE=podman`. Use `--verify-base-evidence` to check the pinned
+and network access. It uses `podman`; `CONTAINER_ENGINE` names another one.
+Use `--verify-base-evidence` to check the pinned
 FSDK input alone, or `--derived <image>` to audit a build. The report records
 each platform's runtime evidence as native or unavailable — never QEMU —
 and `--report image-audit-report.md` writes it to a git-ignored file. Native
-arm64 acceptance comes from the `arm64-runtime` job in
+per-architecture acceptance comes from the matrix `build` job in
 `.github/workflows/publish-compat-image.yml` and its generated step summary:
 
 ```bash
-CONTAINER_ENGINE=podman bash tests/image-audit.sh \
+bash tests/image-audit.sh \
   --derived "ghcr.io/projectbluefin/review:sha-$(git rev-parse HEAD)"
 ```
 

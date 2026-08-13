@@ -19,20 +19,28 @@ attestation_repository=""
 expected_source=""
 expected_revision=""
 expected_version=""
-engine="${CONTAINER_ENGINE:-docker}"
+engine="${CONTAINER_ENGINE:-podman}"
+
+# Predicate URIs written by actions/attest. Provenance is SLSA v1; the SBOM
+# predicate is derived from the SPDX version inside the document, so it moves
+# with the SBOM format rather than with the action.
+slsa_provenance_predicate="https://slsa.dev/provenance/v1"
+spdx_predicate="https://spdx.dev/Document/v2.3"
 
 usage() {
   cat <<'EOF'
 Usage: tests/image-audit.sh --derived IMAGE [options]
 
 Audit the digest-pinned FSDK base and an already-built or published review
-image. IMAGE may be a local Docker tag or an immutable registry reference.
+image. IMAGE may be a local image tag or an immutable registry reference.
+The engine is podman unless CONTAINER_ENGINE names another one.
 
 Options:
   --base IMAGE             Override the FSDK base parsed from image/Containerfile.
   --derived IMAGE          Built review image to inspect (required).
   --require-oci            Require source, revision, and version OCI labels.
-  --require-attestations   Require SPDX SBOM and SLSA provenance attestations.
+  --require-attestations   Require registry-attached SPDX SBOM and SLSA
+                           provenance bundles, verified by signature.
   --require-github-attestation
                            Verify GitHub artifact provenance for the digest.
   --attestation-repository OWNER/REPO
@@ -123,12 +131,16 @@ if "$require_github_attestation" && [[ -z "$attestation_repository" ]]; then
   echo "--require-github-attestation needs --attestation-repository" >&2
   exit 2
 fi
+if "$require_attestations" && [[ -z "$attestation_repository" ]]; then
+  echo "--require-attestations needs --attestation-repository" >&2
+  exit 2
+fi
 
 audit_commands=(jq skopeo)
 if ! "$verify_base_evidence"; then
   audit_commands=("$engine" "${audit_commands[@]}")
 fi
-if "$verify_base_evidence" || "$require_github_attestation"; then
+if "$verify_base_evidence" || "$require_github_attestation" || "$require_attestations"; then
   audit_commands+=(gh)
 fi
 for command in "${audit_commands[@]}"; do
@@ -205,8 +217,8 @@ engine_arch() {
   esac
 }
 
-# Docker accepts a trackable tag plus an immutable digest. Skopeo requires the
-# equivalent digest-only form, so retain the tag for Docker pulls and remove it
+# Podman accepts a trackable tag plus an immutable digest. Skopeo requires the
+# equivalent digest-only form, so retain the tag for engine pulls and remove it
 # only at the registry-inspection boundary.
 registry_repository() {
   local image="${1%%@*}" leaf
@@ -342,27 +354,51 @@ if "$require_attestations"; then
       exit 1
     }
   require_exact_linux_platforms "$derived_raw" "published review manifest list"
-  attestation_digests="$(
+
+  # The SBOM and the provenance are signed Sigstore bundles attached through
+  # the referrers API, not manifests the builder wrote into its own output.
+  # Verifying signatures is the point: a builder cannot vouch for itself.
+  verify_predicate() {
+    local reference="$1" predicate="$2"
+    gh attestation verify "oci://${reference}" \
+      --repo "$attestation_repository" \
+      --bundle-from-oci \
+      --predicate-type "$predicate" >/dev/null 2>&1
+  }
+
+  if verify_predicate "$(registry_reference "$derived_image")" "$slsa_provenance_predicate"; then
+    append ""
+    append "- Index attestation: verified \`${slsa_provenance_predicate}\` for the published index."
+  else
+    error "published index is missing a verifiable SLSA provenance attestation"
+  fi
+
+  # An SBOM describes one root filesystem, so each platform carries its own,
+  # produced by the job that built that platform. An index-wide SBOM would be
+  # one architecture's inventory presented as both.
+  while IFS=$'\t' read -r platform digest; do
+    [[ -n "$platform" ]] || continue
+    platform_verified=true
+    verify_predicate "${derived_repository}@${digest}" "$spdx_predicate" || {
+      error "published linux/${platform} image is missing a verifiable SPDX SBOM attestation"
+      platform_verified=false
+    }
+    verify_predicate "${derived_repository}@${digest}" "$slsa_provenance_predicate" || {
+      error "published linux/${platform} image is missing a verifiable SLSA provenance attestation"
+      platform_verified=false
+    }
+    if "$platform_verified"; then
+      append "- linux/${platform} attestations: verified SPDX SBOM and SLSA provenance."
+    else
+      append "- linux/${platform} attestations: **missing or unverifiable**."
+    fi
+  done < <(
     jq -r '
       .manifests[]? |
-      select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") |
-      .digest
+      select(.platform.os == "linux") |
+      [.platform.architecture, .digest] | @tsv
     ' <<<"$derived_raw"
-  )"
-  [[ -n "$attestation_digests" ]] ||
-    error "published derived image has no OCI attestation manifests"
-  attestation_predicates=""
-  while IFS= read -r digest; do
-    [[ -n "$digest" ]] || continue
-    attestation_predicates+="$(
-      skopeo inspect --raw "docker://${derived_repository}@${digest}" |
-        jq -r '.layers[]?.annotations["in-toto.io/predicate-type"] // empty'
-    )"$'\n'
-  done <<<"$attestation_digests"
-  grep -qi 'spdx' <<<"$attestation_predicates" ||
-    error "published derived image is missing an SPDX SBOM attestation"
-  grep -qi 'slsa.*provenance' <<<"$attestation_predicates" ||
-    error "published derived image is missing a SLSA provenance attestation"
+  )
 fi
 
 if "$require_github_attestation"; then
@@ -567,22 +603,34 @@ base_required="bash cat chmod cp curl git grep jq ls mkdir mv python3 rm sed sh 
 # a second copy there means two versions of the same tool and no way to tell
 # which one an agent ran.
 #
-# Ordinary userland -- find, cmp, diff, and utilities such as rg, fd, yq and
+# Ordinary userland -- find, cmp, diff, and utilities such as fd, yq and
 # ShellCheck -- is deliberately absent from both lists. Contributor agents
 # need it, and its absence is what made them fail with 'command not found'.
 # For 'find' and 'cmp' the real invariant is not absence but provenance:
 # Hive's relay calls both directly, the base carries real GNU implementations,
 # and review must not shadow them. That is asserted directly below rather than
 # approximated by forbidding the base copy.
+#
+# rg sits with the review-owned tools instead, because review installs it
+# (#75). The day the base ships rg, this audit fails, and the answer is to
+# delete review's layer rather than run two copies.
 package_managers="apt dnf apk"
-review_owned="node npm gh tmux goose"
+review_owned="node npm gh tmux codex codex-code-mode-host goose rg"
 base_forbidden="${review_owned} ${package_managers}"
-derived_required="bash node npm corepack gh tmux goose find cmp diff infocmp"
+derived_required="bash node npm corepack gh tmux codex codex-code-mode-host goose rg find cmp diff grep cat ls infocmp"
 derived_forbidden="$package_managers"
 # Base commands Hive's relay calls directly and review must never shim over.
 # image/Containerfile proves their semantics at build time against the real
-# base; this checks the finished runtime still resolves them from it.
-derived_unshadowed="find cmp diff"
+# base; this checks the finished runtime still resolves them from it. grep,
+# cat and ls are here because of rg: a search tool in /usr/local/bin is
+# exactly the shape that let the old find/cmp shims shadow the base's GNU
+# copies. rg itself must never join this list -- /usr/local/bin is where it
+# legitimately lives.
+#
+# Every name here must also appear in derived_required: runtime_inventory
+# only emits a `path:` line for a required command, and a name without one
+# reports as missing from the runtime rather than as unshadowed.
+derived_unshadowed="find cmp diff grep cat ls"
 
 append ""
 append "#### Native runtime audit"
@@ -649,6 +697,10 @@ NODE
       error "derived runtime cannot establish a local ws connection"
     "$engine" run --rm --entrypoint /usr/local/bin/goose "$image" run --help >/dev/null ||
       error "derived runtime cannot execute goose run --help"
+    "$engine" run --rm --entrypoint /usr/local/bin/codex "$image" --version >/dev/null ||
+      error "derived runtime cannot execute codex --version"
+    "$engine" run --rm --entrypoint /usr/local/bin/codex-code-mode-host "$image" --help >/dev/null ||
+      error "derived runtime cannot execute codex-code-mode-host --help"
     grep -q '^identity:1000:dev$' <<<"$inventory" ||
       error "derived runtime must execute as uid 1000 (dev)"
   fi

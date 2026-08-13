@@ -19,6 +19,11 @@ ARG HIVE_COMMIT=a66927df7b5dff14423cdd2a31826b79a2c1ddc9
 ARG NODE_VERSION=24.18.1
 ARG GH_VERSION=2.97.0
 ARG TMUX_VERSION=3.7b
+ARG CODEX_VERSION=0.147.0
+ARG CODEX_X86_64_SHA256=0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36
+ARG CODEX_AARCH64_SHA256=eb677c80f666b1ab8b4b1d083b66e8d614b1281d960bb6f9fd8ca98f58b38b90
+ARG CODEX_CODE_MODE_HOST_X86_64_SHA256=0146adfaac8363ec9fcdb5895f7624db5b2e8617a283887938b7fb97a1dd4356
+ARG CODEX_CODE_MODE_HOST_AARCH64_SHA256=dfd4ff98ea4db30ed078af9c31b6f86e3da4836d0573aa87e225e5a5b54d3c7c
 ARG GOOSE_CHANNEL=canary
 ARG PI_VERSION=0.73.1
 ARG PI_SHA512=817421dd26999964df54c738028e7e2c66d578abf3c8eeeda25a24d272ec660abd9c68d9c7f10453734cf02faa52707836fb36aecc06e6a39580bcd092ad1f1d
@@ -31,6 +36,9 @@ ARG UV_VERSION=0.12.3
 ARG UV_X86_64_SHA256=0643b9fb8c9fb27458e709ce6ff939695013c41975ff7b02d3f3b138d8d4bdb3
 ARG UV_AARCH64_SHA256=fa513fca1eb2913334c944fe9adbdd410274a1cbe8dd05d03699a9eb85311d4e
 ARG TEXTUAL_VERSION=8.2.8
+ARG RIPGREP_VERSION=15.2.0
+ARG RIPGREP_X86_64_SHA256=33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c
+ARG RIPGREP_AARCH64_SHA256=800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915
 ARG SKILLS_COMMIT=b6f5c370cca19398fbbbe43a0182dca6783a80cb
 
 FROM ${FSDK_RUNNER_IMAGE}
@@ -40,6 +48,11 @@ USER root
 ARG NODE_VERSION
 ARG GH_VERSION
 ARG TMUX_VERSION
+ARG CODEX_VERSION
+ARG CODEX_X86_64_SHA256
+ARG CODEX_AARCH64_SHA256
+ARG CODEX_CODE_MODE_HOST_X86_64_SHA256
+ARG CODEX_CODE_MODE_HOST_AARCH64_SHA256
 
 ENV PATH=/opt/node/bin:${PATH}
 ENV NODE_PATH=/opt/hive/node_modules
@@ -72,6 +85,9 @@ RUN set -eu; \
         gh_sha='a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112'; \
         tmux_arch=x86_64; \
         tmux_sha='f85e6c1c412750a774eb3f370f33bad05fc726fb8b6a0b174ad6f0b6d954df58'; \
+        codex_arch=x86_64; \
+        codex_sha="${CODEX_X86_64_SHA256}"; \
+        codex_code_mode_host_sha="${CODEX_CODE_MODE_HOST_X86_64_SHA256}"; \
         loader_dir=/lib64; \
         loader_target=/usr/lib64/ld-linux-x86-64.so.2; \
         loader_name=ld-linux-x86-64.so.2 ;; \
@@ -82,6 +98,9 @@ RUN set -eu; \
         gh_sha='73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5'; \
         tmux_arch=arm64; \
         tmux_sha='b2955782695283fbc3682a2f77d65616f53b986ee3cf3d80618d3b1cb95b91a6'; \
+        codex_arch=aarch64; \
+        codex_sha="${CODEX_AARCH64_SHA256}"; \
+        codex_code_mode_host_sha="${CODEX_CODE_MODE_HOST_AARCH64_SHA256}"; \
         loader_dir=/lib; \
         loader_target=/usr/lib/ld-linux-aarch64.so.1; \
         loader_name=ld-linux-aarch64.so.1 ;; \
@@ -111,6 +130,20 @@ RUN set -eu; \
     printf '%s  %s\n' "$tmux_sha" "$workdir/tmux.tar.gz" | sha256sum -c -; \
     tar -I 'python3 -m gzip' -xOf "$workdir/tmux.tar.gz" --occurrence=1 tmux > /usr/local/bin/tmux; \
     chmod 0755 /usr/local/bin/tmux; \
+    curl --fail --location --show-error --silent \
+      "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${codex_arch}-unknown-linux-musl.tar.gz" \
+      -o "$workdir/codex.tar.gz"; \
+    printf '%s  %s\n' "$codex_sha" "$workdir/codex.tar.gz" | sha256sum -c -; \
+    tar -I 'python3 -m gzip' -xOf "$workdir/codex.tar.gz" --occurrence=1 \
+      "codex-${codex_arch}-unknown-linux-musl" > /usr/local/bin/codex; \
+    chmod 0755 /usr/local/bin/codex; \
+    curl --fail --location --show-error --silent \
+      "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-code-mode-host-${codex_arch}-unknown-linux-musl.tar.gz" \
+      -o "$workdir/codex-code-mode-host.tar.gz"; \
+    printf '%s  %s\n' "$codex_code_mode_host_sha" "$workdir/codex-code-mode-host.tar.gz" | sha256sum -c -; \
+    tar -I 'python3 -m gzip' -xOf "$workdir/codex-code-mode-host.tar.gz" --occurrence=1 \
+      "codex-code-mode-host-${codex_arch}-unknown-linux-musl" > /usr/local/bin/codex-code-mode-host; \
+    chmod 0755 /usr/local/bin/codex-code-mode-host; \
     npm --prefix /opt/hive ci --omit=dev --ignore-scripts; \
     npm_cache="$(npm config get cache)"; \
     npm cache clean --force; \
@@ -125,7 +158,70 @@ RUN set -eu; \
     npm --version; \
     corepack --version; \
     gh --version; \
-    tmux -V
+    tmux -V; \
+    codex --version; \
+    codex-code-mode-host --help >/dev/null
+
+# The agent tooling delta approved by #75: `rg`, under its own native name.
+# ShellCheck and the other linters stay out; they are fsdk-containers#89.
+#
+# `just` and mikefarah `yq` v4 are absent from this layer because the base
+# ships both, and a second copy here would precede the base's on PATH.
+# Unpacked: 5.4 MB on amd64, 4.5 MB on arm64.
+ARG RIPGREP_VERSION
+ARG RIPGREP_X86_64_SHA256
+ARG RIPGREP_AARCH64_SHA256
+RUN set -eu; \
+    # The anti-duplication contract: if the base ever ships rg, delete this
+    # layer rather than shadow it. Probe PATH *and* a fixed directory list.
+    # Neither alone is enough: PATH here is root's build PATH, which misses a
+    # copy the runtime user would still see, while the directory list misses
+    # PATH entries outside it -- /opt/node/bin above is prepended to PATH, so
+    # an rg there would beat /usr/local/bin/rg at runtime.
+    if command -v rg >/dev/null 2>&1; then \
+      echo "rg is already provided at $(command -v rg); delete this layer instead of shadowing it" >&2; \
+      exit 1; \
+    fi; \
+    for dir in /usr/bin /usr/sbin /bin /sbin /usr/local/bin /usr/local/sbin; do \
+      if [ -e "$dir/rg" ]; then \
+        echo "rg is already provided by the base at $dir/rg; delete this layer instead of shadowing it" >&2; \
+        exit 1; \
+      fi; \
+    done; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64) \
+        rg_arch=x86_64-unknown-linux-musl; \
+        rg_sha="${RIPGREP_X86_64_SHA256}" ;; \
+      aarch64|arm64) \
+        rg_arch=aarch64-unknown-linux-musl; \
+        rg_sha="${RIPGREP_AARCH64_SHA256}" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    workdir="$(mktemp -d)"; \
+    trap 'rm -rf "$workdir"' EXIT; \
+    curl --fail --location --show-error --silent \
+      "https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/ripgrep-${RIPGREP_VERSION}-${rg_arch}.tar.gz" \
+      -o "$workdir/ripgrep.tar.gz"; \
+    printf '%s  %s\n' "$rg_sha" "$workdir/ripgrep.tar.gz" | sha256sum -c -; \
+    # Decompress whole, then select the member. Piping the codec into tar
+    # deadlocks here: `--occurrence=1` stops reading once it has `rg`, and the
+    # `python3 -m gzip` filter dies on the resulting SIGPIPE rather than
+    # exiting quietly the way the gzip binary would. The checksum is verified
+    # above, before either read of the archive.
+    python3 -m gzip -d < "$workdir/ripgrep.tar.gz" > "$workdir/ripgrep.tar"; \
+    tar -xOf "$workdir/ripgrep.tar" --wildcards --occurrence=1 '*/rg' > /usr/local/bin/rg; \
+    chmod 0755 /usr/local/bin/rg; \
+    rg --version; \
+    # Standard command semantics stay the base's. Nothing in this layer may
+    # resolve grep, find, cat, or ls out of /usr/local/bin.
+    for canonical in grep find cat ls; do \
+      case "$(command -v "$canonical")" in \
+        /usr/local/bin/*) echo "$canonical is shadowed from /usr/local/bin" >&2; exit 1 ;; \
+      esac; \
+    done; \
+    printf 'x\ny\n' > "$workdir/probe.txt"; \
+    test "$(rg --count-matches y "$workdir/probe.txt")" = 1
 
 # The maintainer TUI runtime: uv (pinned, checksum-verified) creates a
 # self-contained virtual environment on the base's own CPython and installs
@@ -136,13 +232,24 @@ ARG UV_VERSION
 ARG UV_X86_64_SHA256
 ARG UV_AARCH64_SHA256
 ARG TEXTUAL_VERSION
-COPY image/tui/requirements.lock /opt/bluefin/tui/requirements.lock
+COPY --chmod=0644 image/tui/requirements.lock /opt/bluefin/tui/requirements.lock
 # Every module, not just the entrypoint: the dashboard imports its siblings
 # (review_result, and theirs in turn) by bare name off sys.path[0]. A glob so
 # a new module ships the moment it exists, rather than the next time someone
 # remembers to extend this line.
-COPY image/tui/*.py /opt/bluefin/tui/
+COPY --chmod=0644 image/tui/*.py /opt/bluefin/tui/
+COPY --chmod=0644 image/harness/*.py /opt/bluefin/harness/
 RUN set -eu; \
+    # The mode a builder gives a parent directory it creates for a COPY
+    # --chmod is not the same everywhere: buildah uses 0755, BuildKit copies
+    # the file's mode, so the 0644 copies above once produced /opt/bluefin
+    # and /opt/bluefin/tui with no execute bit. Root ignored it for the rest
+    # of the build, the unprivileged 'dev' user could not traverse into any
+    # image-owned tree underneath, and Goose died reading its GOOSE_PATH_ROOT
+    # config. State the mode rather than inherit one; the layer near the end
+    # of this file asserts the whole tree.
+    chmod 0755 /opt/bluefin /opt/bluefin/tui /opt/bluefin/harness; \
+    chmod 0644 /opt/bluefin/harness/*.py; \
     arch="$(uname -m)"; \
     case "$arch" in \
       x86_64) uv_arch=x86_64-unknown-linux-musl; uv_sha="${UV_X86_64_SHA256}" ;; \
@@ -259,7 +366,7 @@ RUN set -eu; \
 RUN set -eu; \
     grep -q '^dev:' /etc/group || echo 'dev:x:1000:' >> /etc/group; \
     grep -q '^dev:' /etc/passwd || echo 'dev:x:1000:1000:Developer:/home/dev:/usr/bin/bash' >> /etc/passwd; \
-    mkdir -p /run/hive-metrics /home/dev/.config/goose /home/dev/.config/gh /home/dev/.agents; \
+    mkdir -p /run/hive-metrics /home/dev/Downloads /home/dev/.config/goose /home/dev/.config/gh /home/dev/.codex /home/dev/.agents; \
     chown -R 1000:1000 /run/hive-metrics /home/dev
 
 # Hive's contributor runtime calls `find` and `cmp` directly: the relay prunes
@@ -339,6 +446,20 @@ RUN chmod 0755 /opt/bluefin/review-scope /opt/bluefin/review-scope/.agents /opt/
 COPY --chmod=0755 image/git-hooks/ /opt/bluefin/git-hooks/
 COPY --chmod=0755 image/hive-entrypoint.d/ /etc/hive/entrypoint.d/
 
+# The image runs as the unprivileged 'dev' user, and every tree under
+# /opt/bluefin is image-owned policy that user must read: the Goose config at
+# GOOSE_PATH_ROOT, the TUI venv, the harness, the review scope, the git hooks.
+# Root ignores a missing execute bit, so a directory a builder created at 0644
+# passes the rest of the build and only fails once a real session tries to
+# traverse it. Assert the whole tree here instead.
+RUN set -eu; \
+    unreadable="$(find /opt/bluefin \( \( -type d ! -perm -o=rx \) -o \( -type f ! -perm -o=r \) \) -print)"; \
+    [ -z "$unreadable" ] || { \
+      echo 'not reachable by the dev user:' >&2; \
+      echo "$unreadable" >&2; \
+      exit 1; \
+    }
+
 # Project the org's skill documents into Goose's native Agent Skills layout.
 #
 # projectbluefin keeps skills as docs/skills/<id>.md plus a generated
@@ -364,7 +485,7 @@ RUN set -eu; \
 # this is a pinned checkout projected into the discovery root — one seam,
 # no second generator. These carry the Ghost Cluster operating knowledge the
 # dashboard's build dispatch (#133) depends on.
-ARG LAB_SKILLS_COMMIT=655e04865c92c9be39ffa2c91ff6dd1b8c6b5d58
+ARG LAB_SKILLS_COMMIT=8bc040ab3a08c1d5b5e8767a3f7cf9d86842d411
 RUN set -eu; \
     workdir="$(mktemp -d)"; \
     trap 'rm -rf "$workdir"' EXIT; \

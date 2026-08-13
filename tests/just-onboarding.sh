@@ -6,8 +6,8 @@
 # never starts a real container, and never
 # depends on what happens to be installed on the developer's machine.
 #
-# The launcher under test is Goose-only: there is no claude/copilot/codex
-# detection and no multi-CLI picker. Assertions here reflect that.
+# Host preflight remains Goose/Pi-specific. Codex discovery runs inside the
+# maintainer image, with only its subscription login cache handed through.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -197,6 +197,17 @@ while (($#)); do
     --volume)
       volume_arg="${2:-}"
       case "$volume_arg" in
+        *:/home/dev/.codex/auth.json:rw,z)
+          codex_auth_source="${volume_arg%:/home/dev/.codex/auth.json:rw,z}"
+          printf 'CODEX_AUTH_MOUNT:%s\n' "$codex_auth_source" >> "${CREDENTIAL_LOG:?}"
+          if [[ "$codex_auth_source" == "${HOME}/.codex/auth.json" ]]; then
+            printf 'CODEX_AUTH_DIRECT:yes\n' >> "${CREDENTIAL_LOG:?}"
+          else
+            printf 'CODEX_AUTH_DIRECT:no\n' >> "${CREDENTIAL_LOG:?}"
+          fi
+          [[ -f "$codex_auth_source" ]] || exit 98
+          printf '{"tokens":{"access_token":"refreshed-test-secret"}}\n' >"$codex_auth_source"
+          ;;
         "${HOME}/.config/hive:/home/dev/.config/hive:"*)
           mounted_hive_dir=true
           ;;
@@ -273,11 +284,14 @@ run_recipe() {
       -u GITHUB_COPILOT_TOKEN -u FAKE_KEYRING_COPILOT_TOKEN \
       -u GH_TOKEN -u GITHUB_TOKEN \
       -u REVIEW_GH_TOKEN -u FAKE_GH_TOKEN -u FAKE_GH_SCOPES \
+      -u CODEX_HOME \
+      -u BLUEFIN_REVIEW_BACKEND \
       -u GOOSE_THINKING_EFFORT -u GOOSE_CONTEXT_LIMIT \
       -u REVIEW_NON_INTERACTIVE -u GOOSE_INSTALLED \
       -u REVIEW_CONTAINER_NAME -u REVIEW_DETACH \
       -u REVIEW_QUEUE_NAME \
       HOME="$home" PATH="$fake_bin:/usr/bin:/bin" TMPDIR="$tmp_root" \
+      XDG_RUNTIME_DIR="$tmp_root" \
       GUM_LOG="$gum_log" RUNNER_LOG="$runner_log" \
       IMAGE_LOG="$image_log" \
       CREDENTIAL_LOG="$credential_log" \
@@ -450,6 +464,12 @@ assert_eq "$(wc -c <"$gum_log")" 0 "the launcher must never prompt for a model"
 assert_file_contains "--env GOOSE_MODEL=gpt-5.6-luna" "$runner_log"
 assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
 
+begin "review-container: maintainer backend choice never changes Hive selection"
+reset_logs
+run_recipe review-container GH_READY=1 BLUEFIN_REVIEW_BACKEND=codex
+assert_file_contains "--env AGENT_BACKEND=goose" "$runner_log"
+assert_file_not_contains "BLUEFIN_REVIEW_BACKEND" "$runner_log"
+
 # ══ 2b. Dashboard: no Hive, GH_TOKEN required, args pass through ═════════
 begin "review-queue: launches the dashboard with no Hive config at all"
 reset_logs
@@ -461,10 +481,60 @@ assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
 assert_file_contains "--name review-queue" "$runner_log"
 assert_file_contains "queue --repo bluefin" "$runner_log"
 assert_file_contains "--env GOOSE_PROVIDER=github_copilot" "$runner_log"
+assert_file_not_contains "BLUEFIN_REVIEW_BACKEND" "$runner_log"
 assert_file_not_contains ".config/hive" "$runner_log"
 assert_file_contains "GH_TOKEN:present" "$credential_log"
 assert_not_contains "contributor.env" "$OUT"
+assert_file_not_contains "/home/dev/.codex/auth.json" "$runner_log"
 assert_contains "starting the maintainer review dashboard (no Hive)" "$OUT"
+
+begin "review-queue: explicit Codex selection reaches the shipped dashboard"
+reset_logs
+mv "$home/.config/goose/config.yaml" "$home/.config/goose/config.yaml.saved"
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  BLUEFIN_REVIEW_BACKEND=codex
+mv "$home/.config/goose/config.yaml.saved" "$home/.config/goose/config.yaml"
+assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
+assert_file_contains "--env BLUEFIN_REVIEW_BACKEND=codex" "$runner_log"
+assert_file_not_contains "GOOSE_PROVIDER" "$runner_log"
+assert_file_not_contains "GITHUB_COPILOT_TOKEN" "$runner_log"
+assert_not_contains "Goose has no usable provider configuration" "$OUT"
+assert_not_contains "Copilot credential" "$OUT"
+
+begin "review-queue: an invalid review backend starts nothing"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  BLUEFIN_REVIEW_BACKEND=not-a-harness
+assert_nonzero_status "$STATUS" "an invalid review backend must not launch"
+assert_contains "unsupported review backend 'not-a-harness'" "$OUT"
+assert_eq "$(wc -c <"$runner_log")" 0 "no container may start for an invalid review backend"
+
+begin "review-queue: stages only an ephemeral Codex subscription login cache"
+reset_logs
+mkdir -p "$home/.codex"
+printf '{"tokens":{"access_token":"codex-test-secret"}}\n' >"$home/.codex/auth.json"
+chmod 0400 "$home/.codex/auth.json"
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  BLUEFIN_REVIEW_BACKEND=codex
+codex_auth_mount="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "$credential_log")"
+assert_contains "${tmp_root}/" "$codex_auth_mount"
+[[ "$codex_auth_mount" != "$home/.codex/auth.json" ]] || fail "host Codex auth must not be mounted directly"
+assert_file_contains "CODEX_AUTH_DIRECT:no" "$credential_log"
+assert_file_not_exists "$codex_auth_mount"
+assert_file_contains "codex-test-secret" "$home/.codex/auth.json"
+assert_file_not_contains "refreshed-test-secret" "$home/.codex/auth.json"
+assert_file_not_contains "--volume ${home}/.codex:/home/dev/.codex" "$runner_log"
+assert_file_not_contains "codex-test-secret" "$runner_log"
+assert_not_contains "codex-test-secret" "$OUT"
+rm -f "$home/.codex/auth.json"
+rmdir "$home/.codex"
+
+begin "review-queue: missing Codex login is explicit and mounts nothing"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  BLUEFIN_REVIEW_BACKEND=codex
+assert_file_not_contains "/home/dev/.codex" "$runner_log"
+assert_contains "Codex subscription login unavailable" "$OUT"
 
 begin "review-queue: no GitHub token is one actionable error"
 reset_logs
@@ -912,7 +982,7 @@ reset_logs
 run_recipe review-doctor GH_READY=1
 assert_contains "Agent backend (Goose)" "$OUT"
 assert_not_contains "claude" "$OUT"
-assert_not_contains "codex" "$OUT"
+assert_not_contains "Agent backend (Codex)" "$OUT"
 
 assert_file_not_contains "run --rm" "$runner_log"
 

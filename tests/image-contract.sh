@@ -113,6 +113,11 @@ require image/Containerfile \
   'ARG GOOSE_CHANNEL=canary' \
   'ARG PI_VERSION=0.73.1' \
   'ARG PI_SHA512=' \
+  'ARG CODEX_VERSION=0.147.0' \
+  'ARG CODEX_X86_64_SHA256=' \
+  'ARG CODEX_AARCH64_SHA256=' \
+  'ARG CODEX_CODE_MODE_HOST_X86_64_SHA256=0146adfaac8363ec9fcdb5895f7624db5b2e8617a283887938b7fb97a1dd4356' \
+  'ARG CODEX_CODE_MODE_HOST_AARCH64_SHA256=dfd4ff98ea4db30ed078af9c31b6f86e3da4836d0573aa87e225e5a5b54d3c7c' \
   'ARG GOOSE_X86_64_SHA256=' \
   'ARG GOOSE_AARCH64_SHA256=' \
   'io.projectbluefin.review.goose.channel="${GOOSE_CHANNEL}"' \
@@ -124,6 +129,10 @@ require image/Containerfile \
   'https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz' \
   'https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${gh_arch}.tar.gz' \
   'https://github.com/tmux/tmux-builds/releases/download/v${TMUX_VERSION}/tmux-${TMUX_VERSION}-linux-${tmux_arch}.tar.gz' \
+  'https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${codex_arch}-unknown-linux-musl.tar.gz' \
+  'https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-code-mode-host-${codex_arch}-unknown-linux-musl.tar.gz' \
+  'codex_code_mode_host_sha="${CODEX_CODE_MODE_HOST_X86_64_SHA256}";' \
+  'codex_code_mode_host_sha="${CODEX_CODE_MODE_HOST_AARCH64_SHA256}";' \
   'https://github.com/aaif-goose/goose/releases/download/${GOOSE_CHANNEL}/goose-${goose_arch}-unknown-linux-musl.tar.gz' \
   'https://registry.npmjs.org/@mariozechner/pi-coding-agent/-/pi-coding-agent-${PI_VERSION}.tgz' \
   'printf '\''%s  %s\n'\'' "$PI_SHA512" "$workdir/pi.tgz" | sha512sum -c -;' \
@@ -134,6 +143,8 @@ require image/Containerfile \
   'GH_TOKEN="$(cat /run/secrets/github_token)"' \
   'gh attestation verify "$workdir/goose.tar.gz" --repo aaif-goose/goose --signer-workflow aaif-goose/goose/.github/workflows/canary.yml' \
   'COPY package.json package-lock.json /opt/hive/' \
+  'COPY --chmod=0644 image/tui/requirements.lock /opt/bluefin/tui/requirements.lock' \
+  'COPY --chmod=0644 image/tui/*.py /opt/bluefin/tui/' \
   'npm --prefix /opt/hive ci --omit=dev --ignore-scripts;' \
   'npm cache clean --force;' \
   'test ! -e /root/.npm;' \
@@ -141,6 +152,8 @@ require image/Containerfile \
   'test ! -e /opt/node/include;' \
   'test ! -e /opt/node/share/doc;' \
   'corepack --version;' \
+  'codex --version' \
+  'codex-code-mode-host --help >/dev/null' \
   'https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/bin/contributor-agent.sh' \
   'https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/bin/contributor-relay.sh' \
   'https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/config/backends.conf' \
@@ -148,6 +161,7 @@ require image/Containerfile \
   'image/config/goose.yaml /opt/bluefin/goose/config/config.yaml' \
   'COPY --chmod=0644 image/review-scope/REVIEW.md /opt/bluefin/review-scope/.agents/REVIEW.md' \
   'COPY --chmod=0644 image/review-scope/checks/ /opt/bluefin/review-scope/.agents/checks/' \
+  'chmod 0755 /opt/bluefin /opt/bluefin/tui /opt/bluefin/harness' \
   'chmod 0755 /opt/bluefin/review-scope /opt/bluefin/review-scope/.agents /opt/bluefin/review-scope/.agents/checks' \
   'COPY --chmod=0755 image/git-hooks/ /opt/bluefin/git-hooks/' \
   'COPY --chmod=0755 image/hive-entrypoint.d/ /etc/hive/entrypoint.d/' \
@@ -155,6 +169,8 @@ require image/Containerfile \
   'tar --no-same-owner -xf "$workdir/node.tar.xz" -C /opt/node --strip-components=1;' \
   'tar -I '\''python3 -m gzip'\'' -xOf "$workdir/gh.tar.gz" --wildcards --occurrence=1 '\''*/bin/gh'\'' > /usr/local/bin/gh;' \
   'tar -I '\''python3 -m gzip'\'' -xOf "$workdir/tmux.tar.gz" --occurrence=1 tmux > /usr/local/bin/tmux;' \
+  'tar -I '\''python3 -m gzip'\'' -xOf "$workdir/codex.tar.gz" --occurrence=1' \
+  'tar -I '\''python3 -m gzip'\'' -xOf "$workdir/codex-code-mode-host.tar.gz" --occurrence=1' \
   'tar -I '\''python3 -m gzip'\'' -xOf "$workdir/goose.tar.gz" --occurrence=1 ./goose > /usr/local/bin/goose;' \
   'COPY image/tmux.conf /etc/tmux.conf' \
   'infocmp -x tmux-direct | grep -q' \
@@ -165,6 +181,7 @@ require image/Containerfile \
   'rm -f /usr/local/libexec/review-generate-skills;' \
   'test ! -e /usr/local/libexec/review-generate-skills' \
   'COPY --chmod=0755 image/entrypoint.sh /usr/local/bin/review-entrypoint' \
+  '/home/dev/Downloads' \
   'USER dev' \
   'WORKDIR /home/dev' \
   'ENTRYPOINT ["/usr/local/bin/review-entrypoint"]'
@@ -186,6 +203,42 @@ require image/Containerfile \
   "cmp -s \"\$probe/cmp-left\" \"\$probe/cmp-right\"" \
   '! cmp -s "$probe/cmp-left" "$probe/cmp-right"'
 
+# The agent-tooling delta from #75: `rg` under its own name, from a verified
+# official release, plus a build-time guard that deletes the layer's reason to
+# exist the moment the base ships rg. Standard command semantics stay the
+# base's, so nothing may be substituted or shadowed.
+# shellcheck disable=SC2016
+require image/Containerfile \
+  'ARG RIPGREP_VERSION=' \
+  'ARG RIPGREP_X86_64_SHA256=' \
+  'ARG RIPGREP_AARCH64_SHA256=' \
+  'https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/ripgrep-${RIPGREP_VERSION}-${rg_arch}.tar.gz' \
+  'rg_arch=x86_64-unknown-linux-musl;' \
+  'rg_arch=aarch64-unknown-linux-musl;' \
+  'for dir in /usr/bin /usr/sbin /bin /sbin /usr/local/bin /usr/local/sbin; do' \
+  'if command -v rg >/dev/null 2>&1; then' \
+  'delete this layer instead of shadowing it' \
+  'for canonical in grep find cat ls; do' \
+  'rg --version;'
+
+# Linters are fsdk-containers#89, not a review layer: installing one here is
+# the local workaround review told upstream it was not adding. `fd`, `bat` and
+# `eza` substitute for canonical commands and stay out too. `just` and
+# mikefarah `yq` v4 come from the base, so a second copy would precede it.
+# shellcheck disable=SC2016
+forbid image/Containerfile \
+  '/usr/local/bin/shellcheck' \
+  '/usr/local/bin/hadolint' \
+  '/usr/local/bin/fd' \
+  '/usr/local/bin/bat' \
+  '/usr/local/bin/eza' \
+  '/usr/local/bin/just' \
+  '/usr/local/bin/yq' \
+  'alias grep=' \
+  'alias find=' \
+  'alias cat=' \
+  'alias ls='
+
 # The probe uses `-user dev`, exactly as Hive's relay does, so it must come
 # after the layer that creates that user or the predicate cannot resolve.
 probe_user_layer="$(grep -n 'dev:x:1000:1000:Developer:' image/Containerfile | head -n 1 | cut -d: -f1)"
@@ -195,8 +248,8 @@ if [[ -z "$probe_user_layer" || -z "$probe_layer" || "$probe_layer" -lt "$probe_
   fail=1
 fi
 
-# The four release archives are unpacked by the base's own GNU tar, not by
-# hand-rolled Python. `python3 -c` is how all four previously reimplemented
+# The release archives are unpacked by the base's own GNU tar, not by
+# hand-rolled Python. `python3 -c` is how these previously reimplemented
 # member selection; `python3 -m gzip` is the stdlib decompressor CLI standing
 # in for the gzip binary the FSDK base does not ship, and is not the same
 # thing. Guard the reimplementation, allow the codec.
@@ -209,7 +262,9 @@ for extractor in image/bin/extract-archive image/bin/find image/bin/cmp; do
   fi
 done
 
-# Every archive's checksum must still be verified before it is extracted.
+# No archive may be read before its checksum is verified. For the two-step
+# form the first read is the decompressor, not tar, so that is what gets
+# ordered: the invariant is checksum-before-first-read.
 if ! python3 - <<'PY'; then
 from pathlib import Path
 
@@ -219,18 +274,26 @@ for name, archive in (
     ("node", "node.tar.xz"),
     ("gh", "gh.tar.gz"),
     ("tmux", "tmux.tar.gz"),
+    ("codex", "codex.tar.gz"),
+    ("codex code mode host", "codex-code-mode-host.tar.gz"),
     ("goose", "goose.tar.gz"),
+    ("ripgrep", "ripgrep.tar.gz"),
 ):
     verify = container.find(f'"$workdir/{archive}" | sha256sum -c -')
     extract = container.find(f'"$workdir/{archive}" -C')
     if extract < 0:
         extract = container.find(f'-xOf "$workdir/{archive}"')
+    if extract < 0:
+        # Two-step form: decompress the verified archive, then select a member
+        # from the plain tar. Pinned to the decompressor so an unrelated read
+        # of the same archive cannot satisfy this check.
+        extract = container.find(f'python3 -m gzip -d < "$workdir/{archive}"')
     if verify < 0:
         errors.append(f"{name}: no sha256sum verification of {archive}")
     elif extract < 0:
         errors.append(f"{name}: no tar extraction of {archive}")
     elif verify > extract:
-        errors.append(f"{name}: {archive} is extracted before its checksum is verified")
+        errors.append(f"{name}: {archive} is read before its checksum is verified")
 
 for error in errors:
     print(f"::error file=image/Containerfile::{error}")
@@ -441,13 +504,23 @@ require image/config/local-agent-policy.md \
   'are not installed' \
   'gh run watch' \
   'that is an evidenced finding'
+# The policy must state the image's own tooling delta, so the agent knows rg
+# is there to use.
+# shellcheck disable=SC2016 # Literal policy text, not shell expansion.
+require image/config/local-agent-policy.md \
+  'The image adds `rg` on top' \
+  'keep their standard behavior'
 # The policy tells the agent what the runtime lacks, so a tool the base
 # actually ships must never be named as absent: that steers every task into a
 # hand-rolled substitute. These are present at the pinned base digest.
+# The image installs `rg`, so the policy must not send the agent to a
+# substitute for it.
 # shellcheck disable=SC2016 # Literal policy text, not shell expansion.
 forbid image/config/local-agent-policy.md \
   '`which`, `awk`' \
-  '`yq` and the PyYAML module'
+  '`yq` and the PyYAML module' \
+  'use `grep -r` for `rg`' \
+  '`rg` and `fd`'
 
 # GOOSE_PATH_ROOT keeps controlled policy/data/state out of Hive's runtime
 # config. The pinned runtime now links its knowledge export to Goose-native
@@ -533,33 +606,49 @@ require .github/workflows/validate.yml \
   'goose-aarch64-unknown-linux-musl.tar.gz' \
   'GOOSE_X86_64_SHA256="${{ steps.goose.outputs.x86_64_sha256 }}"' \
   'GOOSE_AARCH64_SHA256="${{ steps.goose.outputs.aarch64_sha256 }}"' \
-  '--secret id=github_token,env=GITHUB_TOKEN' \
+  '--secret id=github_token,src="$secret_file"' \
   '-f image/Containerfile -t review:test .' \
   '["/usr/local/bin/review-entrypoint"]' \
+  'Import shipped TUI module set as runtime user' \
+  '--entrypoint /usr/local/bin/codex' \
+  '--entrypoint /usr/local/bin/codex-code-mode-host' \
+  '--entrypoint /opt/bluefin/tui/.venv/bin/python' \
+  "import sys; sys.path.insert(0, '/opt/bluefin/tui'); import bluefin_review_tui" \
   'bash tests/image-audit.sh --derived review:test'
+
+# The container toolchain is podman/buildah/skopeo everywhere, including in
+# CI: an image built by a different engine than the one contributors run is
+# how a builder-specific defect reaches a session unseen.
+forbid .github/workflows/validate.yml \
+  'docker build' \
+  'docker run' \
+  'docker inspect' \
+  'docker/build-push-action' \
+  'docker/setup-buildx-action'
 
 # shellcheck disable=SC2016 # Literal workflow text, not shell expansion.
 require .github/workflows/publish-compat-image.yml \
   'attestations: write' \
   'id-token: write' \
   'IMAGE: ghcr.io/projectbluefin/review' \
-  'ARM64_IMAGE: ghcr.io/${{ github.repository }}' \
-  'Derive review image metadata' \
-  'tags: review:smoke' \
+  'BUILDAH_IMAGE: quay.io/buildah/stable:v1.43@sha256:' \
+  'Resolve image tags and OCI metadata' \
+  'tag review:smoke' \
   '["/usr/local/bin/review-entrypoint"]' \
-  'secrets: |' \
-  "github_token=\${{ secrets.GITHUB_TOKEN }}" \
+  '--secret id=github_token,src="$secret_file"' \
   'Resolve official Goose canary asset identities' \
-  "GOOSE_X86_64_SHA256=\${{ needs.resolve-goose.outputs.x86_64_sha256 }}" \
-  "GOOSE_AARCH64_SHA256=\${{ needs.resolve-goose.outputs.aarch64_sha256 }}" \
+  'GOOSE_X86_64_SHA256="$GOOSE_X86_64_SHA256"' \
+  'GOOSE_AARCH64_SHA256="$GOOSE_AARCH64_SHA256"' \
   'org.opencontainers.image.title=Bluefin review contributor' \
   'org.opencontainers.image.description=Foreground contributor runtime for projectbluefin/review.' \
-  'org.opencontainers.image.base.name=${{ steps.metadata.outputs.base_name }}' \
-  'org.opencontainers.image.base.digest=${{ steps.metadata.outputs.base_digest }}' \
-  'annotations: |' \
-  'index:org.opencontainers.image.title=Bluefin review contributor' \
-  'provenance: mode=max' \
-  'sbom: true' \
+  'org.opencontainers.image.base.name=${BASE_NAME}' \
+  'org.opencontainers.image.base.digest=${BASE_DIGEST}' \
+  'buildah manifest annotate --index' \
+  'buildah manifest push' \
+  '--format oci' \
+  'anchore/sbom-action@' \
+  'format: spdx-json' \
+  'sbom-path: review-sbom-${{ matrix.arch }}.spdx.json' \
   'actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6' \
   'subject-digest: ${{ steps.publish.outputs.digest }}' \
   'push-to-registry: true' \
@@ -567,36 +656,51 @@ require .github/workflows/publish-compat-image.yml \
   '--require-github-attestation' \
   '--attestation-repository "${GITHUB_REPOSITORY}"'
 
-# Native arm64 runtime evidence is the gate for the same-revision stable
-# publication. The workflow must prove the host, engine, and built container
-# architecture before the existing audit accepts any runtime evidence.
+# Every published architecture is built by a runner of that architecture, and
+# each proves its own host, engine, and container before the audit accepts any
+# runtime evidence from it. The index is assembled from those two digests, so
+# no shipped layer is ever produced under emulation.
 # shellcheck disable=SC2016 # Literal workflow text, not shell expansion.
 require .github/workflows/publish-compat-image.yml \
   'resolve-goose:' \
-  'arm64-runtime:' \
-  'needs: [resolve-goose]' \
-  'runs-on: ubuntu-24.04-arm' \
-  'Prove native arm64 host and engine' \
+  'metadata:' \
+  'build:' \
+  'needs: [resolve-goose, metadata]' \
+  '- arch: amd64' \
+  'runner: ubuntu-24.04' \
+  '- arch: arm64' \
+  'runner: ubuntu-24.04-arm' \
+  'Prove the native host and record the container toolchain' \
   'host_arch="$(uname -m)"' \
-  'engine_arch="$(docker info --format' \
-  'Build native arm64 smoke image' \
-  'platforms: linux/arm64' \
-  'push: true' \
-  'tags: ${{ env.ARM64_IMAGE }}:arm64-smoke-' \
-  'DERIVED_IMAGE: ${{ env.ARM64_IMAGE }}@${{ steps.arm64_build.outputs.digest }}' \
-  'GOOSE_X86_64_SHA256=${{ needs.resolve-goose.outputs.x86_64_sha256 }}' \
-  'GOOSE_AARCH64_SHA256=${{ needs.resolve-goose.outputs.aarch64_sha256 }}' \
-  'docker image inspect "$DERIVED_IMAGE"' \
-  'docker run --rm --entrypoint /usr/bin/uname "$DERIVED_IMAGE" -m' \
-  'cat "$RUNNER_TEMP/review-image-audit-arm64.md" >> "$GITHUB_STEP_SUMMARY"' \
+  "engine_arch=\"\$(podman info --format '{{.Host.Arch}}')\"" \
+  'test "$engine_arch" = "$EXPECTED_ARCH"' \
+  'podman --version' \
+  'buildah --version' \
+  'skopeo --version' \
+  'container_arch="$(podman run --rm --entrypoint /usr/bin/uname review:smoke -m)"' \
+  'podman push --format oci' \
+  'staging="ghcr.io/${GITHUB_REPOSITORY,,}"' \
+  'STAGING="ghcr.io/${GITHUB_REPOSITORY,,}"' \
+  'name: review-digest-${{ matrix.arch }}' \
+  'pattern: review-digest-*' \
+  'DERIVED_IMAGE: ${{ steps.push.outputs.image }}@${{ steps.push.outputs.digest }}' \
+  'cat "$RUNNER_TEMP/review-image-audit-${ARCH}.md" >> "$GITHUB_STEP_SUMMARY"' \
   'bash tests/image-audit.sh --verify-base-evidence' \
   'bash tests/image-audit.sh --derived "$DERIVED_IMAGE"' \
-  '--report "$RUNNER_TEMP/review-image-audit-arm64.md"' \
+  '--report "$RUNNER_TEMP/review-image-audit-${ARCH}.md"' \
   "if: github.repository == 'projectbluefin/review'" \
-  'needs: [arm64-runtime, resolve-goose]'
+  'needs: [build, metadata]'
 
+# BuildKit is not the engine this project runs. Its parent-directory handling
+# for 'COPY --chmod' differs from buildah's, so an image built with it can
+# carry a defect no contributor can reproduce with podman.
 forbid .github/workflows/publish-compat-image.yml \
   'docker/setup-qemu-action' \
+  'docker/setup-buildx-action' \
+  'docker/build-push-action' \
+  'docker/login-action' \
+  'buildx' \
+  'provenance: mode=max' \
   '--privileged' \
   'docker run --privileged'
 
@@ -645,7 +749,7 @@ require image/git-hooks/post-checkout \
 # nothing has gone back to naming one module.
 # shellcheck disable=SC2016 # Literal Containerfile text, not an expansion.
 require image/Containerfile \
-  'COPY image/tui/*.py /opt/bluefin/tui/' \
+  'COPY --chmod=0644 image/tui/*.py /opt/bluefin/tui/' \
   'for tui_module in /opt/bluefin/tui/*.py; do' \
   'PYTHONPATH=/opt/bluefin/tui /opt/bluefin/tui/.venv/bin/python'
 

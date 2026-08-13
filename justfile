@@ -172,6 +172,9 @@ preflight_agent() {
       return 1
     }
   fi
+  preflight_github
+}
+preflight_github() {
   github_auth_ready || {
     echo "ERROR: GitHub CLI is not authenticated against github.com." >&2
     echo "  Run: ${GITHUB_LOGIN_COMMAND}" >&2
@@ -437,6 +440,49 @@ report_missing_gh_token() {
   echo "  Fix it with: gh auth login --web --hostname github.com --scopes repo,read:org" >&2
   echo "  Or export REVIEW_GH_TOKEN with a scoped PAT." >&2
   return 0
+}
+resolve_codex_auth_file() {
+  local codex_home="${CODEX_HOME:-${HOME}/.codex}"
+  CODEX_AUTH_SOURCE_FILE="${codex_home%/}/auth.json"
+  if [[ "$CODEX_AUTH_SOURCE_FILE" != /* || ! -f "$CODEX_AUTH_SOURCE_FILE" || ! -r "$CODEX_AUTH_SOURCE_FILE" ]]; then
+    CODEX_AUTH_SOURCE_FILE=""
+  fi
+  return 0
+}
+stage_codex_auth_file() {
+  local stage_root="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
+  CODEX_AUTH_FILE=""
+  CODEX_AUTH_STAGING_DIR=""
+  resolve_codex_auth_file
+  [[ -n "$CODEX_AUTH_SOURCE_FILE" ]] || return 0
+  if [[ "$stage_root" != /* || ! -d "$stage_root" || ! -w "$stage_root" ]]; then
+    stage_root=/tmp
+  fi
+  umask 077
+  CODEX_AUTH_STAGING_DIR="$(mktemp -d "${stage_root%/}/review-codex-auth.XXXXXX")"
+  CODEX_AUTH_FILE="${CODEX_AUTH_STAGING_DIR}/auth.json"
+  cp -- "$CODEX_AUTH_SOURCE_FILE" "$CODEX_AUTH_FILE"
+  chmod 0600 "$CODEX_AUTH_FILE"
+  return 0
+}
+cleanup_codex_auth_file() {
+  local staging_dir="${CODEX_AUTH_STAGING_DIR:-}"
+  [[ -n "$staging_dir" && "$staging_dir" == /* ]] || return 0
+  rm -f -- "${staging_dir}/auth.json"
+  rmdir -- "$staging_dir"
+  CODEX_AUTH_FILE=""
+  CODEX_AUTH_STAGING_DIR=""
+  return 0
+}
+resolve_review_backend() {
+  REVIEW_BACKEND="${BLUEFIN_REVIEW_BACKEND:-}"
+  case "$REVIEW_BACKEND" in
+    ""|goose|codex) return 0 ;;
+    *)
+      echo "ERROR: unsupported review backend '${REVIEW_BACKEND}'; expected goose or codex." >&2
+      return 1
+      ;;
+  esac
 }
 resolve_goose_selection() {
   # Goose is fixed to GitHub Copilot. The model stays noninteractive and the
@@ -883,8 +929,13 @@ review-queue *queue_args:
     KIMI_MODEL="{{kimi_model}}"
     KIMI_CONTEXT_LIMIT="{{kimi_context_limit}}"
 
+    resolve_review_backend
     require_goose_backend "$TOOL"
-    preflight_agent
+    if [[ "$REVIEW_BACKEND" == codex ]]; then
+      preflight_github
+    else
+      preflight_agent
+    fi
     command -v podman &>/dev/null || {
       echo "ERROR: Podman is required to run the contributor container." >&2
       echo "  Install Podman, then re-run review-queue." >&2
@@ -904,7 +955,7 @@ review-queue *queue_args:
     if [[ $# -gt 0 && "$1" != -* ]]; then profile="$1"; shift; fi
     if [[ $# -gt 0 && "$1" != -* ]]; then effort="$1"; shift; fi
     resolve_model_profile "$profile" "$effort"
-    resolve_goose_selection
+    [[ "$REVIEW_BACKEND" == codex ]] || resolve_goose_selection
 
     CONTRIBUTOR_IMAGE="{{contributor_image}}"
     require_no_running_instance "$CONTAINER_NAME"
@@ -917,20 +968,43 @@ review-queue *queue_args:
       # Podman does not pass COLORTERM through on its own.
       --env COLORTERM
     )
-    [[ -n "$GOOSE_PROVIDER" ]] && CONTAINER_ARGS+=(--env "GOOSE_PROVIDER=${GOOSE_PROVIDER}")
-    [[ -n "$GOOSE_MODEL" ]] && CONTAINER_ARGS+=(--env "GOOSE_MODEL=${GOOSE_MODEL}")
-    [[ -n "${GOOSE_THINKING_EFFORT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_THINKING_EFFORT=${GOOSE_THINKING_EFFORT}")
-    [[ -n "${GOOSE_CONTEXT_LIMIT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_CONTEXT_LIMIT=${GOOSE_CONTEXT_LIMIT}")
+    if [[ "$REVIEW_BACKEND" != codex ]]; then
+      [[ -n "$GOOSE_PROVIDER" ]] && CONTAINER_ARGS+=(--env "GOOSE_PROVIDER=${GOOSE_PROVIDER}")
+      [[ -n "$GOOSE_MODEL" ]] && CONTAINER_ARGS+=(--env "GOOSE_MODEL=${GOOSE_MODEL}")
+      [[ -n "${GOOSE_THINKING_EFFORT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_THINKING_EFFORT=${GOOSE_THINKING_EFFORT}")
+      [[ -n "${GOOSE_CONTEXT_LIMIT:-}" ]] && CONTAINER_ARGS+=(--env "GOOSE_CONTEXT_LIMIT=${GOOSE_CONTEXT_LIMIT}")
+    fi
+    if [[ -n "$REVIEW_BACKEND" ]]; then
+      CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_BACKEND=${REVIEW_BACKEND}")
+      echo "✓ review backend preselected: ${REVIEW_BACKEND}; Start still requires confirmation."
+    fi
     # The Copilot credential is what powers 'r' (the Goose review of a pull
     # request); the dashboard itself only reads GitHub, so a missing credential
     # is a warning, not a stop.
-    resolve_copilot_token
-    if [[ -n "${COPILOT_TOKEN:-}" ]]; then
-      export GITHUB_COPILOT_TOKEN="$COPILOT_TOKEN"
-      CONTAINER_ARGS+=(--env GITHUB_COPILOT_TOKEN)
-      echo "✓ Copilot credential passed to the agent."
-    else
-      report_missing_copilot_credential
+    if [[ "$REVIEW_BACKEND" != codex ]]; then
+      resolve_copilot_token
+      if [[ -n "${COPILOT_TOKEN:-}" ]]; then
+        export GITHUB_COPILOT_TOKEN="$COPILOT_TOKEN"
+        CONTAINER_ARGS+=(--env GITHUB_COPILOT_TOKEN)
+        echo "✓ Copilot credential passed to the agent."
+      else
+        report_missing_copilot_credential
+      fi
+    fi
+    # Codex subscription OAuth is staged into one private file, not mounted
+    # from the host login or configuration directory. The official CLI may
+    # refresh only the disposable copy, which is removed when this run exits.
+    CODEX_AUTH_STAGING_DIR=""
+    trap cleanup_codex_auth_file EXIT
+    if [[ "$REVIEW_BACKEND" == codex ]]; then
+      stage_codex_auth_file
+      if [[ -n "$CODEX_AUTH_FILE" ]]; then
+        CONTAINER_ARGS+=(--volume "$CODEX_AUTH_FILE:/home/dev/.codex/auth.json:rw,z")
+        echo "✓ Codex subscription login staged as one private file (contents not shown; host cache not mounted)."
+      else
+        echo "! Codex subscription login unavailable; run 'codex login' with file credential storage." >&2
+        echo "  Review stays open, reports NEEDS SIGN-IN, and never silently selects Codex." >&2
+      fi
     fi
     # The dashboard is a GitHub reader from the first keystroke to the last, so
     # an identity is load-bearing here, not advisory.
@@ -949,7 +1023,7 @@ review-queue *queue_args:
 
     echo "✓ starting the maintainer review dashboard (no Hive)."
     echo "  q or Ctrl-C stops; the dashboard is the only thing running."
-    exec "${CONTAINER_ARGS[@]}"
+    "${CONTAINER_ARGS[@]}"
 
 # Preflight check: is this machine actually ready for 'just review-container'?
 # Never starts the container — read-only diagnostics only.

@@ -18,6 +18,7 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 import time
 import tempfile
 from pathlib import Path
@@ -249,7 +250,8 @@ async def main() -> int:
                     break
                 await pilot.pause(0.05)
             app.stops[0].live = {
-                "headRefOid": "0123456789abcdef",
+                "baseRefOid": "fedcba9876543210fedcba9876543210fedcba98",
+                "headRefOid": "0123456789abcdef0123456789abcdef01234567",
                 "isDraft": False,
                 "mergeable": "MERGEABLE",
                 "mergeStateStatus": "CLEAN",
@@ -1531,7 +1533,11 @@ async def main() -> int:
             await pilot.pause(0.05)
         app.self_login = "castrojo"
         stop = app.stops[0]
-        stop.live = {"isDraft": False, "headRefOid": "0123456789abcdef"}
+        stop.live = {
+            "isDraft": False,
+            "baseRefOid": "fedcba9876543210fedcba9876543210fedcba98",
+            "headRefOid": "0123456789abcdef0123456789abcdef01234567",
+        }
         await pilot.press("r")
         for _ in range(400):
             if isinstance(app.screen, tui.ReviewScreen) and app.screen.finished:
@@ -1654,6 +1660,168 @@ async def main() -> int:
             )
 
     # ── the review path never mutates GitHub ─────────────────────────────
+    # Invalid live refs disable Codex start honestly and never invoke it.
+    tui.ACTIVE_BACKEND = "codex"
+    real_probe = tui.CodexHarness.probe
+    tui.CodexHarness.probe = classmethod(lambda cls: tui.Availability.READY)
+    real_popen = tui.subprocess.Popen
+    review_log.write_text("")
+    try:
+        codex_calls = []
+        codex_output = "\n".join(
+            (
+                '{"type":"thread.started","thread_id":"thread_1"}',
+                '{"type":"turn.started"}',
+                '{"type":"item.completed","item":{"id":"item_1",'
+                '"type":"agent_message","text":"{\\"version\\":1,'
+                '\\"state\\":\\"complete\\",\\"counts\\":{\\"critical\\":0,'
+                '\\"high\\":0,\\"medium\\":0,\\"low\\":0},\\"findings\\":[]}"}}',
+                '{"type":"turn.completed","usage":{}}',
+            )
+        ) + "\n"
+
+        class CodexProcess:
+            stdout = iter(codex_output.splitlines(keepends=True))
+            returncode = 0
+
+            @staticmethod
+            def wait():
+                return 0
+
+        def codex_popen(*args, **kwargs):
+            command = args[0] if args else kwargs.get("args")
+            if isinstance(command, (list, tuple)) and command[:2] == ["codex", "exec"]:
+                codex_calls.append((command, kwargs))
+                return CodexProcess()
+            return real_popen(*args, **kwargs)
+
+        tui.subprocess.Popen = codex_popen
+        os.environ["GH_TOKEN"] = "write-capable-test-token"
+
+        # Cancelling while the availability probe is still running must not
+        # allow Codex to start after the stop request has already landed.
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+
+        def delayed_probe(cls):
+            probe_started.set()
+            release_probe.wait(timeout=10)
+            return tui.Availability.READY
+
+        tui.CodexHarness.probe = classmethod(delayed_probe)
+        app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for _ in range(200):
+                if app.stops:
+                    break
+                await pilot.pause(0.05)
+            app.stops[0].live = {
+                "isDraft": False,
+                "baseRefOid": "fedcba9876543210fedcba9876543210fedcba98",
+                "headRefOid": "0123456789abcdef0123456789abcdef01234567",
+            }
+            app.start_review(app.stops[0])
+            await pilot.press("tab", "enter")
+            for _ in range(200):
+                if probe_started.is_set():
+                    break
+                await pilot.pause(0.05)
+            check(probe_started.is_set(), "the delayed Codex probe must start")
+            screen = app.screen
+            await pilot.press("x")
+            release_probe.set()
+            for _ in range(200):
+                if isinstance(screen, tui.ReviewScreen) and screen.finished:
+                    break
+                await pilot.pause(0.05)
+            check(
+                isinstance(screen, tui.ReviewScreen) and screen.finished,
+                "cancelling during the Codex probe must finish the review",
+            )
+            check(not codex_calls, "Codex must not start after probe-time cancellation")
+
+        tui.CodexHarness.probe = classmethod(lambda cls: tui.Availability.READY)
+        app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for _ in range(200):
+                if app.stops:
+                    break
+                await pilot.pause(0.05)
+            app.stops[0].live = {
+                "isDraft": False,
+                "baseRefOid": "fedcba9876543210fedcba9876543210fedcba98",
+                "headRefOid": "0123456789abcdef0123456789abcdef01234567",
+                "statusCheckRollup": [
+                    {"name": "validate", "conclusion": "SUCCESS"}
+                ],
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
+            }
+            app.stops[0].overlap = {"duplicates": [1], "overlaps": [2]}
+            app.start_review(app.stops[0], "focus on exact-head evidence")
+            await pilot.press("tab", "enter")
+            for _ in range(200):
+                if isinstance(app.screen, tui.ReviewScreen) and app.screen.finished:
+                    break
+                await pilot.pause(0.05)
+            status = app.screen.query_one("#review-status", tui.Static)
+            check(
+                "COMPLETE" in str(status.render()),
+                "valid Codex stdout JSONL must produce a completed decision card",
+            )
+            check(
+                codex_calls[-1][1]["stderr"] is subprocess.DEVNULL,
+                "Codex stderr must stay outside the official stdout JSONL lifecycle",
+            )
+            check(
+                "GH_TOKEN" not in codex_calls[-1][1]["env"]
+                and "GITHUB_TOKEN" not in codex_calls[-1][1]["env"],
+                "Codex review subprocess must not inherit GitHub mutation credentials",
+            )
+            check(
+                "focus on exact-head evidence" in codex_calls[-1][0][-1],
+                "dashboard steering must reach the Codex invocation prompt",
+            )
+            card = str(app.screen.query_one("#review-card", tui.Static).render())
+            check(
+                "CI success" in card and "MERGEABLE/CLEAN" in card
+                and "1 duplicate / 1 shared-file hazard" in card,
+                f"Codex card must merge trusted live and overlap evidence, got {card!r}",
+            )
+
+        tui.subprocess.Popen = real_popen
+        os.environ.pop("GH_TOKEN", None)
+        app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for _ in range(200):
+                if app.stops:
+                    break
+                await pilot.pause(0.05)
+            app.stops[0].live = {"isDraft": False, "headRefOid": "bad"}
+            await pilot.press("r")
+            await pilot.press("tab", "enter")
+            for _ in range(200):
+                if isinstance(app.screen, tui.ReviewScreen) and app.screen.finished:
+                    break
+                await pilot.pause(0.05)
+            check(
+                isinstance(app.screen, tui.ReviewScreen) and app.screen.finished,
+                "invalid live refs must finish as unavailable",
+            )
+            check(
+                review_log.read_text() == "",
+                "invalid live refs must not invoke Codex",
+            )
+    finally:
+        os.environ.pop("GH_TOKEN", None)
+        tui.subprocess.Popen = real_popen
+        tui.CodexHarness.probe = real_probe
+    tui.ACTIVE_BACKEND = "goose"
+
+    # ── the review path never mutates GitHub ─────────────────────────────
     calls = gh_log.read_text().splitlines() if gh_log.exists() else []
     mutations = [
         call
@@ -1676,7 +1844,8 @@ async def main() -> int:
     check(
         outcomes == [
             "complete", "complete", "incomplete", "incomplete", "failed",
-            "complete", "incomplete", "complete", "stopped",
+            "complete", "incomplete", "complete", "stopped", "stopped",
+            "complete", "error",
         ],
         f"every review must be traced with its outcome, got {outcomes}",
     )

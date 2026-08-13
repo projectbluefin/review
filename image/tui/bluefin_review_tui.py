@@ -18,6 +18,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 import urllib.request
 from collections import Counter
@@ -38,9 +39,18 @@ from textual.widgets import (
     ListItem,
     ListView,
     RichLog,
+    Button,
     Static,
+    Select,
 )
-from review_result import adapt_current_engine
+from review_result import ReviewResult, adapt_current_engine
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from harness.codex import CodexHarness
+from harness.autopilot import (HarnessOption, Preference, can_remember,
+                               choose_option, discover_all, load_preferences,
+                               remember_success)
+from review_evidence_manifest import ReviewRequest
+from harness.registry import Availability
 
 QUEUE_URL = os.environ.get(
     "BLUEFIN_REVIEW_QUEUE_URL",
@@ -115,6 +125,9 @@ def action_rank(action: str) -> int:
 # The review engine. It produces a Review Draft and has no approve, merge,
 # comment, or close path of its own, so running it can never mutate GitHub.
 REVIEW_COMMAND = os.environ.get("BLUEFIN_REVIEW_COMMAND", "bluefin-review")
+ACTIVE_BACKEND = os.environ.get("BLUEFIN_REVIEW_BACKEND", "goose")
+if ACTIVE_BACKEND not in {"goose", "codex"}:
+    raise RuntimeError(f"unsupported review backend: {ACTIVE_BACKEND}")
 
 # bluefin-review's exit status for a review whose checks did not all return a
 # verdict. 'goose review' exits 0 in that case and still prints a finding
@@ -645,6 +658,70 @@ class DiffScreen(ModalScreen[None]):
         body.update(self.rendered)
 
 
+class HarnessTakeoff(ModalScreen[str | None]):
+    """One explicit maintainer choice before a selected harness starts."""
+
+    BINDINGS = [Binding("escape", "dismiss(None)", "cancel")]
+
+    def __init__(self, options: list[HarnessOption], initial: HarnessOption | None,
+                 initial_preference: Preference | None = None) -> None:
+        super().__init__()
+        self.options = options
+        self.initial = initial
+        self.initial_preference = initial_preference
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="takeoff-box"):
+            yield Label("Select review harness — Start runs only after confirmation")
+            yield Select(
+                [(f"{option.harness.branding.terminal_badge} {option.harness.branding.display_name} · "
+                  f"{option.status} · {self._model(option)} / {self._effort(option)}",
+                  option.harness.branding.harness_id) for option in self.options],
+                value=(self.initial.harness.branding.harness_id if self.initial else Select.BLANK),
+                id="takeoff-select",
+            )
+            yield Button("Start", id="takeoff-start", variant="primary")
+            yield Button("Diagnostics", id="takeoff-diagnostics")
+
+    def _model(self, option: HarnessOption) -> str:
+        if self.initial_preference and self.initial_preference.harness_id == option.harness.branding.harness_id:
+            return self.initial_preference.model
+        return option.discovery.model
+
+    def _effort(self, option: HarnessOption) -> str:
+        if self.initial_preference and self.initial_preference.harness_id == option.harness.branding.harness_id:
+            return self.initial_preference.effort
+        return "low"
+
+    def on_mount(self) -> None:
+        self.query_one("#takeoff-select", Select).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "takeoff-start":
+            option = self.selected_option()
+            if option is None:
+                self.dismiss(None)
+                return
+            preference = self.initial_preference
+            if preference is None or preference.harness_id != option.harness.branding.harness_id:
+                preference = Preference(option.harness.branding.harness_id,
+                                        option.discovery.model, "low")
+            self.dismiss(preference)
+        elif event.button.id == "takeoff-diagnostics":
+            option = self.selected_option()
+            if option:
+                self.notify(
+                    f"{option.harness.branding.display_name}: {option.status}; "
+                    f"auth={option.discovery.auth}; model={option.discovery.model}; "
+                    f"effort={option.discovery.reasoning}"
+                )
+
+    def selected_option(self) -> HarnessOption | None:
+        value = self.query_one("#takeoff-select", Select).value
+        return next((option for option in self.options
+                     if option.harness.branding.harness_id == value), None)
+
+
 class ReviewScreen(Screen):
     """One Goose review, streamed live.
 
@@ -666,10 +743,11 @@ class ReviewScreen(Screen):
         Binding("e", "toggle_evidence", "raw evidence"),
     ]
 
-    def __init__(self, stop: Stop, steer: str = "") -> None:
+    def __init__(self, stop: Stop, steer: str = "", selection: Preference | None = None) -> None:
         super().__init__()
         self.stop_record = stop
         self.steer = steer
+        self.selection = selection or Preference(ACTIVE_BACKEND, "gpt-5.6-luna", "low")
         self.process: subprocess.Popen | None = None
         self.finished = False
         self.stop_requested = False
@@ -681,7 +759,7 @@ class ReviewScreen(Screen):
         yield Header(show_clock=True)
         yield Static(
             f" reviewing {link(stop.key, pr_url(stop.repository, stop.number))}"
-            " — starting…"
+            f" — {ACTIVE_BACKEND} starting…"
             + (f"  steer: {escape(self.steer)}" if self.steer else ""),
             id="review-status",
         )
@@ -696,19 +774,53 @@ class ReviewScreen(Screen):
     @work(thread=True)
     def run_review(self) -> None:
         stop = self.stop_record
-        command = [REVIEW_COMMAND, "pr", stop.repository, str(stop.number)]
+        if ACTIVE_BACKEND == "codex":
+            base_sha = str(stop.live.get("baseRefOid") or "")
+            head_sha = str(stop.live.get("headRefOid") or "")
+            if (len(base_sha) != 40 or len(head_sha) != 40 or
+                    any(char not in "0123456789abcdef" for char in (base_sha + head_sha).lower())):
+                self.app.call_from_thread(
+                    self.finish, None,
+                    "Codex unavailable: exact PR base/head is unavailable",
+                )
+                return
+            owner, repository = stop.repository.split("/", 1)
+            binding = ReviewRequest(
+                owner, repository, stop.number, base_sha, head_sha,
+                actor="maintainer", tenant="review", generated_at="dashboard",
+            )
+            adapter = CodexHarness(availability=CodexHarness.probe())
+            if adapter.availability is not Availability.READY:
+                self.app.call_from_thread(
+                    self.finish, None,
+                    f"Codex unavailable: {adapter.availability.value}",
+                )
+                return
+            command = adapter.command(
+                binding, prompt="Produce the ReviewResult JSON.",
+                model=self.selection.model, effort=self.selection.effort,
+                steer=self.steer,
+            )
+        else:
+            command = [REVIEW_COMMAND, "pr", stop.repository, str(stop.number)]
         # Maintainer steering rides the documented additive seam: it is added
         # to the review's instructions, never a replacement for the doctrine.
         environment = dict(os.environ)
+        if ACTIVE_BACKEND == "codex":
+            environment.pop("GH_TOKEN", None)
+            environment.pop("GITHUB_TOKEN", None)
         if self.steer:
             environment["BLUEFIN_REVIEW_STEER"] = self.steer
         else:
             environment.pop("BLUEFIN_REVIEW_STEER", None)
+        if self.stop_requested:
+            self.app.call_from_thread(self.finish, None, "")
+            return
         try:
             process = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.DEVNULL,
                 text=True,
                 bufsize=1,
                 env=environment,
@@ -722,7 +834,14 @@ class ReviewScreen(Screen):
             self.app.call_from_thread(self.finish, None, str(error))
             return
         self.process = process
-        self.app.call_from_thread(self.mark_running)
+        if self.stop_requested:
+            if self.signal_group(signal.SIGTERM):
+                self.app.call_from_thread(self.schedule_stop_escalation)
+            else:
+                self.app.call_from_thread(self.finish, process.poll(), "")
+                return
+        if not self.stop_requested:
+            self.app.call_from_thread(self.mark_running)
         assert process.stdout is not None
         for line in process.stdout:
             self.app.call_from_thread(self.append, line.rstrip("\n"))
@@ -743,15 +862,48 @@ class ReviewScreen(Screen):
         self.finished = True
         stop = self.stop_record
         elapsed = int(time.monotonic() - self.started)
-        result = adapt_current_engine(
-            "\n".join(self.output), code,
-            {"backend": os.environ.get("GOOSE_PROVIDER", "goose"),
-             "model": os.environ.get("GOOSE_MODEL", "gpt-5.6-luna"),
-             "repository": stop.repository, "pull_request": stop.number},
-            verification=live_review_verification(stop.live),
-            overlap=stop.overlap,
-            live=live_review_context(stop.live),
-        )
+        if ACTIVE_BACKEND == "codex":
+            base_sha = str(stop.live.get("baseRefOid") or "")
+            head_sha = str(stop.live.get("headRefOid") or "")
+            if len(base_sha) != 40 or len(head_sha) != 40:
+                result = ReviewResult(1, "failed", provenance={"backend": "codex"})
+            else:
+                result = CodexHarness(availability=Availability.READY).convert(
+                    "\n".join(self.output),
+                    ReviewRequest(
+                        *stop.repository.split("/", 1), stop.number, base_sha, head_sha,
+                        actor="maintainer", tenant="review", generated_at="dashboard",
+                    ),
+                    code or 0,
+                    model=self.selection.model, effort=self.selection.effort,
+                )
+                result = ReviewResult(
+                    result.version, result.state, result.counts, result.findings,
+                    live_review_verification(stop.live), result.provenance,
+                    stop.overlap, live_review_context(stop.live), result.raw_evidence,
+                )
+        else:
+            result = adapt_current_engine(
+                "\n".join(self.output), code,
+                {"backend": os.environ.get("GOOSE_PROVIDER", "goose"),
+                 "model": os.environ.get("GOOSE_MODEL", "gpt-5.6-luna"),
+                 "repository": stop.repository, "pull_request": stop.number},
+                verification=live_review_verification(stop.live),
+                overlap=stop.overlap,
+                live=live_review_context(stop.live),
+            )
+        if ACTIVE_BACKEND == "codex" and len(str(stop.live.get("baseRefOid") or "")) == 40 and len(str(stop.live.get("headRefOid") or "")) == 40:
+            request = ReviewRequest(
+                *stop.repository.split("/", 1), stop.number,
+                stop.live["baseRefOid"], stop.live["headRefOid"],
+                actor="maintainer", tenant="review", generated_at="dashboard",
+            )
+            if can_remember(result, request):
+                remember_success(
+                    load_preferences(), stop.repository,
+                    Preference("codex", result.provenance.get("model", "gpt-5.6-luna"),
+                               result.provenance.get("reasoning_effort", "low")),
+                )
         if error:
             outcome, state = "error", f"FAILED to start: {error}"
         elif self.stop_requested:
@@ -860,6 +1012,9 @@ class ReviewScreen(Screen):
         if not self.finished:
             self.signal_group(signal.SIGKILL)
 
+    def schedule_stop_escalation(self) -> None:
+        self.set_timer(STOP_GRACE_SECONDS, self.escalate_stop)
+
     def signal_group(self, number: int) -> bool:
         process = self.process
         if process is None or process.poll() is not None:
@@ -936,6 +1091,7 @@ class ReviewDashboard(App):
         background: $error; color: $text; text-style: bold;
     }
     #review-log { border: solid $secondary; }
+    #takeoff-box { border: heavy cyan; background: $surface; width: 80%; height: auto; padding: 1 2; margin: 4 4; }
     """
 
     BINDINGS = [
@@ -988,12 +1144,15 @@ class ReviewDashboard(App):
         # the batch you spent a minute building is worse than no refresh.
         self.reselect: set[str] = set()
         self.all_items: list[dict] = []
+        self.harness_state = "CHECKING"
+        self.harness_options: list[HarnessOption] = []
 
     # ── layout ────────────────────────────────────────────────────────────
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static("loading queue…", id="status-bar")
+        yield Static("Harness Autopilot — CHECKING…", id="harness-status")
         with Horizontal():
             with Vertical(id="queue-pane"):
                 yield ListView(id="queue")
@@ -1018,6 +1177,29 @@ class ReviewDashboard(App):
         self.query_one("#queue", ListView).focus()
         self.load_queue()
         self.load_hive()
+        self.discover_harness()
+
+    @work(thread=True)
+    def discover_harness(self) -> None:
+        """Probe Codex off the UI thread; discovery never starts inference."""
+        options = discover_all()
+        self.call_from_thread(self.harness_loaded, options)
+
+    def harness_loaded(self, options: list[HarnessOption]) -> None:
+        self.harness_options = options
+        result = next((option.discovery for option in options if option.harness.branding.harness_id == ACTIVE_BACKEND), options[0].discovery)
+        self.harness_state = result.availability.value
+        label = self.query_one("#harness-status", Static)
+        if result.availability is Availability.READY:
+            label.update(
+                "Harness Autopilot — READY · Codex / gpt-5.6-luna · "
+                "reason: low · Start requires Enter/click"
+            )
+        else:
+            label.update(
+                f"Harness Autopilot — {result.availability.value} · "
+                "[Diagnostics] [Sign in] [Install] [Retry] · no fallback"
+            )
 
     @work(thread=True)
     def load_hive(self) -> None:
@@ -1110,6 +1292,28 @@ class ReviewDashboard(App):
         self.query_one("#queue", ListView).focus()
         stop = self.current
         if not stop or not steer:
+            return
+        self.start_review(stop, steer)
+
+    def start_review(self, stop: Stop, steer: str = "") -> None:
+        if ACTIVE_BACKEND == "codex":
+            options = self.harness_options or discover_all()
+            preferences = load_preferences()
+            initial = choose_option(stop.repository, preferences, options)
+            initial_preference = None
+            for candidate in (preferences.get(stop.repository), preferences.get("*")):
+                if initial and candidate and candidate.harness_id == initial.harness.branding.harness_id:
+                    initial_preference = candidate
+                    break
+            if initial and initial_preference is None:
+                initial_preference = Preference(initial.harness.branding.harness_id,
+                                                initial.discovery.model, "low")
+            def selected(selection: Preference | None) -> None:
+                global ACTIVE_BACKEND
+                if selection:
+                    ACTIVE_BACKEND = selection.harness_id
+                    self.push_screen(ReviewScreen(stop, steer=steer, selection=selection))
+            self.push_screen(HarnessTakeoff(options, initial, initial_preference), selected)
             return
         self.push_screen(ReviewScreen(stop, steer=steer))
 
@@ -1265,7 +1469,7 @@ class ReviewDashboard(App):
         live = gh(
             "pr", "view", str(stop.number), "--repo", stop.repository,
             "--json",
-            "author,state,headRefOid,isDraft,mergeable,mergeStateStatus,"
+            "author,state,baseRefOid,headRefOid,isDraft,mergeable,mergeStateStatus,"
             "reviewDecision,additions,deletions,changedFiles,updatedAt,"
             "closingIssuesReferences,statusCheckRollup,labels,reviews",
         )
@@ -1618,7 +1822,7 @@ class ReviewDashboard(App):
     def action_review(self) -> None:
         stop = self.current
         if stop:
-            self.push_screen(ReviewScreen(stop))
+            self.start_review(stop)
 
     def leave_review(self, stop: Stop) -> None:
         """Submit a review to GitHub: approve, request changes, or comment.
