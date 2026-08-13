@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-12",
+  "generated_at": "2026-08-13",
   "schema_version": "1.0",
   "skills": [
     {
@@ -95,8 +95,8 @@
         "audit"
       ],
       "description": "Use when maintaining the pinned FSDK-derived contributor image, audit, Goose canary assets, Hive runtime, or publishing path.",
-      "version": "2.20",
-      "last_updated": "2026-08-12",
+      "version": "2.21",
+      "last_updated": "2026-08-13",
       "doc_type": "procedure"
     },
     {

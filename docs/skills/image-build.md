@@ -1,7 +1,7 @@
 ---
 name: image-build
-version: "2.20"
-last_updated: 2026-08-12
+version: "2.21"
+last_updated: 2026-08-13
 id: image-build
 one_line_purpose: Derive and pin the review contributor image safely.
 entry_point: docs/skills/image-build.md
@@ -353,6 +353,34 @@ resolves under `/usr/local/bin` — the shape a reintroduced shim would take.
   /opt/bluefin \( -type d ! -perm -o=rx \) ...`), never by a string match on
   the Containerfile.
 
+- Assuming a GitHub runner's tool versions. `ubuntu-24.04` and
+  `ubuntu-24.04-arm` ship podman 4.9.3 and buildah 1.33.7, which predate both
+  `--secret id=NAME,env=VAR` and `buildah manifest annotate --index`. The
+  publish path therefore passes the token as a `0600` file
+  (`--secret id=github_token,src=FILE`) and assembles the index in a
+  digest-pinned `quay.io/buildah/stable` container, unprivileged, moving
+  descriptors rather than layers. Every job prints `podman --version`,
+  `buildah --version` and `skopeo --version` so a mutated runner image fails
+  with the tool's own name in the log rather than inside the step that needed
+  it.
+- Relying on credential lookup order. podman falls back to
+  `$HOME/.docker/config.json` when no containers auth file exists, but
+  `actions/attest` reads *only* that path — so writing podman's own default
+  left both build jobs green through push and scan, then failing on
+  `Error: No credentials found for registry ghcr.io`. Write both files and
+  name the file at every use (`--authfile`), rather than depending on which
+  one a given tool searches first. `actions/attest` also needs
+  `artifact-metadata: write`, or every attestation step warns and its storage
+  record is dropped.
+- Attaching one SBOM to a multi-architecture index. An SBOM describes one root
+  filesystem, and syft scanning an index reports whichever platform it
+  resolved. Generate the SBOM in the job that built that architecture and
+  attest it against that platform's digest; the index carries provenance.
+- Assembling an index without checking the digests differ. buildah keys index
+  entries by digest, so two identical digests collapse into a single entry and
+  `--arch` silently relabels it: the result claims one platform while looking
+  like a normal push. The publish job refuses equal digests instead.
+
 ## Verification
 
 ```bash
@@ -379,5 +407,7 @@ time against the real base and the build fails if either regresses.
 ## Sources
 - Hive `v2`: `bin/contributor-agent.sh`, `bin/contributor-relay.sh`,
   `config/backends.conf`; Goose `canary` assets; Context7 `/npm/cli`,
-  `/websites/podman_io_en`, `/websites/cli_github_manual`,
-  `/websites/github_en_actions`, `/containers/buildah`, `/containers/skopeo`.
+  `/websites/podman_io_en` (`--secret` forms, authfile lookup order),
+  `/podman-container-tools/buildah` (`manifest annotate --index`),
+  `/podman-container-tools/skopeo`, `/websites/cli_github_manual`,
+  `/websites/github_en_actions`.
