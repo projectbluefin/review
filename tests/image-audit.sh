@@ -19,20 +19,28 @@ attestation_repository=""
 expected_source=""
 expected_revision=""
 expected_version=""
-engine="${CONTAINER_ENGINE:-docker}"
+engine="${CONTAINER_ENGINE:-podman}"
+
+# Predicate URIs written by actions/attest. Provenance is SLSA v1; the SBOM
+# predicate is derived from the SPDX version inside the document, so it moves
+# with the SBOM format rather than with the action.
+slsa_provenance_predicate="https://slsa.dev/provenance/v1"
+spdx_predicate="https://spdx.dev/Document/v2.3"
 
 usage() {
   cat <<'EOF'
 Usage: tests/image-audit.sh --derived IMAGE [options]
 
 Audit the digest-pinned FSDK base and an already-built or published review
-image. IMAGE may be a local Docker tag or an immutable registry reference.
+image. IMAGE may be a local image tag or an immutable registry reference.
+The engine is podman unless CONTAINER_ENGINE names another one.
 
 Options:
   --base IMAGE             Override the FSDK base parsed from image/Containerfile.
   --derived IMAGE          Built review image to inspect (required).
   --require-oci            Require source, revision, and version OCI labels.
-  --require-attestations   Require SPDX SBOM and SLSA provenance attestations.
+  --require-attestations   Require registry-attached SPDX SBOM and SLSA
+                           provenance bundles, verified by signature.
   --require-github-attestation
                            Verify GitHub artifact provenance for the digest.
   --attestation-repository OWNER/REPO
@@ -123,12 +131,16 @@ if "$require_github_attestation" && [[ -z "$attestation_repository" ]]; then
   echo "--require-github-attestation needs --attestation-repository" >&2
   exit 2
 fi
+if "$require_attestations" && [[ -z "$attestation_repository" ]]; then
+  echo "--require-attestations needs --attestation-repository" >&2
+  exit 2
+fi
 
 audit_commands=(jq skopeo)
 if ! "$verify_base_evidence"; then
   audit_commands=("$engine" "${audit_commands[@]}")
 fi
-if "$verify_base_evidence" || "$require_github_attestation"; then
+if "$verify_base_evidence" || "$require_github_attestation" || "$require_attestations"; then
   audit_commands+=(gh)
 fi
 for command in "${audit_commands[@]}"; do
@@ -205,8 +217,8 @@ engine_arch() {
   esac
 }
 
-# Docker accepts a trackable tag plus an immutable digest. Skopeo requires the
-# equivalent digest-only form, so retain the tag for Docker pulls and remove it
+# Podman accepts a trackable tag plus an immutable digest. Skopeo requires the
+# equivalent digest-only form, so retain the tag for engine pulls and remove it
 # only at the registry-inspection boundary.
 registry_repository() {
   local image="${1%%@*}" leaf
@@ -342,27 +354,51 @@ if "$require_attestations"; then
       exit 1
     }
   require_exact_linux_platforms "$derived_raw" "published review manifest list"
-  attestation_digests="$(
+
+  # The SBOM and the provenance are signed Sigstore bundles attached through
+  # the referrers API, not manifests the builder wrote into its own output.
+  # Verifying signatures is the point: a builder cannot vouch for itself.
+  verify_predicate() {
+    local reference="$1" predicate="$2"
+    gh attestation verify "oci://${reference}" \
+      --repo "$attestation_repository" \
+      --bundle-from-oci \
+      --predicate-type "$predicate" >/dev/null 2>&1
+  }
+
+  if verify_predicate "$(registry_reference "$derived_image")" "$slsa_provenance_predicate"; then
+    append ""
+    append "- Index attestation: verified \`${slsa_provenance_predicate}\` for the published index."
+  else
+    error "published index is missing a verifiable SLSA provenance attestation"
+  fi
+
+  # An SBOM describes one root filesystem, so each platform carries its own,
+  # produced by the job that built that platform. An index-wide SBOM would be
+  # one architecture's inventory presented as both.
+  while IFS=$'\t' read -r platform digest; do
+    [[ -n "$platform" ]] || continue
+    platform_verified=true
+    verify_predicate "${derived_repository}@${digest}" "$spdx_predicate" || {
+      error "published linux/${platform} image is missing a verifiable SPDX SBOM attestation"
+      platform_verified=false
+    }
+    verify_predicate "${derived_repository}@${digest}" "$slsa_provenance_predicate" || {
+      error "published linux/${platform} image is missing a verifiable SLSA provenance attestation"
+      platform_verified=false
+    }
+    if "$platform_verified"; then
+      append "- linux/${platform} attestations: verified SPDX SBOM and SLSA provenance."
+    else
+      append "- linux/${platform} attestations: **missing or unverifiable**."
+    fi
+  done < <(
     jq -r '
       .manifests[]? |
-      select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") |
-      .digest
+      select(.platform.os == "linux") |
+      [.platform.architecture, .digest] | @tsv
     ' <<<"$derived_raw"
-  )"
-  [[ -n "$attestation_digests" ]] ||
-    error "published derived image has no OCI attestation manifests"
-  attestation_predicates=""
-  while IFS= read -r digest; do
-    [[ -n "$digest" ]] || continue
-    attestation_predicates+="$(
-      skopeo inspect --raw "docker://${derived_repository}@${digest}" |
-        jq -r '.layers[]?.annotations["in-toto.io/predicate-type"] // empty'
-    )"$'\n'
-  done <<<"$attestation_digests"
-  grep -qi 'spdx' <<<"$attestation_predicates" ||
-    error "published derived image is missing an SPDX SBOM attestation"
-  grep -qi 'slsa.*provenance' <<<"$attestation_predicates" ||
-    error "published derived image is missing a SLSA provenance attestation"
+  )
 fi
 
 if "$require_github_attestation"; then

@@ -680,18 +680,21 @@ silently changing an image. Use an immutable contributor image digest or
 Every published contributor digest carries review-specific OCI title,
 description, project URL/source, revision, version, creation time, license,
 and exact FSDK base name/digest metadata in both platform labels and manifest
-annotations. Publishing produces maximal BuildKit provenance and an SBOM, then
-adds a GitHub artifact attestation for that exact digest. CI verifies the FSDK
-input's GitHub attestation and its linux/amd64+linux/arm64 manifest before a
-build; after publication it verifies both review attestations, labels,
-annotations, subject digest, and exactly those two platforms.
+annotations. Publishing attaches a signed SLSA provenance bundle and a signed
+SPDX SBOM to the published index digest, verifiable with `gh attestation
+verify`. CI verifies the FSDK input's GitHub attestation and its
+linux/amd64+linux/arm64 manifest before a build; after publication it verifies
+both review attestations, labels, annotations, subject digest, and exactly
+those two platforms.
 
-Before `:stable` advances, `publish-compat-image.yml` runs the native
-`arm64-runtime` job on GitHub's `ubuntu-24.04-arm` runner. It proves the host,
-Docker engine, and container architecture, builds an immutable arm64 smoke
-image from the same resolved Goose identities as the final publish, and runs
-the existing base and derived image audits. The generated arm64 audit report in
-the GitHub Actions step summary is the native acceptance artifact; local amd64
+The image is built with podman and buildah, the same engines that run it, and
+each architecture is built by a runner of that architecture: `ubuntu-24.04`
+for amd64 and `ubuntu-24.04-arm` for arm64. Each build job proves its host,
+podman engine, and container architecture, runs the shipped runtime, and audits
+the image it just pushed. The published `:stable` is an OCI index assembled by
+buildah from those two native digests, so no shipped layer is ever produced
+under emulation. The generated per-architecture audit reports in the GitHub
+Actions step summary are the acceptance artifact; local single-architecture
 validation cannot supply that evidence.
 
 The pinned Hive runtime preserves an existing `~/.config/goose/config.yaml`.
@@ -785,16 +788,16 @@ pre-commit run --all-files
 ```
 
 `tests/image-audit.sh` inspects a real image, so it needs a container engine
-and network access. It defaults to `docker`; on a podman host set
-`CONTAINER_ENGINE=podman`. Use `--verify-base-evidence` to check the pinned
+and network access. It uses `podman`; `CONTAINER_ENGINE` names another one.
+Use `--verify-base-evidence` to check the pinned
 FSDK input alone, or `--derived <image>` to audit a build. The report records
 each platform's runtime evidence as native or unavailable — never QEMU —
 and `--report image-audit-report.md` writes it to a git-ignored file. Native
-arm64 acceptance comes from the `arm64-runtime` job in
+per-architecture acceptance comes from the matrix `build` job in
 `.github/workflows/publish-compat-image.yml` and its generated step summary:
 
 ```bash
-CONTAINER_ENGINE=podman bash tests/image-audit.sh \
+bash tests/image-audit.sh \
   --derived "ghcr.io/projectbluefin/review:sha-$(git rev-parse HEAD)"
 ```
 

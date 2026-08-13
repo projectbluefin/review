@@ -167,8 +167,8 @@ pre-commit run --all-files
 present, `python3 -m venv` otherwise) and reuses it until the lock changes.
 `BLUEFIN_REVIEW_TUI_VENV` points it elsewhere.
 
-`tests/image-audit.sh` needs a container engine and network. It defaults to
-`docker`; on a podman host pass `CONTAINER_ENGINE=podman`. Check the pinned
+`tests/image-audit.sh` needs a container engine and network. It uses `podman`;
+`CONTAINER_ENGINE` names another one. Check the pinned
 FSDK input alone with `--verify-base-evidence`; audit a built or published
 image with `--derived <image>`. The report always records both platform slots
 as native or unavailable, and `--report image-audit-report.md` writes the

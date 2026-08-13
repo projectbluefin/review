@@ -181,18 +181,18 @@ fix.
     a QEMU substitute (native arm64 runtime measurement is #77). `--report
     FILE` writes the Markdown report to a file; reports are generated output
     and stay out of git (`image-audit-report.md` is ignored).
-    Publishing requires BuildKit `provenance: mode=max` and `sbom: true`, a
-    GitHub artifact attestation for the pushed digest, and post-publish
-    verification of both platforms, OCI labels/annotations, both BuildKit
-    attestations, and the GitHub attestation. Never call QEMU runtime proof
-    native.
-    The publish workflow's `arm64-runtime` job runs on GitHub's
-    `ubuntu-24.04-arm` runner, proves the host, Docker engine, and container
-    architecture, builds an immutable arm64 smoke image from the shared Goose
-    identities, and runs the base and derived audit modes. Its generated report
-    in the GitHub Actions step summary is the native acceptance artifact.
-    The `publish` job needs that native job before it can move `:stable`; the
-    existing amd64 smoke and validation remain separate evidence.
+    Publishing requires a signed SLSA provenance bundle and a signed SPDX SBOM
+    attached to the published index digest, a GitHub artifact attestation for
+    that digest, and post-publish verification of both platforms, OCI
+    labels/annotations, both signed bundles, and the GitHub attestation. Never
+    call QEMU runtime proof native.
+    The publish workflow builds each architecture on a runner of that
+    architecture — `ubuntu-24.04` and `ubuntu-24.04-arm` — with podman, proving
+    the host, podman engine, and container architecture in each job before it
+    pushes and audits its own image. Those generated reports in the GitHub
+    Actions step summary are the acceptance artifact. The `publish` job
+    assembles an OCI index from the two native digests with buildah and cannot
+    move `:stable` without both.
 12. Measure compressed manifest, unpacked filesystem, layer/directory deltas,
     cold/warm builds, and native amd64/arm64 runtime behavior before and after
     each composition change. Deleting inherited files in a later layer does not
@@ -337,17 +337,21 @@ resolves under `/usr/local/bin` — the shape a reintroduced shim would take.
   published `:stable`. Copy the whole set with a glob and prove each module by
   importing it.
 
-- A `COPY --chmod=0644` that creates its own parent directory. BuildKit gives
-  every implicitly-created parent the copied file's mode, so `COPY
-  --chmod=0644 image/tui/requirements.lock /opt/bluefin/tui/requirements.lock`
-  created `/opt/bluefin` and `/opt/bluefin/tui` with no execute bit. Root
-  ignores that for the rest of the build and every layer passed; the `dev`
-  user the image runs as could not traverse into `/opt/bluefin/goose`, and
-  Goose died at startup with `Failed to read config file: Permission denied`.
-  Rootless podman does not reproduce it — the published image is built by
-  BuildKit, so verify against the real builder. Assert the mode in a layer
-  (`find /opt/bluefin \( -type d ! -perm -o=rx \) ...`), never in a string
-  match on the Containerfile alone.
+- Reaching for BuildKit, `docker buildx`, `docker/build-push-action`, or QEMU
+  cross-building. The toolchain is podman, buildah and skopeo — the engines
+  that actually run this image — and each architecture is built by a runner of
+  that architecture. Building with an engine no contributor runs hides
+  engine-specific defects: BuildKit gives every parent directory a `COPY
+  --chmod` creates the copied file's mode, so `COPY --chmod=0644
+  image/tui/requirements.lock /opt/bluefin/tui/requirements.lock` created
+  `/opt/bluefin` and `/opt/bluefin/tui` with no execute bit. Root ignored it
+  for the rest of the build and every layer passed; the unprivileged `dev`
+  user could not traverse into `/opt/bluefin/goose`, and Goose died at startup
+  with `Failed to read config file: Permission denied`. Podman creates those
+  parents `0755`, so no contributor could reproduce the published image's
+  defect locally. The mode is now asserted in a layer of its own (`find
+  /opt/bluefin \( -type d ! -perm -o=rx \) ...`), never by a string match on
+  the Containerfile.
 
 ## Verification
 
@@ -359,6 +363,7 @@ bash tests/image-audit.sh --verify-base-evidence
 grep -Fq "$(sed -n 's/^hive_commit := "\(.*\)"$/\1/p' justfile)" README.md
 ref="ghcr.io/projectbluefin/review:sha-$(git rev-parse HEAD)"
 GH_TOKEN="$(gh auth token)" podman build \
+  --format oci \
   --secret id=github_token,env=GH_TOKEN \
   --build-arg GOOSE_REFRESH="$(date +%s)" \
   -f image/Containerfile -t "$ref" .
@@ -375,4 +380,4 @@ time against the real base and the build fails if either regresses.
 - Hive `v2`: `bin/contributor-agent.sh`, `bin/contributor-relay.sh`,
   `config/backends.conf`; Goose `canary` assets; Context7 `/npm/cli`,
   `/websites/podman_io_en`, `/websites/cli_github_manual`,
-  `/websites/github_en_actions`, `/docker/docs`, `/docker/build-push-action`.
+  `/websites/github_en_actions`, `/containers/buildah`, `/containers/skopeo`.

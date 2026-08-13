@@ -552,7 +552,7 @@ require .github/workflows/validate.yml \
   'goose-aarch64-unknown-linux-musl.tar.gz' \
   'GOOSE_X86_64_SHA256="${{ steps.goose.outputs.x86_64_sha256 }}"' \
   'GOOSE_AARCH64_SHA256="${{ steps.goose.outputs.aarch64_sha256 }}"' \
-  '--secret id=github_token,env=GITHUB_TOKEN' \
+  '--secret id=github_token,src="$secret_file"' \
   '-f image/Containerfile -t review:test .' \
   '["/usr/local/bin/review-entrypoint"]' \
   'Import shipped TUI module set as runtime user' \
@@ -562,28 +562,39 @@ require .github/workflows/validate.yml \
   "import sys; sys.path.insert(0, '/opt/bluefin/tui'); import bluefin_review_tui" \
   'bash tests/image-audit.sh --derived review:test'
 
+# The container toolchain is podman/buildah/skopeo everywhere, including in
+# CI: an image built by a different engine than the one contributors run is
+# how a builder-specific defect reaches a session unseen.
+forbid .github/workflows/validate.yml \
+  'docker build' \
+  'docker run' \
+  'docker inspect' \
+  'docker/build-push-action' \
+  'docker/setup-buildx-action'
+
 # shellcheck disable=SC2016 # Literal workflow text, not shell expansion.
 require .github/workflows/publish-compat-image.yml \
   'attestations: write' \
   'id-token: write' \
   'IMAGE: ghcr.io/projectbluefin/review' \
-  'ARM64_IMAGE: ghcr.io/${{ github.repository }}' \
-  'Derive review image metadata' \
-  'tags: review:smoke' \
+  'BUILDAH_IMAGE: quay.io/buildah/stable:v1.43@sha256:' \
+  'Resolve image tags and OCI metadata' \
+  'tag review:smoke' \
   '["/usr/local/bin/review-entrypoint"]' \
-  'secrets: |' \
-  "github_token=\${{ secrets.GITHUB_TOKEN }}" \
+  '--secret id=github_token,src="$secret_file"' \
   'Resolve official Goose canary asset identities' \
-  "GOOSE_X86_64_SHA256=\${{ needs.resolve-goose.outputs.x86_64_sha256 }}" \
-  "GOOSE_AARCH64_SHA256=\${{ needs.resolve-goose.outputs.aarch64_sha256 }}" \
+  'GOOSE_X86_64_SHA256="$GOOSE_X86_64_SHA256"' \
+  'GOOSE_AARCH64_SHA256="$GOOSE_AARCH64_SHA256"' \
   'org.opencontainers.image.title=Bluefin review contributor' \
   'org.opencontainers.image.description=Foreground contributor runtime for projectbluefin/review.' \
-  'org.opencontainers.image.base.name=${{ steps.metadata.outputs.base_name }}' \
-  'org.opencontainers.image.base.digest=${{ steps.metadata.outputs.base_digest }}' \
-  'annotations: |' \
-  'index:org.opencontainers.image.title=Bluefin review contributor' \
-  'provenance: mode=max' \
-  'sbom: true' \
+  'org.opencontainers.image.base.name=${BASE_NAME}' \
+  'org.opencontainers.image.base.digest=${BASE_DIGEST}' \
+  'buildah manifest annotate --index' \
+  'buildah manifest push' \
+  '--format oci' \
+  'anchore/sbom-action@' \
+  'format: spdx-json' \
+  'sbom-path: review-sbom-${{ matrix.arch }}.spdx.json' \
   'actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6' \
   'subject-digest: ${{ steps.publish.outputs.digest }}' \
   'push-to-registry: true' \
@@ -591,36 +602,51 @@ require .github/workflows/publish-compat-image.yml \
   '--require-github-attestation' \
   '--attestation-repository "${GITHUB_REPOSITORY}"'
 
-# Native arm64 runtime evidence is the gate for the same-revision stable
-# publication. The workflow must prove the host, engine, and built container
-# architecture before the existing audit accepts any runtime evidence.
+# Every published architecture is built by a runner of that architecture, and
+# each proves its own host, engine, and container before the audit accepts any
+# runtime evidence from it. The index is assembled from those two digests, so
+# no shipped layer is ever produced under emulation.
 # shellcheck disable=SC2016 # Literal workflow text, not shell expansion.
 require .github/workflows/publish-compat-image.yml \
   'resolve-goose:' \
-  'arm64-runtime:' \
-  'needs: [resolve-goose]' \
-  'runs-on: ubuntu-24.04-arm' \
-  'Prove native arm64 host and engine' \
+  'metadata:' \
+  'build:' \
+  'needs: [resolve-goose, metadata]' \
+  '- arch: amd64' \
+  'runner: ubuntu-24.04' \
+  '- arch: arm64' \
+  'runner: ubuntu-24.04-arm' \
+  'Prove the native host and record the container toolchain' \
   'host_arch="$(uname -m)"' \
-  'engine_arch="$(docker info --format' \
-  'Build native arm64 smoke image' \
-  'platforms: linux/arm64' \
-  'push: true' \
-  'tags: ${{ env.ARM64_IMAGE }}:arm64-smoke-' \
-  'DERIVED_IMAGE: ${{ env.ARM64_IMAGE }}@${{ steps.arm64_build.outputs.digest }}' \
-  'GOOSE_X86_64_SHA256=${{ needs.resolve-goose.outputs.x86_64_sha256 }}' \
-  'GOOSE_AARCH64_SHA256=${{ needs.resolve-goose.outputs.aarch64_sha256 }}' \
-  'docker image inspect "$DERIVED_IMAGE"' \
-  'docker run --rm --entrypoint /usr/bin/uname "$DERIVED_IMAGE" -m' \
-  'cat "$RUNNER_TEMP/review-image-audit-arm64.md" >> "$GITHUB_STEP_SUMMARY"' \
+  "engine_arch=\"\$(podman info --format '{{.Host.Arch}}')\"" \
+  'test "$engine_arch" = "$EXPECTED_ARCH"' \
+  'podman --version' \
+  'buildah --version' \
+  'skopeo --version' \
+  'container_arch="$(podman run --rm --entrypoint /usr/bin/uname review:smoke -m)"' \
+  'podman push --format oci' \
+  'staging="ghcr.io/${GITHUB_REPOSITORY,,}"' \
+  'STAGING="ghcr.io/${GITHUB_REPOSITORY,,}"' \
+  'name: review-digest-${{ matrix.arch }}' \
+  'pattern: review-digest-*' \
+  'DERIVED_IMAGE: ${{ steps.push.outputs.image }}@${{ steps.push.outputs.digest }}' \
+  'cat "$RUNNER_TEMP/review-image-audit-${ARCH}.md" >> "$GITHUB_STEP_SUMMARY"' \
   'bash tests/image-audit.sh --verify-base-evidence' \
   'bash tests/image-audit.sh --derived "$DERIVED_IMAGE"' \
-  '--report "$RUNNER_TEMP/review-image-audit-arm64.md"' \
+  '--report "$RUNNER_TEMP/review-image-audit-${ARCH}.md"' \
   "if: github.repository == 'projectbluefin/review'" \
-  'needs: [arm64-runtime, resolve-goose]'
+  'needs: [build, metadata]'
 
+# BuildKit is not the engine this project runs. Its parent-directory handling
+# for 'COPY --chmod' differs from buildah's, so an image built with it can
+# carry a defect no contributor can reproduce with podman.
 forbid .github/workflows/publish-compat-image.yml \
   'docker/setup-qemu-action' \
+  'docker/setup-buildx-action' \
+  'docker/build-push-action' \
+  'docker/login-action' \
+  'buildx' \
+  'provenance: mode=max' \
   '--privileged' \
   'docker run --privileged'
 

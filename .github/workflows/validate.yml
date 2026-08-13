@@ -19,11 +19,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install image audit tooling
+      - name: Record the container toolchain
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install --yes skopeo
+          # Runner images are mutable. A missing tool fails here, with its own
+          # name in the log, rather than inside the build or audit that needed
+          # it.
+          podman --version
+          buildah --version
+          skopeo --version
 
       - name: Verify pinned FSDK input provenance and native platforms
         env:
@@ -161,28 +165,37 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          docker build \
+          # The runner's podman predates '--secret id=NAME,env=VAR', so the
+          # token reaches the build as a file only this job can read.
+          secret_file="$(mktemp)"
+          trap 'rm -f "$secret_file"' EXIT
+          chmod 0600 "$secret_file"
+          printf '%s' "$GITHUB_TOKEN" > "$secret_file"
+          podman build \
+            --format oci \
             --build-arg GOOSE_X86_64_SHA256="${{ steps.goose.outputs.x86_64_sha256 }}" \
             --build-arg GOOSE_AARCH64_SHA256="${{ steps.goose.outputs.aarch64_sha256 }}" \
-            --secret id=github_token,env=GITHUB_TOKEN \
+            --secret id=github_token,src="$secret_file" \
             -f image/Containerfile -t review:test .
-          test "$(docker inspect review:test --format '{{.Config.User}}')" = "dev"
-          test "$(docker inspect review:test --format '{{json .Config.Entrypoint}}')" = '["/usr/local/bin/review-entrypoint"]'
+          test "$(podman image inspect review:test --format '{{.Config.User}}')" = "dev"
+          test "$(podman image inspect review:test --format '{{json .Config.Entrypoint}}')" = '["/usr/local/bin/review-entrypoint"]'
           # /home/dev, not /workspace: there is no workspace mount any more —
           # the agent clones what it needs inside the disposable container, and
           # Hive's config lives under the image's home.
-          test "$(docker inspect review:test --format '{{.Config.WorkingDir}}')" = "/home/dev"
+          test "$(podman image inspect review:test --format '{{.Config.WorkingDir}}')" = "/home/dev"
+          # OCI, not Docker schema 2: the shipped format is what publish emits.
+          test "$(podman image inspect review:test --format '{{.ManifestType}}')" = "application/vnd.oci.image.manifest.v1+json"
 
       - name: Import shipped TUI module set as runtime user
         run: |
           set -euo pipefail
-          docker run --rm \
+          podman run --rm \
             --entrypoint /usr/local/bin/codex \
             review:test --version
-          docker run --rm \
+          podman run --rm \
             --entrypoint /usr/local/bin/codex-code-mode-host \
             review:test --help
-          docker run --rm \
+          podman run --rm \
             --entrypoint /opt/bluefin/tui/.venv/bin/python \
             review:test \
             -c "import sys; sys.path.insert(0, '/opt/bluefin/tui'); import bluefin_review_tui"
