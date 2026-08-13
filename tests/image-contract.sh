@@ -215,7 +215,8 @@ require image/Containerfile \
   'https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/ripgrep-${RIPGREP_VERSION}-${rg_arch}.tar.gz' \
   'rg_arch=x86_64-unknown-linux-musl;' \
   'rg_arch=aarch64-unknown-linux-musl;' \
-  'for dir in /usr/bin /usr/sbin /bin /sbin /usr/local/bin; do' \
+  'for dir in /usr/bin /usr/sbin /bin /sbin /usr/local/bin /usr/local/sbin; do' \
+  'if command -v rg >/dev/null 2>&1; then' \
   'delete this layer instead of shadowing it' \
   'for canonical in grep find cat ls; do' \
   'rg --version;'
@@ -504,7 +505,7 @@ require image/config/local-agent-policy.md \
   'gh run watch' \
   'that is an evidenced finding'
 # The policy must state the image's own tooling delta, so the agent knows rg
-# and shellcheck are there to use.
+# is there to use.
 # shellcheck disable=SC2016 # Literal policy text, not shell expansion.
 require image/config/local-agent-policy.md \
   'The image adds `rg` on top' \
@@ -512,8 +513,8 @@ require image/config/local-agent-policy.md \
 # The policy tells the agent what the runtime lacks, so a tool the base
 # actually ships must never be named as absent: that steers every task into a
 # hand-rolled substitute. These are present at the pinned base digest.
-# The image installs `rg` and `shellcheck`, so the policy must not send the
-# agent to a substitute for either.
+# The image installs `rg`, so the policy must not send the agent to a
+# substitute for it.
 # shellcheck disable=SC2016 # Literal policy text, not shell expansion.
 forbid image/config/local-agent-policy.md \
   '`which`, `awk`' \

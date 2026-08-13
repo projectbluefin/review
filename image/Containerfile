@@ -173,9 +173,16 @@ ARG RIPGREP_X86_64_SHA256
 ARG RIPGREP_AARCH64_SHA256
 RUN set -eu; \
     # The anti-duplication contract: if the base ever ships rg, delete this
-    # layer rather than shadow it. Probe the filesystem, not just PATH -- a
-    # base copy outside root's build PATH is still a duplicate at runtime.
-    for dir in /usr/bin /usr/sbin /bin /sbin /usr/local/bin; do \
+    # layer rather than shadow it. Probe PATH *and* a fixed directory list.
+    # Neither alone is enough: PATH here is root's build PATH, which misses a
+    # copy the runtime user would still see, while the directory list misses
+    # PATH entries outside it -- /opt/node/bin above is prepended to PATH, so
+    # an rg there would beat /usr/local/bin/rg at runtime.
+    if command -v rg >/dev/null 2>&1; then \
+      echo "rg is already provided at $(command -v rg); delete this layer instead of shadowing it" >&2; \
+      exit 1; \
+    fi; \
+    for dir in /usr/bin /usr/sbin /bin /sbin /usr/local/bin /usr/local/sbin; do \
       if [ -e "$dir/rg" ]; then \
         echo "rg is already provided by the base at $dir/rg; delete this layer instead of shadowing it" >&2; \
         exit 1; \

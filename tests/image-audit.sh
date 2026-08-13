@@ -622,8 +622,14 @@ derived_forbidden="$package_managers"
 # Base commands Hive's relay calls directly and review must never shim over.
 # image/Containerfile proves their semantics at build time against the real
 # base; this checks the finished runtime still resolves them from it. grep,
-# cat and ls join the list with rg: a search tool in /usr/local/bin is exactly
-# the shape that let the old find/cmp shims shadow the base's GNU copies.
+# cat and ls are here because of rg: a search tool in /usr/local/bin is
+# exactly the shape that let the old find/cmp shims shadow the base's GNU
+# copies. rg itself must never join this list -- /usr/local/bin is where it
+# legitimately lives.
+#
+# Every name here must also appear in derived_required: runtime_inventory
+# only emits a `path:` line for a required command, and a name without one
+# reports as missing from the runtime rather than as unshadowed.
 derived_unshadowed="find cmp diff grep cat ls"
 
 append ""
