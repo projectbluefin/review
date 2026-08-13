@@ -16,6 +16,9 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
+  # 'artifact-metadata: write' lets actions/attest persist its storage record;
+  # without it every attestation step warns and the record is dropped.
+  artifact-metadata: write
   attestations: write
   contents: read
   id-token: write
