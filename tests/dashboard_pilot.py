@@ -1278,6 +1278,50 @@ async def main() -> int:
     finally:
         tui.CodexHarness.draft = original_draft
 
+    # Missing Codex must degrade generation without touching manual prose.
+    original_probe = tui.CodexHarness.probe
+    original_unavailable_draft = tui.CodexHarness.draft
+
+    def unavailable_probe(cls):
+        return tui.Availability.UNAVAILABLE_BINARY
+
+    def unavailable_draft(self, request):
+        raise FileNotFoundError("codex")
+
+    tui.CodexHarness.probe = classmethod(unavailable_probe)
+    tui.CodexHarness.draft = unavailable_draft
+    try:
+        app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for _ in range(200):
+                if app.stops:
+                    break
+                await pilot.pause(0.05)
+            stop = app.stops[0]
+            stop.live.update({"baseRefOid": "a" * 40, "headRefOid": "b" * 40})
+            stop.review_result = tui.ReviewResult(
+                1, "findings", findings=({"severity": "high", "title": "blocker"},),
+                provenance={"repository": "projectbluefin/bluefinctl", "pull_request": 31,
+                            "base_sha": "a" * 40, "head_sha": "b" * 40},
+            )
+            app.leave_review(stop)
+            await pilot.pause()
+            await pilot.press("2")
+            await pilot.pause()
+            editor = app.screen.query_one("#review-body-editor", tui.TextArea)
+            editor.text = "manual maintainer body"
+            app.screen.action_generate()
+            await pilot.pause()
+            check(editor.text == "manual maintainer body",
+                  "unavailable Codex must preserve the manual review body")
+            check(any("unavailable" in notification.message.lower()
+                      for notification in app._notifications),
+                  "unavailable Codex must show a degraded generation message")
+    finally:
+        tui.CodexHarness.probe = original_probe
+        tui.CodexHarness.draft = original_unavailable_draft
+
     # A verdict that is not an approval has to say why.
     app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
     async with app.run_test() as pilot:

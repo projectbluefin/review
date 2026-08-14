@@ -52,7 +52,7 @@ from harness.autopilot import (HarnessOption, Preference, can_remember,
                                choose_option, discover_all, load_preferences,
                                remember_success)
 from review_evidence_manifest import ReviewRequest
-from harness.registry import Availability, DraftRequest, DraftState
+from harness.registry import Availability, DraftRequest, DraftState, HarnessRegistry
 
 QUEUE_URL = os.environ.get(
     "BLUEFIN_REVIEW_QUEUE_URL",
@@ -943,10 +943,13 @@ class ReviewBody(ModalScreen[str | None]):
                 str(self.stop_record.live["baseRefOid"]), str(self.stop_record.live["headRefOid"]),
                 actor="maintainer", tenant="review", generated_at="dashboard",
             )
-            draft = CodexHarness(availability=Availability.READY).draft(
+            adapter = CodexHarness(availability=CodexHarness.probe())
+            registry = HarnessRegistry()
+            registry.register(adapter)
+            draft = registry.require_ready("codex").draft(
                 DraftRequest(request, self.verdict, result, live_review_context(self.stop_record.live))
             )
-        except (KeyError, TypeError, ValueError, RuntimeError) as error:
+        except (KeyError, TypeError, ValueError, RuntimeError, OSError) as error:
             self.notify(f"draft unavailable: {error}", severity="warning")
             return
         if draft.state is not DraftState.COMPLETE or not draft.markdown:
