@@ -61,7 +61,8 @@ Goose, or image build skill documents.
    Hive's `contributor` session.
    `review-queue owner/repo` is the read-only live-repository form; it mounts no Hive or
    host configuration directory and starts the image with the `queue`
-   argument, which the entrypoint dispatches to the maintainer dashboard
+   argument (the launcher maps it to the dashboard's distinct `--live-repo`
+   option; `--repo` remains a static snapshot filter), which the entrypoint dispatches to the maintainer dashboard
    before the Hive config gate. The
    dashboard needs a GitHub token from the first keystroke, so the recipe
    fails without one rather than warning. Leading non-flag arguments are the

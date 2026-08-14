@@ -959,7 +959,7 @@ review-queue *queue_args:
     # The unambiguous repository form follows the existing profile/effort
     # pair. Keep all flag forms byte-for-byte available to the dashboard.
     if [[ $# -gt 0 && "$1" != -* ]]; then
-      set -- --repo "$1" "${@:2}"
+      set -- --live-repo "$1" "${@:2}"
     fi
     [[ "$REVIEW_BACKEND" == codex ]] || resolve_goose_selection
 

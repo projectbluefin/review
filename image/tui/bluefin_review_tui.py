@@ -57,12 +57,12 @@ QUEUE_URL = os.environ.get(
     "BLUEFIN_REVIEW_QUEUE_URL",
     "https://projectbluefin.github.io/review/queue.json",
 )
+PULL_FETCH_LIMIT = os.environ.get("BLUEFIN_REVIEW_PULL_LIMIT", "200")
 TRACE_PATH = os.path.join(
     os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
     "bluefin-review",
     "trace.jsonl",
 )
-PULL_FETCH_LIMIT = os.environ.get("BLUEFIN_REVIEW_PULL_LIMIT", "200")
 MUTATION_TIMEOUT = 60
 HIVE_TIMEOUT = 15
 # The label Hive's governor sweep scans for. It is not defined in most
@@ -295,6 +295,11 @@ def gh(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["gh", *args], capture_output=True, text=True, timeout=timeout
     )
+
+
+def bounded_detail(detail: str) -> str:
+    detail = re.sub(r"[\x00-\x1f\x7f]+", " ", str(detail))
+    return " ".join(detail.split())[:240]
 
 
 def hive_token() -> str:
@@ -532,11 +537,12 @@ class QueueFilters:
 
     action: str = ""
     repository: str = ""
+    live_repository: str = ""
     url: str = QUEUE_URL
 
     @property
     def live(self) -> bool:
-        return bool(self.repository and "/" in self.repository)
+        return bool(self.live_repository)
 
     def wants(self, item: dict) -> bool:
         if self.action and item.get("recommended_action", "") != self.action:
@@ -1617,10 +1623,21 @@ class ReviewDashboard(App):
 
     @work(thread=True, exclusive=True)
     def load_queue(self) -> None:
-        who = gh("api", "user", "--jq", ".login")
-        self.self_login = who.stdout.strip() if who.returncode == 0 else ""
+        try:
+            who = gh("api", "user", "--jq", ".login")
+            identity_detail = (who.stderr or who.stdout).strip()
+        except (OSError, subprocess.TimeoutExpired) as error:
+            who = None
+            identity_detail = str(error)
+        self.self_login = who.stdout.strip() if who and who.returncode == 0 else ""
         if self.filters.live:
-            snapshot = self.load_live_queue(self.filters.repository)
+            if not self.self_login:
+                self.source_state = "auth-failed"
+                self.source_message = bounded_detail(identity_detail or "GitHub identity is unavailable; sign in and retry")
+                self.all_items = self.snapshot_items = []
+                self.call_from_thread(self.apply_filters)
+                return
+            snapshot = self.load_live_queue(self.filters.live_repository)
         else:
             try:
                 with urllib.request.urlopen(self.filters.url, timeout=60) as response:
@@ -1650,45 +1667,53 @@ class ReviewDashboard(App):
     def load_live_queue(self, repository: str) -> dict:
         if not re.fullmatch(r"[^/\s]+/[^/\s]+", repository):
             self.source_state = "malformed"
-            self.source_message = f"invalid repository '{repository}'; use owner/repo"
+            self.source_message = bounded_detail(f"invalid repository '{repository}'; use owner/repo")
             return {"items": []}
-        result = gh(
-            "pr", "list", "--repo", repository, "--state", "open", "--limit",
-            PULL_FETCH_LIMIT, "--json",
-            "number,title,author,state,isDraft,labels,mergeable,mergeStateStatus,"
-            "reviewDecision,statusCheckRollup",
-        )
+        try:
+            result = gh(
+                "api", "--paginate", "--slurp", "--method", "GET",
+                f"repos/{repository}/pulls?state=open&per_page=100",
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            self.source_state = "error"
+            self.source_message = bounded_detail(f"GitHub could not read this repository: {error}")
+            return {"items": []}
         if result.returncode:
-            detail = (result.stderr or result.stdout).strip()
+            detail = bounded_detail((result.stderr or result.stdout).strip())
             lowered = detail.lower()
-            if "not found" in lowered or "could not resolve" in lowered:
-                self.source_state = "missing"
-            elif "authentication" in lowered or "login" in lowered or "permission" in lowered:
+            if ("authentication" in lowered or "login" in lowered
+                    or "permission" in lowered or "forbidden" in lowered
+                    or "not accessible" in lowered):
                 self.source_state = "inaccessible"
+            elif "not found" in lowered or "could not resolve" in lowered:
+                self.source_state = "missing"
             else:
                 self.source_state = "error"
             self.source_message = detail or "GitHub could not read this repository"
             return {"items": []}
         try:
-            pulls = json.loads(result.stdout)
-            if not isinstance(pulls, list):
-                raise ValueError("GitHub returned a non-list pull-request result")
+            pages = json.loads(result.stdout)
+            if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+                raise ValueError("GitHub returned malformed pull-request pages")
+            pulls = [pull for page in pages for pull in page]
+            if any(not isinstance(pull, dict) for pull in pulls):
+                raise ValueError("GitHub returned a malformed pull-request entry")
         except (json.JSONDecodeError, ValueError) as error:
-            self.source_state = "error"
-            self.source_message = f"malformed GitHub response: {error}"
+            self.source_state = "malformed"
+            self.source_message = bounded_detail(f"malformed GitHub response: {error}")
             return {"items": []}
         items = []
         for pull in pulls:
-            author = (pull.get("author") or {}).get("login", "")
+            author = (pull.get("user") or pull.get("author") or {}).get("login", "")
             items.append({
                 "repository": repository,
                 "number": pull.get("number"),
                 "recommended_action": "review",
                 "title": pull.get("title", ""),
                 "author": author,
-                "mergeable_state": str(pull.get("mergeable", "")).lower(),
-                "check_state": effective_check_state("unknown", pull),
-                "review_state": str(pull.get("reviewDecision", "")).lower(),
+                "mergeable_state": str(pull.get("mergeable", "") or "").lower(),
+                "check_state": "unknown",
+                "review_state": str(pull.get("reviewDecision", "") or "").lower(),
             })
         self.source_state = "empty" if not items else "ready"
         self.source_message = ""
@@ -1795,7 +1820,7 @@ class ReviewDashboard(App):
         self.query_one("#status-bar", Static).update(
             f" Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
             f"| {('source ' + self.source_state + (' — ' + self.source_message if self.source_message else ''))} "
-            f"| {('snapshot ' + freshness) if not self.filters.live else 'repository ' + self.filters.repository} | as {self.self_login or 'unknown'} "
+            f"| {('snapshot ' + freshness) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
             f"| batch: {selected}{stuck}{agents} | Hive: {self.hive_state or 'asking…'}"
         )
 
@@ -2864,11 +2889,13 @@ def main() -> None:
         default="",
         help="only this repository (short name or owner/repo)",
     )
+    parser.add_argument("--live-repo", default="", help="read open pull requests from owner/repo")
     parser.add_argument("--url", default=QUEUE_URL, help="read the queue from elsewhere")
     args = parser.parse_args()
     filters = QueueFilters(
         action="" if args.all else args.action,
         repository=args.repo,
+        live_repository=args.live_repo,
         url=args.url,
     )
     ReviewDashboard(filters).run()
