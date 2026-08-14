@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -98,6 +99,11 @@ async def main() -> int:
         f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
         'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
         'if [ "$1 $2" = "pr diff" ]; then\n'
+        '  if [ "${DIFF_MODE-}" = "slow-old" ]; then sleep 0.2; printf "%s" "OLD-DIFF"; exit 0; fi\n'
+        '  if [ "${DIFF_MODE-}" = "fast-new" ]; then printf "%s" "NEW-DIFF"; exit 0; fi\n'
+        '  if [ "${DIFF_MODE-}" = "oversized" ]; then head -c 400010 /dev/zero | tr "\\0" x; exit 0; fi\n'
+        '  if [ "${DIFF_MODE-}" = "empty" ]; then exit 0; fi\n'
+        '  if [ "${DIFF_MODE-}" = "error" ]; then printf "%s\\n" "terminal diff failure" >&2; exit 7; fi\n'
         '  printf "%s\\n" "diff --git a/x b/x" "--- a/x" "+++ b/x" "@@ -1 +1 @@" "-old" "+new"\n'
         "  exit 0\n"
         "fi\n"
@@ -1040,11 +1046,14 @@ async def main() -> int:
                 screen.query("#diff-scroll"),
                 "the diff must live in a scrollable container",
             )
-            # An oversized diff is paginated, not cut, and its terminal page
-            # remains reachable from the real Textual screen.
-            oversized = "x" * (tui.DiffScreen.MAX_CHARS + 10)
-            screen.render_diff(oversized)
-            await pilot.pause()
+            # Every fetch state must travel through load_diff(), including the
+            # oversized stdout and terminal error paths production uses.
+            os.environ["DIFF_MODE"] = "oversized"
+            screen.load_diff()
+            for _ in range(400):
+                if screen.page_count == 2:
+                    break
+                await pilot.pause(0.05)
             check(
                 screen.page_count == 2 and screen.page_index == 0,
                 "an oversized diff must expose bounded pages",
@@ -1054,14 +1063,49 @@ async def main() -> int:
             check(
                 screen.page_index == 1
                 and screen.rendered is not None
-                and screen.rendered.code.endswith("x" * 10),
+                and "x" * 10 in screen.rendered.code[-20:],
                 "the complete oversized diff must be reachable on its final page",
             )
-            screen.render_diff_error("GitHub unavailable")
+            await pilot.press("]")
+            check(screen.page_index == 1, "last-page navigation must be a no-op")
+            await pilot.press("[")
+            await pilot.press("[")
+            check(screen.page_index == 0, "first-page navigation must be a no-op")
+            os.environ["DIFF_MODE"] = "slow-old"
+            screen.load_diff()
+            os.environ["DIFF_MODE"] = "fast-new"
+            screen.load_diff()
+            for _ in range(200):
+                if screen.rendered is not None and "NEW-DIFF" in screen.rendered.code:
+                    break
+                await pilot.pause(0.05)
+            check(
+                screen.rendered is not None
+                and "NEW-DIFF" in screen.rendered.code
+                and "OLD-DIFF" not in screen.rendered.code,
+                "a stale diff response must not overwrite the current selection",
+            )
+            os.environ["DIFF_MODE"] = "empty"
+            screen.load_diff()
+            for _ in range(200):
+                if screen.state == "success" and not screen.pages:
+                    break
+                await pilot.pause(0.05)
+            check(
+                screen.state == "success"
+                and "(empty diff)" in str(screen.query_one("#diff-body", tui.Static).render()),
+                "an empty diff must be a successful empty state",
+            )
+            os.environ["DIFF_MODE"] = "error"
+            screen.load_diff()
+            for _ in range(200):
+                if screen.state == "error":
+                    break
+                await pilot.pause(0.05)
             await pilot.pause()
             check(
                 screen.state == "error"
-                and "GitHub unavailable" in str(screen.query_one("#diff-body", tui.Static).render()),
+                and "terminal diff failure" in str(screen.query_one("#diff-body", tui.Static).render()),
                 "a diff fetch error must be distinct from a loaded diff",
             )
             await pilot.press("escape")
@@ -1074,6 +1118,7 @@ async def main() -> int:
             "pr diff" in gh_log.read_text(),
             "the diff screen must actually fetch the diff",
         )
+    os.environ.pop("DIFF_MODE", None)
     gh_log.write_text("")
 
     # ── everything identifying a pull request is a hyperlink ─────────────
@@ -1552,9 +1597,12 @@ async def main() -> int:
         'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
         'if [ "$1 $2" = "pr list" ]; then echo "[]"; exit 0; fi\n'
         'if [ "$1 $2" = "pr merge" ]; then\n'
-        '  echo "Pull request is not mergeable: the base branch is out of date" >&2\n'
+        '  printf "Pull request is not mergeable: the base branch is out of date %s\\n" "$(printf "e%.0s" {1..300})" >&2\n'
         "  exit 1\n"
         "fi\n"
+        'if [ "$1 $2" = "pr review" ]; then printf "approval failed %s\\n" "$(printf "e%.0s" {1..300})" >&2; exit 1; fi\n'
+        'if [ "$1 $2" = "pr edit" ]; then printf "queue label failed %s\\n" "$(printf "e%.0s" {1..300})" >&2; exit 1; fi\n'
+        'if [ "$1 $2" = "pr update-branch" ]; then printf "update failed %s\\n" "$(printf "e%.0s" {1..300})" >&2; exit 1; fi\n'
         "exit 0\n",
     )
     app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
@@ -1622,9 +1670,14 @@ async def main() -> int:
             check(
                 "gh pr merge" in recovery_text
                 and "Pull request is not mergeable" in recovery_text
+                and len(app.stops[0].failure) > 200
+                and app.stops[0].failure_command == shlex.join(
+                    ["gh", "pr", "merge", str(app.stops[0].number),
+                     "--repo", app.stops[0].repository, "--squash"]
+                )
                 and "checks" in recovery_text
                 and "branch" in recovery_text,
-                "merge recovery must keep exact command, error, checks, and branch evidence visible",
+                "merge recovery must keep complete error and exact argv with checks and branch evidence",
             )
             # Choosing "update the branch" retries with the update in front.
             await pilot.press("1")
@@ -1657,6 +1710,62 @@ async def main() -> int:
             gh_log.read_text().count("pr merge") >= 1,
             "a batch merge must attempt the pull requests it was given",
         )
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        stop = app.stops[0]
+        stop.live = {
+            "isDraft": False,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "statusCheckRollup": [{"conclusion": "SUCCESS"}],
+        }
+        app.self_login = "castrojo"
+        app.queue_label_exists[stop.repository] = True
+        app._queue_automerge(stop)
+        await pilot.pause()
+        check(isinstance(app.screen, tui.ConfirmMutation), "approve/queue must use the mutation gate")
+        if isinstance(app.screen, tui.ConfirmMutation):
+            gate = app.screen
+            await pilot.press(*gate.expected)
+            await pilot.press("enter")
+            for _ in range(300):
+                if len(stop.failure) > 200:
+                    break
+                await pilot.pause(0.05)
+            details = str(app.query_one("#details", tui.Static).render())
+            check(
+                len(stop.failure) > 200
+                and "--body 'Approved by @castrojo for Hive auto-merge on green CI.'" in stop.failure_command
+                and "LAST MUTATION FAILURE" in details
+                and stop.failure in details,
+                "failed approve/queue must durably show complete stderr and quoted argv",
+            )
+            stop.failure = ""
+            app.mutate_all(
+                stop,
+                [["gh", "pr", "update-branch", str(stop.number), "--repo", stop.repository]],
+            )
+            await pilot.pause()
+            if isinstance(app.screen, tui.ConfirmMutation):
+                gate = app.screen
+                await pilot.press(*gate.expected)
+                await pilot.press("enter")
+            for _ in range(300):
+                if len(stop.failure) > 200:
+                    break
+                await pilot.pause(0.05)
+            details = str(app.query_one("#details", tui.Static).render())
+            check(
+                len(stop.failure) > 200
+                and stop.failure_command.startswith("gh pr update-branch ")
+                and stop.failure in details,
+                "failed update must retain complete stderr in the durable detail state",
+            )
     write_stub(
         workdir / "gh",
         f'printf "%s\\n" "$*" >>"{gh_log}"\n'

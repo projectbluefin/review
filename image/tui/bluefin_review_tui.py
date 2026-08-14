@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -570,6 +571,7 @@ class Stop:
     selected: bool = False
     failure: str = ""
     failure_command: str = ""
+    failure_argv: list[str] = field(default_factory=list)
     failure_checks: str = ""
     failure_branch: str = ""
     live: dict = field(default_factory=dict)
@@ -846,7 +848,7 @@ class MergeRecovery(ModalScreen[str | None]):
                 "\n".join(
                     (
                         f"command  {self.stop_record.failure_command or 'gh pr merge'}",
-                        f"error    {self.message[:300]}",
+                        f"error    {self.message}",
                         f"checks   {self.stop_record.failure_checks or 'unknown'}",
                         f"branch   {self.stop_record.failure_branch or 'unknown'}",
                     )
@@ -1080,6 +1082,7 @@ class DiffScreen(ModalScreen[None]):
         self.pages: list[str] = []
         self.page_index = 0
         self.state = "loading"
+        self.request_generation = 0
 
     @property
     def page_count(self) -> int:
@@ -1104,14 +1107,33 @@ class DiffScreen(ModalScreen[None]):
     def on_mount(self) -> None:
         self.load_diff()
 
-    @work(thread=True)
     def load_diff(self) -> None:
+        self.request_generation += 1
+        generation = self.request_generation
+        self.fetch_diff(generation)
+
+    @work(thread=True)
+    def fetch_diff(self, generation: int) -> None:
         stop = self.stop_record
         result = gh("pr", "diff", str(stop.number), "--repo", stop.repository)
         if result.returncode == 0:
-            self.app.call_from_thread(self.render_diff, result.stdout)
+            self.app.call_from_thread(self.render_diff_result, generation, result.stdout)
         else:
-            self.app.call_from_thread(self.render_diff_error, result.stderr.strip() or f"exit {result.returncode}")
+            self.app.call_from_thread(
+                self.render_diff_error_result,
+                generation,
+                result.stderr.strip() or f"exit {result.returncode}",
+            )
+
+    def render_diff_result(self, generation: int, text: str) -> None:
+        if generation != self.request_generation:
+            return
+        self.render_diff(text)
+
+    def render_diff_error_result(self, generation: int, message: str) -> None:
+        if generation != self.request_generation:
+            return
+        self.render_diff_error(message)
 
     def render_diff(self, text: str) -> None:
         body = self.query_one("#diff-body", Static)
@@ -2237,6 +2259,15 @@ class ReviewDashboard(App):
             f"{reviews_block}\n"
             f"linked   {issues}\n"
             f"labels   {labels}{mechanical_block}"
+            + (
+                "\n\n[b]LAST MUTATION FAILURE[/b]\n"
+                f"command  {escape(stop.failure_command)}\n"
+                f"error    {escape(stop.failure)}\n"
+                f"checks   {escape(stop.failure_checks or 'unknown')}\n"
+                f"branch   {escape(stop.failure_branch or 'unknown')}"
+                if stop.failure
+                else ""
+            )
         )
         self.render_context(stop)
 
@@ -2386,7 +2417,7 @@ class ReviewDashboard(App):
                 }
             )
             if result.returncode != 0:
-                message = result.stderr.strip()[:200] or f"exit {result.returncode}"
+                message = result.stderr.strip() or f"exit {result.returncode}"
                 self.call_from_thread(
                     self.mutation_failed, stop, command, message, on_error
                 )
@@ -2397,11 +2428,15 @@ class ReviewDashboard(App):
         self, stop: Stop, command: list[str], message: str, on_error=None
     ) -> None:
         self.pulls_cache.pop(stop.repository, None)
-        stop.failure_command = " ".join(command)
+        stop.failure = message
+        stop.failure_argv = list(command)
+        stop.failure_command = shlex.join(command)
         context = live_review_context(stop.live)
         stop.failure_checks = context["ci"]
         stop.failure_branch = f"{context['mergeable']}/{context['merge_state']}"
-        self.notify(f"{' '.join(command[:4])}…: {message}", severity="error")
+        stop.selected = True
+        self.refresh_rows()
+        self.notify(f"{shlex.join(command[:4])}…: {message[:200]}", severity="error")
         self.show_evidence(stop)
         # A failure that only prints is a failure the maintainer has to
         # remember. Hand it to whoever asked, so they can offer a way out.
@@ -2952,6 +2987,7 @@ class ReviewDashboard(App):
         def landed() -> None:
             stop.failure = ""
             stop.failure_command = ""
+            stop.failure_argv = []
             stop.failure_checks = ""
             stop.failure_branch = ""
             stop.selected = False
