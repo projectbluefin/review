@@ -270,8 +270,8 @@ regression `tests/dashboard_pilot.py` drives the real app to prove.
 | `L` | leave a review on GitHub: approve, request changes, or comment (also from the review screen) |
 | `d` | docs-update agent task (tracked as #134) |
 | `g` | Ghost Cluster build dispatch (tracked as #133) |
-| `o` | open in browser |
-| `v` | view the diff — full screen, coloured, scrollable |
+| `o` | optional browser escape hatch |
+| `v` | view the complete diff — full screen, coloured, paginated, with loading/error state |
 | `c` | comment |
 | `a` | approve and queue: approval + `lgtm`, opting in to Hive auto-merge; for the batch selection if one exists |
 | `m` | merge now: squash immediately, no `lgtm`, maintainers only — the batch selection if one exists |
@@ -376,8 +376,9 @@ a choice instead:
 ```
 
 What is offered depends on why GitHub said no — behind the base gets the
-update, blocked on review gets the sweep, a conflict gets handed to a human in
-the browser — and retry and keep-it-queued are always there. Updating the
+update, blocked on review gets the sweep, and a true conflict gets an explicit
+exceptional manual handoff with no bypass — while retry and keep-it-queued are
+always there. Updating the
 branch runs `gh pr update-branch` and the merge behind one gate, so it is one
 decision like every other sequence.
 
