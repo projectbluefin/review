@@ -1215,12 +1215,14 @@ async def main() -> int:
     exact_markdown = "## Résumé\n\n- `literal [text]`\n- Unicode: café ☕\n\n\nfinal"
     draft_calls = []
     original_draft = tui.CodexHarness.draft
+    original_probe = tui.CodexHarness.probe
 
     def draft_body(self, request):
         draft_calls.append(request)
         return SimpleNamespace(state=tui.DraftState.COMPLETE, markdown="generated blocker", provenance={})
 
     tui.CodexHarness.draft = draft_body
+    tui.CodexHarness.probe = classmethod(lambda cls: tui.Availability.READY)
     try:
         for verdict, generated in (("approve", "accepted"), ("request-changes", "generated blocker"), ("comment", "observation")):
             app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
@@ -1277,9 +1279,9 @@ async def main() -> int:
         check(len(draft_calls) == 3, "all three verdicts must call drafting")
     finally:
         tui.CodexHarness.draft = original_draft
+        tui.CodexHarness.probe = original_probe
 
     # Missing Codex must degrade generation without touching manual prose.
-    original_probe = tui.CodexHarness.probe
     original_unavailable_draft = tui.CodexHarness.draft
 
     def unavailable_probe(cls):
