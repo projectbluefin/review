@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-13",
+  "generated_at": "2026-08-14",
   "schema_version": "1.0",
   "skills": [
     {
@@ -19,6 +19,25 @@
       "description": "Defines the scope and manners of factory work: toil reduction for under-maintained projects in small, reviewable changes, never feature development. Use before deciding how large a change should be or what a task's deliverable is.",
       "version": "1.4",
       "last_updated": "2026-08-07",
+      "doc_type": "policy"
+    },
+    {
+      "id": "factory-operations",
+      "name": "factory-operations",
+      "one_line_purpose": "Keep bounded factory work moving until it lands or is externally blocked.",
+      "entry_point": "docs/skills/factory-operations.md",
+      "category": "meta",
+      "status": "active",
+      "tags": [
+        "factory",
+        "operations",
+        "continuation",
+        "scheduling",
+        "verification"
+      ],
+      "description": "Defines repository-neutral continuation, capacity, ownership, and evidence rules for bounded factory work.",
+      "version": "1.0",
+      "last_updated": "2026-08-14",
       "doc_type": "policy"
     },
     {
@@ -170,7 +189,7 @@
       ],
       "description": "Maintains review documentation and skill contracts from local source evidence. Use when auditing docs, correcting stale guidance, or recording durable agent learning.",
       "version": "1.1",
-      "last_updated": "2026-08-07",
+      "last_updated": "2026-08-14",
       "doc_type": "reference"
     },
     {

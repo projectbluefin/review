@@ -20,6 +20,7 @@ it scopes every task, so read it alongside the matching skill.
 | Prepare a branch, commit, or pull request | [`pr-workflow.md`](skills/pr-workflow.md) |
 | Triage, label, or route an issue or pull request | [`pr-workflow.md`](skills/pr-workflow.md) |
 | Maintain documentation, skills, or factory compliance | [`skill-improvement.md`](skills/skill-improvement.md) |
+| Coordinate bounded factory continuation and writable capacity | [`factory-operations.md`](skills/factory-operations.md) |
 
 `docs/skills/index.json` is the machine-readable catalog, generated from the
 frontmatter in each skill file. When changing a skill, regenerate it with

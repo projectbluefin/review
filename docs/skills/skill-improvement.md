@@ -1,7 +1,7 @@
 ---
 name: skill-improvement
 version: "1.1"
-last_updated: 2026-08-07
+last_updated: 2026-08-14
 id: skill-improvement
 one_line_purpose: Keep review documentation source-backed, current, and compact.
 entry_point: docs/skills/skill-improvement.md
@@ -53,6 +53,11 @@ that work.
    Remove obsolete records rather than preserving them as live guidance.
 6. Record only reusable, source-backed learnings. A command, API behavior, or
    configuration fact belongs in a skill only when its source can be verified.
+
+When a human must intervene to restart continuation or correct scheduling,
+classify the control failure; record the durable transition in the relevant
+issue or pull request; if reusable, add the smallest preventive rule to the
+closest skill and verify it where practical; never create a session diary.
 
 ## Common Rationalizations
 
