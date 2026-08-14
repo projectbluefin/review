@@ -160,11 +160,15 @@ async def main() -> int:
     ]))
     os.environ["LIVE_QUEUE_FILE"] = str(live_file)
     live_app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
-    async with live_app.run_test() as pilot:
+
+    async def wait_for_live_rows(app, pilot, state: str, count: int) -> None:
         for _ in range(100):
-            if live_app.source_state == "ready":
-                break
+            if app.source_state == state and len(app.stops) == count:
+                return
             await pilot.pause(0.05)
+
+    async with live_app.run_test() as pilot:
+        await wait_for_live_rows(live_app, pilot, "ready", 1)
         check(live_app.source_state == "ready", "live repository source should be ready")
         check([stop.key for stop in live_app.stops] == ["acme/widgets#42"],
               "the real app path excludes the authenticated maintainer's own work")
@@ -281,7 +285,7 @@ async def main() -> int:
     os.environ["LIVE_PAGES"] = "1"
     large_app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
     async with large_app.run_test() as pilot:
-        await wait_for_state(large_app, pilot, "ready")
+        await wait_for_live_rows(large_app, pilot, "ready", 202)
         check(len(large_app.stops) == 202,
               "live queue must flatten multiple pages beyond 200 pull requests")
     os.environ.pop("LIVE_PAGES", None)
