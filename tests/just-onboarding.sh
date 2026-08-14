@@ -186,6 +186,10 @@ case "${1:-}" in
         printf '%s\n' "${FAKE_PODMAN_OWNER_LABEL:-}"
         exit 0
         ;;
+      *review.codex-auth*)
+        printf '%s\n' "${FAKE_PODMAN_CODEX_AUTH_LABEL:-}"
+        exit 0
+        ;;
     esac
     [[ "${FAKE_PODMAN_RUNNING:-0}" == 1 ]] || { echo false; exit 1; }
     echo true
@@ -295,6 +299,7 @@ run_recipe() {
       -u GOOSE_THINKING_EFFORT -u GOOSE_CONTEXT_LIMIT \
       -u REVIEW_NON_INTERACTIVE -u GOOSE_INSTALLED \
       -u REVIEW_CONTAINER_NAME -u REVIEW_DETACH \
+      -u REVIEW_HIVE -u REVIEW_CONTRIBUTOR_IMAGE \
       -u REVIEW_QUEUE_NAME \
       HOME="$home" PATH="$fake_bin:/usr/bin:/bin" TMPDIR="$tmp_root" \
       XDG_RUNTIME_DIR="$tmp_root" \
@@ -670,6 +675,61 @@ run_recipe review-stop FAKE_PODMAN_RUNNING=1 FAKE_PODMAN_OWNER_LABEL=detached
 assert_file_not_exists "$codex_auth_mount"
 rm -f "$home/.codex/auth.json"
 rmdir "$home/.codex"
+
+begin "review-container: failed detached Codex launch removes staged auth"
+reset_logs
+mkdir -p "$home/.codex"
+printf '{"tokens":{"access_token":"codex-test-secret"}}\n' >"$home/.codex/auth.json"
+chmod 0400 "$home/.codex/auth.json"
+run_recipe review-container GH_READY=1 TOOL=codex REVIEW_DETACH=1
+codex_auth_mount="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "$credential_log")"
+assert_nonzero_status "$STATUS" "failed detached launch must fail"
+assert_file_not_exists "$codex_auth_mount"
+rm -f "$home/.codex/auth.json"
+rmdir "$home/.codex"
+
+begin "review-stop: ignores unsafe Codex auth labels"
+reset_logs
+outside_dir="$scratch/outside-review-codex-auth.ABCDEF"
+mkdir -p "$outside_dir"
+printf secret >"$outside_dir/auth.json"
+for unsafe_label in \
+  "$outside_dir" \
+  "$tmp_root/review-codex-auth.ABCDE" \
+  "$tmp_root/review-codex-auth.ABCDEFG" \
+  "$tmp_root/review-codex-auth.ABCDEF/../outside-review-codex-auth.ABCDEF"; do
+  run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
+    FAKE_PODMAN_OWNER_LABEL=detached FAKE_PODMAN_CODEX_AUTH_LABEL="$unsafe_label"
+  assert_zero_status "$STATUS" "unsafe auth label must not make review-stop fail"
+  assert_file_exists "$outside_dir/auth.json"
+done
+symlink_stage="$tmp_root/review-codex-auth.SYMLNK"
+ln -s "$outside_dir" "$symlink_stage"
+run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
+  FAKE_PODMAN_OWNER_LABEL=detached FAKE_PODMAN_CODEX_AUTH_LABEL="$symlink_stage"
+assert_file_exists "$outside_dir/auth.json"
+rm -f "$symlink_stage"
+extra_stage="$tmp_root/review-codex-auth.EXTRA1"
+mkdir -p "$extra_stage"
+printf secret >"$extra_stage/auth.json"
+printf extra >"$extra_stage/extra"
+run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
+  FAKE_PODMAN_OWNER_LABEL=detached FAKE_PODMAN_CODEX_AUTH_LABEL="$extra_stage"
+assert_file_exists "$extra_stage/auth.json"
+rm -f "$extra_stage/auth.json" "$extra_stage/extra"
+rmdir "$extra_stage"
+rm -f "$outside_dir/auth.json"
+rmdir "$outside_dir"
+
+begin "review-stop: valid Codex auth label requires a private exact staging directory"
+reset_logs
+valid_stage="$tmp_root/review-codex-auth.ABCDEF"
+mkdir -p "$valid_stage"
+printf secret >"$valid_stage/auth.json"
+run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
+  FAKE_PODMAN_OWNER_LABEL=detached FAKE_PODMAN_CODEX_AUTH_LABEL="$valid_stage"
+assert_zero_status "$STATUS" "valid auth label cleanup must succeed"
+assert_file_not_exists "$valid_stage"
 
 begin "review-container: a running detached worker is never reclaimed"
 reset_logs

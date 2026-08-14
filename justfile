@@ -488,7 +488,14 @@ cleanup_codex_auth_file() {
 }
 cleanup_codex_auth_staging_dir() {
   local staging_dir="${1:-}"
-  [[ "$staging_dir" == /* && "$staging_dir" == */review-codex-auth.* ]] || return 0
+  local stage_root="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
+  if [[ "$stage_root" != /* || ! -d "$stage_root" || ! -w "$stage_root" ]]; then
+    stage_root=/tmp
+  fi
+  [[ "$staging_dir" == "${stage_root%/}"/review-codex-auth.[[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]] ]] || return 0
+  [[ -d "$staging_dir" && ! -L "$staging_dir" ]] || return 0
+  [[ -f "$staging_dir/auth.json" && ! -L "$staging_dir/auth.json" ]] || return 0
+  [[ "$(find "$staging_dir" -mindepth 1 -maxdepth 1 -print | wc -l)" == 1 ]] || return 0
   rm -f -- "${staging_dir}/auth.json"
   rmdir -- "$staging_dir" 2>/dev/null || true
 }
@@ -872,9 +879,7 @@ review-container profile="" effort="":
       echo "✓ Pi credential passed to the agent (value not shown)."
     fi
     CODEX_AUTH_STAGING_DIR=""
-    if [[ "$DETACH" != 1 ]]; then
-      trap cleanup_codex_auth_file EXIT
-    fi
+    trap cleanup_codex_auth_file EXIT
     if [[ "$BACKEND" == codex ]]; then
       stage_codex_auth_file
       if [[ "$DETACH" == 1 ]]; then
@@ -910,7 +915,11 @@ review-container profile="" effort="":
         status=$?
         cleanup_codex_auth_file
       fi
-      [[ "$DETACH" == 1 ]] || cleanup_codex_auth_file
+      if [[ "$DETACH" == 1 && "$status" == 0 ]]; then
+        trap - EXIT
+      else
+        cleanup_codex_auth_file
+      fi
       exit "$status"
     fi
     exec "${CONTAINER_ARGS[@]}"
