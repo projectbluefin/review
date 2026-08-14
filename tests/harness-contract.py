@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "image"))
 
 from harness.codex import CodexHarness  # noqa: E402
 from harness.goose import GooseHarness  # noqa: E402
-from harness.registry import Availability, HarnessRegistry  # noqa: E402
+from harness.registry import Availability, DraftRequest, DraftState, HarnessRegistry  # noqa: E402
 from tui.review_evidence_manifest import ReviewRequest  # noqa: E402
 
 
@@ -355,6 +355,59 @@ class HarnessContract(unittest.TestCase):
     def test_codex_cancellation_uses_process_group(self):
         adapter = CodexHarness(availability=Availability.READY)
         self.assertTrue(adapter.process_group_cancellation)
+
+    def test_drafting_is_explicit_and_goose_does_not_fallback(self):
+        self.assertTrue(CodexHarness().capabilities.body_drafting)
+        self.assertFalse(GooseHarness().capabilities.body_drafting)
+        request = DraftRequest(self.binding, "approve", self._evidence(), {"title": "A PR"})
+        with self.assertRaises(RuntimeError) as error:
+            GooseHarness().draft(request)
+        self.assertIn("UNSUPPORTED_CAPABILITY", str(error.exception))
+
+    def _evidence(self, **overrides):
+        values = {
+            "version": 1, "state": "complete",
+            "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+            "findings": [], "provenance": {
+                "backend": "codex", "model": "gpt-5.6-luna",
+                "repository": "project/review", "pull_request": 166,
+                "base_sha": "a" * 40, "head_sha": "b" * 40,
+            },
+        }
+        values.update(overrides)
+        from tui.review_result import ReviewResult
+        return ReviewResult.from_dict(values)
+
+    def test_draft_request_validates_verdict_binding_evidence_and_live_facts(self):
+        for verdict in ("approve", "request-changes", "comment"):
+            result = CodexHarness().validate_draft(
+                DraftRequest(self.binding, verdict, self._evidence(), {"title": "A PR"})
+            )
+            self.assertEqual(result.state, DraftState.COMPLETE)
+            self.assertLessEqual(len(result.markdown), 4096)
+            self.assertEqual(result.provenance["head_sha"], "b" * 40)
+        for bad in (
+            self._evidence(state="incomplete"),
+            self._evidence(provenance={"backend": "codex", "model": "x"}),
+            self._evidence(provenance={"backend": "codex", "model": "x", "repository": "project/review", "pull_request": 166, "base_sha": "a" * 40, "head_sha": "c" * 40}),
+        ):
+            with self.assertRaises(ValueError):
+                DraftRequest(self.binding, "comment", bad, {})
+
+    def test_codex_draft_command_is_bounded_read_only_and_no_review(self):
+        request = DraftRequest(self.binding, "request-changes", self._evidence(), {"title": "A PR"})
+        command = CodexHarness().draft_command(request)
+        prompt = command[-1]
+        self.assertIn("request-changes", prompt)
+        self.assertIn("Do not perform another code review", prompt)
+        self.assertIn("Do not mutate GitHub", prompt)
+        self.assertNotIn("find new", prompt.lower())
+
+    def test_draft_failure_is_distinct_and_bounded(self):
+        request = DraftRequest(self.binding, "comment", self._evidence(), {})
+        result = CodexHarness().convert_draft("x" * 5000, request, exit_code=1)
+        self.assertEqual(result.state, DraftState.FAILED)
+        self.assertLessEqual(len(result.raw_evidence), 400)
 
 
 if __name__ == "__main__":
