@@ -237,7 +237,7 @@ goose_review() {
   prior_int="$(trap -p INT)"
   prior_exit="$(trap -p EXIT)"
   cleanup_review_scope() {
-    if [[ -n "$scope" ]]; then
+    if [[ -n "${scope:-}" ]]; then
       rm -rf "$scope"
       scope=""
     fi

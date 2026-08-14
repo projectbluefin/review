@@ -285,9 +285,12 @@ kill() {
 export -f kill
 set -T
 boundary_debug() {
-  [[ -n "${BOUNDARY_TRACE-}" ]] && printf '%s\n' "${BASH_COMMAND-}" >>"$BOUNDARY_TRACE"
   case "${BASH_COMMAND-}" in
+    'wait "$REVIEW_CHILD_PID"')
+      [[ -n "${BOUNDARY_TRACE-}" ]] && printf '%s\n' "${BASH_COMMAND-}" >>"$BOUNDARY_TRACE"
+      ;;
     'REVIEW_CHILD_PID=""')
+      [[ -n "${BOUNDARY_TRACE-}" ]] && printf '%s\n' "${BASH_COMMAND-}" >>"$BOUNDARY_TRACE"
       if [[ "${BOUNDARY_PHASE-}" == adapter && -e "${GOOSE_COMPLETION_SENTINEL-}" ]]; then
         : >"${BOUNDARY_MARKER:?}"
         sleep 1
@@ -296,10 +299,12 @@ boundary_debug() {
     *'rm -rf "$scope"'*)
       if [[ "${BOUNDARY_PHASE-}" == scope ]]; then
         : >"${BOUNDARY_MARKER:?}"
+        trap - DEBUG
         sleep 1
       fi
       ;;
   esac
+  return 0
 }
 trap boundary_debug DEBUG
 EOF
