@@ -10,7 +10,7 @@ mkdir -p "$scratch/bin"
 
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
-if [[ "$*" == "info --check" ]]; then exit 0; fi
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
 printf '%s\n' "$*" >"${GOOSE_ARGS:?}"
 printf '%s\n' 'adapter invoked' >"${GOOSE_ADAPTER_CALLED:-/dev/null}"
 exit 23
@@ -112,7 +112,7 @@ set -e
 # review is the worst outcome this tool can produce, so it gets its own status.
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
-if [[ "$*" == "info --check" ]]; then exit 0; fi
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
 cat >&2 <<'OUT'
 goose review: discovered 2 check(s):
 goose review: check 'bluefin-doctrine' failed: parse check JSON: The model returned an empty response.
@@ -131,19 +131,18 @@ set -e
 
 # 65, not 0: the caller must be able to tell this apart from a clean review.
 ((incomplete_status == 65))
-[[ "$incomplete_out" == *'REVIEW INCOMPLETE'* ]]
-[[ "$incomplete_out" == *'2 part(s)'* ]]
-[[ "$incomplete_out" == *'bluefin-doctrine'* ]]
-[[ "$incomplete_out" == *'not a clean bill of health'* ]]
+[[ "$incomplete_out" == *'INCOMPLETE'* ]]
+grep -q 'bluefin-doctrine' <<<"$incomplete_out"
+grep -q 'orchestrator emitted 0 finding' <<<"$incomplete_out"
 # It must never also claim to be a finished draft.
 [[ "$incomplete_out" != *'The Review Draft above is for you to judge'* ]]
 
 # A run where every check answered stays clean, and stays exit 0.
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
-if [[ "$*" == "info --check" ]]; then exit 0; fi
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
 echo "goose review: check 'bluefin-doctrine' completed: 0 finding(s)" >&2
-echo "goose review: orchestrator emitted 0 finding(s) from 1 check(s)" >&2
+echo "goose review: orchestrator emitted 0 finding(s) from 1 check(s) (main: ran, 0 finding(s))" >&2
 exit 0
 EOF
 chmod +x "$scratch/bin/goose"
@@ -157,10 +156,54 @@ set -e
 [[ "$clean_out" == *'The Review Draft above is for you to judge'* ]]
 [[ "$clean_out" != *'REVIEW INCOMPLETE'* ]]
 
+# A zero-exit malformed stream is still an adapter failure, not a clean draft.
+cat >"$scratch/bin/goose" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
+printf '%s\n' 'malformed Goose output'
+exit 0
+EOF
+chmod +x "$scratch/bin/goose"
+set +e
+malformed_status="$(PATH="$scratch/bin:$PATH" HIVE_WORKSPACE_DIR="$scratch/workspace" \
+  GH_CALLS="$scratch/gh-calls-malformed" "$review" pr projectbluefin/alpha 31 2>/dev/null)"
+malformed_exit=$?
+set -e
+((malformed_exit != 0))
+[[ "$malformed_status" == *'Review did not complete'* ]]
+[[ "$malformed_status" != *'The Review Draft above is for you to judge'* ]]
+
+# TERM requests adapter cancellation before the launcher cleans up. The
+# adapter-created process group must not leave its PATH-local Goose behind.
+cat >"$scratch/bin/goose" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
+printf '%s\n' "$$" >"${GOOSE_PID_FILE:?}"
+exec sleep 1000
+EOF
+chmod +x "$scratch/bin/goose"
+PATH="$scratch/bin:$PATH" HIVE_WORKSPACE_DIR="$scratch/workspace" \
+  GOOSE_PID_FILE="$scratch/goose-pid" GH_CALLS="$scratch/gh-calls-signal" \
+  "$review" pr projectbluefin/alpha 31 >"$scratch/signal-output" 2>&1 &
+launcher_pid=$!
+for _ in {1..50}; do [[ -s "$scratch/goose-pid" ]] && break; sleep 0.1; done
+[[ -s "$scratch/goose-pid" ]]
+goose_pid="$(<"$scratch/goose-pid")"
+kill -TERM "$launcher_pid"
+set +e
+wait "$launcher_pid"
+signal_exit=$?
+set -e
+((signal_exit != 0))
+if ps -p "$goose_pid" -o comm= 2>/dev/null | grep -qx 'sleep'; then
+  echo "Goose process survived launcher TERM: $goose_pid" >&2
+  exit 1
+fi
+
 # restore the exit-code stub for the assertions that follow
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
-if [[ "$*" == "info --check" ]]; then exit 0; fi
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
 printf '%s\n' "$*" >"${GOOSE_ARGS:?}"
 exit 23
 EOF
@@ -183,7 +226,10 @@ EOF
 
 cat >"$scratch/bin/goose-capture" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
 printf '%s\0' "$@" >"${GOOSE_ARGV:?}"
+printf '%s\n' "goose review: check 'main' completed: 0 finding(s)"
+printf '%s\n' 'goose review: orchestrator emitted 0 finding(s) from 1 check(s) (main: ran, 0 finding(s))'
 EOF
 chmod +x "$scratch/bin/goose-capture"
 cp "$scratch/bin/goose-capture" "$scratch/bin/goose"
@@ -363,7 +409,7 @@ cp "$repo_root/image/review-scope/checks/bluefin-doctrine.md" \
 
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
-if [[ "$*" == "info --check" ]]; then exit 0; fi
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
 printf '%s\0' "$@" >"${GOOSE_ARGV:?}"
 scope=""
 while (($#)); do
@@ -386,6 +432,8 @@ if [[ -n "$scope" ]]; then
   done < <(find "$scope/.agents/checks" -type f -name '*.md' -printf '%P\n')
   cat "$scope/.agents/checks/cluster-resolution.md" >"${SCOPE_CLUSTER:?}" 2>/dev/null || : >"${SCOPE_CLUSTER:?}"
 fi
+printf '%s\n' "goose review: check 'main' completed: 0 finding(s)"
+printf '%s\n' 'goose review: orchestrator emitted 0 finding(s) from 1 check(s) (main: ran, 0 finding(s))'
 EOF
 chmod +x "$scratch/bin/goose"
 
@@ -428,7 +476,7 @@ grep -q 'name: cluster-resolution' "$scratch/scope-cluster2"
 # additional check in the scratch scope, never as a replacement for doctrine.
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
-if [[ "$*" == "info --check" ]]; then exit 0; fi
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
 scope=""
 while (($#)); do
   case "$1" in
@@ -440,6 +488,8 @@ if [[ -n "$scope" ]]; then
   find "$scope" -type f | sed "s|^$scope/||" | sort >"${SCOPE_LISTING:?}"
   cat "$scope/.agents/checks/maintainer-steering.md" >"${SCOPE_STEER:?}" 2>/dev/null || : >"${SCOPE_STEER:?}"
 fi
+printf '%s\n' "goose review: check 'main' completed: 0 finding(s)"
+printf '%s\n' 'goose review: orchestrator emitted 0 finding(s) from 1 check(s) (main: ran, 0 finding(s))'
 EOF
 chmod +x "$scratch/bin/goose"
 

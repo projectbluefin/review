@@ -5,7 +5,7 @@ import re
 import signal
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 from tui.review_evidence_manifest import ReviewRequest
@@ -38,6 +38,7 @@ class GooseHarness:
         provenance=True, body_drafting=False,
     )
     process_group_cancellation = True
+    _process: subprocess.Popen | None = field(default=None, init=False, repr=False)
 
     def command(self, binding: ReviewRequest, *, prompt: str, model: str | None = None,
                 effort: str | None = None, steer: str | None = None,
@@ -84,6 +85,14 @@ class GooseHarness:
         )
         return result
 
+    @staticmethod
+    def terminal_status(result: ReviewResult) -> int:
+        if result.state == "incomplete":
+            return 65
+        if result.state in ("complete", "findings"):
+            return 0
+        return int(result.live.get("process_exit_code", 1)) or 1
+
     def stream(self, binding: ReviewRequest, *, prompt: str,
                on_line: Callable[[str], None], model: str | None = None,
                effort: str | None = None, steer: str | None = None,
@@ -94,20 +103,45 @@ class GooseHarness:
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             bufsize=1, start_new_session=True,
         )
+        self._process = process
         lines: list[str] = []
         assert process.stdout is not None
-        for line in process.stdout:
-            line = self._redact(line.rstrip("\n"))
-            lines.append(line)
-            on_line(line)
-        process.stdout.close()
-        process.wait()
+        interrupted = False
+
+        def stop(_signum, _frame):
+            nonlocal interrupted
+            interrupted = True
+            self.cancel(process)
+
+        previous = {
+            signal.SIGTERM: signal.signal(signal.SIGTERM, stop),
+            signal.SIGINT: signal.signal(signal.SIGINT, stop),
+        }
+        try:
+            for line in process.stdout:
+                line = self._redact(line.rstrip("\n"))
+                lines.append(line)
+                on_line(line)
+            process.stdout.close()
+            process.wait()
+        finally:
+            signal.signal(signal.SIGTERM, previous[signal.SIGTERM])
+            signal.signal(signal.SIGINT, previous[signal.SIGINT])
+            self._process = None
         result = self.convert("\n".join(lines), binding, process.returncode,
                               model=model, effort=effort)
+        result = ReviewResult(
+            result.version, result.state, result.counts, result.findings,
+            result.verification, result.provenance, result.overlap,
+            {**result.live, "process_exit_code": process.returncode},
+            result.raw_evidence,
+        )
         return ReviewResult(
             result.version, result.state, result.counts, result.findings,
             result.verification, result.provenance, result.overlap,
-            {**result.live, "exit_code": process.returncode},
+            {**result.live, "process_exit_code": process.returncode,
+             "exit_code": self.terminal_status(result),
+             "cancelled": interrupted},
             result.raw_evidence,
         )
 
@@ -117,6 +151,7 @@ class GooseHarness:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
             return
+        process.wait()
 
     def invoke(self, binding: ReviewRequest, *, prompt: str, model: str | None = None,
                effort: str | None = None, steer: str | None = None,
@@ -135,12 +170,19 @@ class GooseHarness:
         try:
             check = subprocess.run(
                 [resolved, "info", "--check"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, check=False,
             )
         except OSError:
             return Availability.UNAVAILABLE_BINARY
-        return Availability.READY if check.returncode == 0 else Availability.UNAVAILABLE_AUTH
+        if check.returncode != 0:
+            return Availability.UNAVAILABLE_AUTH
+        response = f"{check.stdout}\n{check.stderr}".lower()
+        return (
+            Availability.READY
+            if re.search(r"(?:goose|provider).*(?:ready|authenticated|available)", response)
+            else Availability.UNAVAILABLE_AUTH
+        )
 
     def draft(self, request: DraftRequest) -> DraftResult:
         raise RuntimeError(f"{self.name} unavailable: UNSUPPORTED_CAPABILITY")

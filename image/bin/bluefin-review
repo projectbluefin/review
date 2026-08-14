@@ -13,14 +13,23 @@
 # change through exactly one code path.
 set -euo pipefail
 
-# 'goose review' exits 0 even when a check never returned a verdict: the model
-# answers with prose or an empty response, the orchestrator prints
-# "check '<name>' failed: parse check JSON: ..." and then reports the run's
-# finding count as though that check had simply found nothing. Reading
-# "0 finding(s)" off such a run and calling it clean is the worst outcome this
-# tool can produce, so an incomplete review gets its own exit status.
 REVIEW_INCOMPLETE=65
-CHECK_FAILURE_PATTERN='^goose review: .+ failed: '
+REVIEW_CHILD_PID=""
+
+request_review_cancel() {
+  cancel_review_descendants() {
+    local parent="$1" child
+    while read -r child; do
+      [[ -n "$child" ]] || continue
+      cancel_review_descendants "$child"
+      kill -TERM "$child" 2>/dev/null || true
+    done < <(pgrep -P "$parent" 2>/dev/null || true)
+  }
+  if [[ -n "$REVIEW_CHILD_PID" ]]; then
+    cancel_review_descendants "$REVIEW_CHILD_PID"
+    kill -TERM "$REVIEW_CHILD_PID" 2>/dev/null || true
+  fi
+}
 
 WORKSPACE="${HIVE_WORKSPACE_DIR:-${HOME}/workspace}"
 
@@ -82,7 +91,7 @@ result = selected.stream(
     + ((range_name,) if range_name else ()),
     on_line=lambda line: print(line, flush=True),
 )
-raise SystemExit(int(result.live.get("exit_code", 1)))
+raise SystemExit(selected.terminal_status(result))
 PY
 }
 
@@ -197,35 +206,17 @@ say so plainly rather than guessing. This still produces a Review Draft only:
 a human makes every approval and merge decision."
 }
 
-# Run Goose and hold its output to account. 'goose review' reports a per-check
-# failure on its own progress stream and then exits 0 regardless, so the run is
-# scanned for checks that produced no verdict before its status is believed.
+# Run the selected adapter and let its typed result own the terminal status.
 run_reviewed() {
-  local log status=0 incomplete=0
-  log="$(mktemp "${TMPDIR:-/tmp}/bluefin-review-log.XXXXXX")"
-  # Merged, because the verdict and the progress reporting have to be read
-  # together — and tee'd, because the reviewer still watches it stream.
-  "$@" 2>&1 | tee "$log" || status=$?
-  incomplete="$(grep -cE "$CHECK_FAILURE_PATTERN" "$log" 2>/dev/null)" || incomplete=0
-  if ((incomplete > 0)); then
-    report_incomplete_review "$log" "$incomplete"
-    if ((status == 0)); then status="$REVIEW_INCOMPLETE"; fi
-  fi
-  rm -f "$log"
+  local status=0
+  # Keep the selected adapter in the foreground process tree while allowing
+  # the shell to forward TERM/INT and remain signal-responsive. The adapter
+  # already streams each line to this process's stdout.
+  "$@" &
+  REVIEW_CHILD_PID=$!
+  wait "$REVIEW_CHILD_PID" || status=$?
+  REVIEW_CHILD_PID=""
   return "$status"
-}
-
-# Name the parts of the review that never answered. A reviewer who is told
-# "0 findings" by a run where two checks died has been handed a false clean.
-report_incomplete_review() {
-  local log="$1" failures="$2"
-  printf '\n'
-  rule
-  printf ' REVIEW INCOMPLETE — %s part(s) of this review returned no verdict:\n' "$failures"
-  grep -E "$CHECK_FAILURE_PATTERN" "$log" | sed -E 's/^goose review: /   - /' | cut -c1-160
-  printf '\n This run'"'"'s finding count is not a clean bill of health: a check\n'
-  printf ' that failed to answer cannot have found nothing. Re-run the review.\n'
-  rule
 }
 
 # Every review goes through here so both entry points carry the same context.
@@ -432,7 +423,7 @@ run_goose_review() {
     }
   fi
 
-  (
+  {
     cd "$dir" || exit 1
     git fetch --quiet origin || true
     gh pr checkout "$number" --repo "$repo" || {
@@ -479,7 +470,7 @@ run_goose_review() {
     BLUEFIN_REVIEW_OWNER="${repo%%/*}" BLUEFIN_REVIEW_REPOSITORY="${repo##*/}" \
       BLUEFIN_REVIEW_PULL_REQUEST="$number" BLUEFIN_REVIEW_RELATED="$local_related" \
       goose_review "origin/${base}...HEAD"
-  )
+  }
 }
 
 # --- entry -------------------------------------------------------------------
@@ -499,8 +490,8 @@ pr_mode() {
   # traps also leave, because a handler that only cleans up returns control to
   # the script and the run continues after the maintainer asked for it to end.
   trap 'rm -rf "$CACHE_DIR"' EXIT
-  trap 'rm -rf "$CACHE_DIR"; trap - EXIT; exit 143' TERM
-  trap 'rm -rf "$CACHE_DIR"; trap - EXIT; exit 130' INT
+  trap 'request_review_cancel; rm -rf "$CACHE_DIR"; trap - EXIT; exit 143' TERM
+  trap 'request_review_cancel; rm -rf "$CACHE_DIR"; trap - EXIT; exit 130' INT
 
   local status=0
   run_goose_review "$repo" "$number" || status=$?

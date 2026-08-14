@@ -106,6 +106,19 @@ class HarnessContract(unittest.TestCase):
         self.assertEqual(adapter.convert("", self.binding, 23).state, "failed")
         self.assertEqual(adapter.convert("", self.binding, 65).state, "incomplete")
 
+    def test_goose_terminal_status_is_owned_by_typed_result(self):
+        adapter = GooseHarness(availability=Availability.READY)
+        for payload, expected in (
+            ("malformed Goose output", 1),
+            ("goose review: check 'main' failed: no verdict\n"
+             "goose review: orchestrator emitted 0 finding(s) from 1 check(s) "
+             "(main: ran, 0 finding(s))", 65),
+        ):
+            with self.subTest(payload=payload):
+                result = adapter.convert(payload, self.binding, 0)
+                self.assertNotEqual(result.state, "complete")
+                self.assertEqual(adapter.terminal_status(result), expected)
+
     def test_goose_probe_uses_documented_non_secret_readiness_check(self):
         with self.subTest("binary missing"):
             self.assertEqual(
@@ -141,6 +154,15 @@ class HarnessContract(unittest.TestCase):
                     GooseHarness.probe(str(executable)), Availability.READY
                 )
 
+        with self.subTest("zero exit without Goose response"):
+            with tempfile.TemporaryDirectory() as directory:
+                executable = Path(directory) / "goose"
+                executable.write_text("#!/usr/bin/env bash\nexit 0\n")
+                executable.chmod(0o755)
+                self.assertEqual(
+                    GooseHarness.probe(str(executable)), Availability.UNAVAILABLE_AUTH
+                )
+
     def test_goose_stream_reaches_real_process_and_returns_bound_result(self):
         with tempfile.TemporaryDirectory() as directory:
             executable = Path(directory) / "goose"
@@ -169,10 +191,19 @@ class HarnessContract(unittest.TestCase):
             self.assertEqual(result.provenance["head_sha"], "b" * 40)
 
     def test_goose_cancel_terminates_the_process_group(self):
-        process = type("Process", (), {"pid": 1234})()
+        class Process:
+            pid = 1234
+            returncode = None
+            wait_called = False
+
+            def wait(self):
+                self.wait_called = True
+
+        process = Process()
         with patch("harness.goose.os.killpg") as killpg:
             GooseHarness.cancel(process)
         killpg.assert_called_once()
+        self.assertTrue(process.wait_called)
 
     def test_goose_result_redacts_secret_evidence(self):
         with patch.dict(os.environ, {"GOOSE_API_KEY": "goose-secret"}):
