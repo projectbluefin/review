@@ -1040,12 +1040,29 @@ async def main() -> int:
                 screen.query("#diff-scroll"),
                 "the diff must live in a scrollable container",
             )
-            # Truncation, when it happens, must say so.
-            screen.render_diff("x" * (tui.DiffScreen.MAX_CHARS + 10))
+            # An oversized diff is paginated, not cut, and its terminal page
+            # remains reachable from the real Textual screen.
+            oversized = "x" * (tui.DiffScreen.MAX_CHARS + 10)
+            screen.render_diff(oversized)
             await pilot.pause()
             check(
-                "truncated at" in getattr(screen.rendered, "code", ""),
-                "a cut diff must say it was cut, and how big it really is",
+                screen.page_count == 2 and screen.page_index == 0,
+                "an oversized diff must expose bounded pages",
+            )
+            await pilot.press("]")
+            await pilot.pause()
+            check(
+                screen.page_index == 1
+                and screen.rendered is not None
+                and screen.rendered.code.endswith("x" * 10),
+                "the complete oversized diff must be reachable on its final page",
+            )
+            screen.render_diff_error("GitHub unavailable")
+            await pilot.pause()
+            check(
+                screen.state == "error"
+                and "GitHub unavailable" in str(screen.query_one("#diff-body", tui.Static).render()),
+                "a diff fetch error must be distinct from a loaded diff",
             )
             await pilot.press("escape")
             await pilot.pause()
@@ -1515,10 +1532,10 @@ async def main() -> int:
         "a blocked merge must be offered the sweep instead",
     )
     check(
-        "browser" in [c for c, _ in tui.MergeRecovery.offers(
+        "handoff" in [c for c, _ in tui.MergeRecovery.offers(
             tui.Stop("o/r", 1, "merge", "t", live={"mergeStateStatus": "DIRTY"}), ""
         )],
-        "a conflicted merge must be handed to a human",
+        "a conflicted merge must offer explicit exceptional handoff",
     )
     check(
         [c for c, _ in tui.MergeRecovery.offers(
@@ -1596,6 +1613,18 @@ async def main() -> int:
                     app.query_one("#status-bar", tui.Static).render()
                 ),
                 "the status line must count what did not merge",
+            )
+            recovery_text = "\n".join(
+                str(widget.render())
+                for widget in list(app.screen.query(tui.Label))
+                + list(app.screen.query(tui.Static))
+            )
+            check(
+                "gh pr merge" in recovery_text
+                and "Pull request is not mergeable" in recovery_text
+                and "checks" in recovery_text
+                and "branch" in recovery_text,
+                "merge recovery must keep exact command, error, checks, and branch evidence visible",
             )
             # Choosing "update the branch" retries with the update in front.
             await pilot.press("1")

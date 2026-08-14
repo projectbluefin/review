@@ -177,7 +177,9 @@ def paint_context(self, text: str) -> None:
 
 **Diffs get Pygments through Rich**: `Syntax(text, "diff", theme="ansi_dark")`.
 `ansi_dark` resolves to the terminal's own palette instead of assuming a
-background colour.
+background colour. `DiffScreen` keeps GitHub's complete response in bounded
+pages; `[` and `]` navigate them, while loading, success, and fetch error are
+distinct states. `[o]` is only an optional browser escape hatch.
 
 ## Design Rules
 
@@ -185,6 +187,10 @@ background colour.
   `recommended_action` rendered a 121-stop queue as five and hid every
   merge-ready pull request. When a view is filtered, the status line says how
   many stops are hidden.
+- **Keep mutation failures inspectable.** The selected stop and recovery screen
+  retain the exact command, GitHub error, checks, and branch state after the
+  notification disappears. Update, retry, queue, and skip are explicit; a
+  true conflict offers exceptional manual handoff without a bypass.
 - **Colour is never the only carrier of a fact.** Rows colour by state *and*
   carry `⚑ CONFLICTS`, `✓ CI GREEN`, `✗ CI FAILED`, `… CI PENDING`, or
   `? CI UNKNOWN`, as applicable.

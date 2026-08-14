@@ -569,6 +569,9 @@ class Stop:
     review_state: str = ""
     selected: bool = False
     failure: str = ""
+    failure_command: str = ""
+    failure_checks: str = ""
+    failure_branch: str = ""
     live: dict = field(default_factory=dict)
     overlap: dict = field(default_factory=dict)
     review_result: ReviewResult | None = None
@@ -831,7 +834,7 @@ class MergeRecovery(ModalScreen[str | None]):
         if state == "BLOCKED" or "REVIEW" in text or "REQUIRED" in text:
             choices.append(("queue", "approve and queue it for the sweep instead"))
         if state == "DIRTY" or "CONFLICT" in text:
-            choices.append(("browser", "open it — the conflict needs a human"))
+            choices.append(("handoff", "exceptional manual handoff — conflict; no bypass"))
         choices.append(("retry", "try the merge again"))
         choices.append(("skip", "leave it queued and move on"))
         return choices
@@ -839,7 +842,17 @@ class MergeRecovery(ModalScreen[str | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm-box"):
             yield Label(f"{self.stop_record.key} did not merge:")
-            yield Static(escape(self.message[:300]), classes="confirm-command")
+            yield Static(
+                "\n".join(
+                    (
+                        f"command  {self.stop_record.failure_command or 'gh pr merge'}",
+                        f"error    {self.message[:300]}",
+                        f"checks   {self.stop_record.failure_checks or 'unknown'}",
+                        f"branch   {self.stop_record.failure_branch or 'unknown'}",
+                    )
+                ),
+                classes="confirm-command",
+            )
             yield Label("")
             for index, (_, description) in enumerate(self.choices, start=1):
                 yield Label(f"  [{index}] {description}")
@@ -1049,7 +1062,10 @@ class DiffScreen(ModalScreen[None]):
     diff lexer, and every byte GitHub returned.
     """
 
-    BINDINGS = back_bindings("dismiss")
+    BINDINGS = back_bindings("dismiss") + [
+        Binding("]", "next_page", "next diff page"),
+        Binding("[", "previous_page", "previous diff page"),
+    ]
 
     # Rich renders the whole diff before Textual paints it, so an enormous
     # one is a visible stall. Cut with the size named, never silently.
@@ -1061,6 +1077,13 @@ class DiffScreen(ModalScreen[None]):
         # What is on screen right now, so the rendering can be inspected
         # without reaching through Textual's internal wrapping.
         self.rendered: Syntax | None = None
+        self.pages: list[str] = []
+        self.page_index = 0
+        self.state = "loading"
+
+    @property
+    def page_count(self) -> int:
+        return len(self.pages)
 
     def compose(self) -> ComposeResult:
         stop = self.stop_record
@@ -1085,28 +1108,51 @@ class DiffScreen(ModalScreen[None]):
     def load_diff(self) -> None:
         stop = self.stop_record
         result = gh("pr", "diff", str(stop.number), "--repo", stop.repository)
-        text = result.stdout if result.returncode == 0 else result.stderr
-        self.app.call_from_thread(self.render_diff, text)
+        if result.returncode == 0:
+            self.app.call_from_thread(self.render_diff, result.stdout)
+        else:
+            self.app.call_from_thread(self.render_diff_error, result.stderr.strip() or f"exit {result.returncode}")
 
     def render_diff(self, text: str) -> None:
         body = self.query_one("#diff-body", Static)
         if not text.strip():
+            self.state = "success"
+            self.pages = []
+            self.rendered = None
             body.update("(empty diff)")
             return
-        note = ""
-        if len(text) > self.MAX_CHARS:
-            note = (
-                f"\n… truncated at {self.MAX_CHARS:,} of {len(text):,} characters; "
-                "open it in the browser with [o] to read the rest.\n"
-            )
-            text = text[: self.MAX_CHARS]
+        self.state = "success"
+        self.pages = [text[index:index + self.MAX_CHARS] for index in range(0, len(text), self.MAX_CHARS)]
+        self.page_index = 0
+        self.render_page()
+
+    def render_page(self) -> None:
+        body = self.query_one("#diff-body", Static)
+        text = self.pages[self.page_index]
+        page_note = f"page {self.page_index + 1}/{len(self.pages)} · [ and ] navigate · [o] optional browser escape\n\n"
         # 'ansi_dark' resolves to the terminal's own palette, so the diff
         # stays legible in whatever theme the maintainer actually uses
         # instead of assuming a dark background.
         self.rendered = Syntax(
-            text + note, "diff", theme="ansi_dark", word_wrap=False
+            page_note + text, "diff", theme="ansi_dark", word_wrap=False
         )
         body.update(self.rendered)
+
+    def render_diff_error(self, message: str) -> None:
+        self.state = "error"
+        self.pages = []
+        self.rendered = None
+        self.query_one("#diff-body", Static).update(f"ERROR loading diff: {escape(message)}")
+
+    def action_next_page(self) -> None:
+        if self.page_index + 1 < len(self.pages):
+            self.page_index += 1
+            self.render_page()
+
+    def action_previous_page(self) -> None:
+        if self.page_index:
+            self.page_index -= 1
+            self.render_page()
 
 
 class HarnessTakeoff(ModalScreen[str | None]):
@@ -2351,6 +2397,10 @@ class ReviewDashboard(App):
         self, stop: Stop, command: list[str], message: str, on_error=None
     ) -> None:
         self.pulls_cache.pop(stop.repository, None)
+        stop.failure_command = " ".join(command)
+        context = live_review_context(stop.live)
+        stop.failure_checks = context["ci"]
+        stop.failure_branch = f"{context['mergeable']}/{context['merge_state']}"
         self.notify(f"{' '.join(command[:4])}…: {message}", severity="error")
         self.show_evidence(stop)
         # A failure that only prints is a failure the maintainer has to
@@ -2901,6 +2951,9 @@ class ReviewDashboard(App):
 
         def landed() -> None:
             stop.failure = ""
+            stop.failure_command = ""
+            stop.failure_checks = ""
+            stop.failure_branch = ""
             stop.selected = False
             self.refresh_rows()
             if then:
@@ -2937,9 +2990,12 @@ class ReviewDashboard(App):
         if choice == "queue":
             self._queue_automerge(stop, then=then)
             return
-        if choice == "browser":
-            gh("pr", "view", str(stop.number), "--repo", stop.repository, "--web")
-        # "skip", esc, and the browser hand-off all continue the batch with
+        if choice == "handoff":
+            self.notify(
+                f"{stop.key}: exceptional manual conflict handoff; no bypass offered.",
+                severity="warning",
+            )
+        # "skip", esc, and the exceptional handoff all continue the batch with
         # the stop still selected and still marked failed.
         if then:
             then()
