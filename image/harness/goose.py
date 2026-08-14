@@ -40,7 +40,8 @@ class GooseHarness:
     process_group_cancellation = True
 
     def command(self, binding: ReviewRequest, *, prompt: str, model: str | None = None,
-                effort: str | None = None, steer: str | None = None) -> list[str]:
+                effort: str | None = None, steer: str | None = None,
+                extra_args: tuple[str, ...] = ()) -> list[str]:
         selected_model = model or self.model
         selected_effort = effort or self.effort
         context = (
@@ -53,7 +54,11 @@ class GooseHarness:
         )
         if steer:
             instruction += f" Maintainer steering: {steer}"
-        return [self.executable, "review", "--instructions", instruction]
+        command = [self.executable, "review"]
+        if prompt or steer:
+            command.extend(("--instructions", instruction))
+        command.extend(extra_args)
+        return command
 
     @staticmethod
     def _redact(value: str) -> str:
@@ -81,9 +86,11 @@ class GooseHarness:
 
     def stream(self, binding: ReviewRequest, *, prompt: str,
                on_line: Callable[[str], None], model: str | None = None,
-               effort: str | None = None, steer: str | None = None) -> ReviewResult:
+               effort: str | None = None, steer: str | None = None,
+               extra_args: tuple[str, ...] = ()) -> ReviewResult:
         process = subprocess.Popen(
-            self.command(binding, prompt=prompt, model=model, effort=effort, steer=steer),
+            self.command(binding, prompt=prompt, model=model, effort=effort,
+                         steer=steer, extra_args=extra_args),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             bufsize=1, start_new_session=True,
         )
@@ -93,26 +100,47 @@ class GooseHarness:
             line = self._redact(line.rstrip("\n"))
             lines.append(line)
             on_line(line)
+        process.stdout.close()
         process.wait()
-        return self.convert("\n".join(lines), binding, process.returncode,
-                            model=model, effort=effort)
+        result = self.convert("\n".join(lines), binding, process.returncode,
+                              model=model, effort=effort)
+        return ReviewResult(
+            result.version, result.state, result.counts, result.findings,
+            result.verification, result.provenance, result.overlap,
+            {**result.live, "exit_code": process.returncode},
+            result.raw_evidence,
+        )
 
     @staticmethod
     def cancel(process: subprocess.Popen) -> None:
-        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
 
     def invoke(self, binding: ReviewRequest, *, prompt: str, model: str | None = None,
-               effort: str | None = None, steer: str | None = None) -> ReviewResult:
+               effort: str | None = None, steer: str | None = None,
+               extra_args: tuple[str, ...] = ()) -> ReviewResult:
         if self.availability is not Availability.READY:
             raise RuntimeError(f"{self.name} unavailable: {self.availability.value}")
         return self.stream(binding, prompt=prompt, on_line=lambda _line: None,
-                           model=model, effort=effort, steer=steer)
+                           model=model, effort=effort, steer=steer,
+                           extra_args=extra_args)
 
     @classmethod
     def probe(cls, executable: str = "goose") -> Availability:
-        if shutil.which(executable) is None:
+        resolved = shutil.which(executable)
+        if resolved is None:
             return Availability.UNAVAILABLE_BINARY
-        return Availability.READY
+        try:
+            check = subprocess.run(
+                [resolved, "info", "--check"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                text=True, check=False,
+            )
+        except OSError:
+            return Availability.UNAVAILABLE_BINARY
+        return Availability.READY if check.returncode == 0 else Availability.UNAVAILABLE_AUTH
 
     def draft(self, request: DraftRequest) -> DraftResult:
         raise RuntimeError(f"{self.name} unavailable: UNSUPPORTED_CAPABILITY")

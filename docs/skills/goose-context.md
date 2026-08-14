@@ -25,6 +25,10 @@ cancellation, redacted evidence, and structured `ReviewResult` conversion;
 body drafting is explicitly unsupported and never falls back to another
 harness.
 
+Readiness uses Goose's documented non-secret `goose info --check` surface.
+An absent executable is reported separately from a present executable whose
+provider check fails; review invocation is refused until that check succeeds.
+
 ## When to Use
 
 Load this when changing Goose configuration, skill routing, or the

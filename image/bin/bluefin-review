@@ -59,19 +59,30 @@ SCOPE_ROOT="${BLUEFIN_REVIEW_SCOPE_ROOT:-/opt/bluefin/review-scope}"
 # a clean result.
 PULL_FETCH_LIMIT="${BLUEFIN_REVIEW_PULL_LIMIT:-200}"
 
-goose_registry_ready() {
+run_registered_review() {
+  local range="$1" scope="$2" prompt="$3" owner="$4" repository="$5" number="$6" base_sha="$7" head_sha="$8"
   local root="${BLUEFIN_REVIEW_HARNESS_ROOT:-/opt/bluefin}"
   PYTHONPATH="${root}:${root}/tui${PYTHONPATH:+:${PYTHONPATH}}" \
-    python3 - <<'PY'
+    python3 - "$range" "$scope" "$prompt" "$owner" "$repository" "$number" "$base_sha" "$head_sha" <<'PY'
+import sys
 from harness.goose import GooseHarness
 from harness.registry import HarnessRegistry
+from tui.review_evidence_manifest import ReviewRequest
 
-registry = HarnessRegistry()
+range_name, scope, prompt, owner, repository, number, base_sha, head_sha = sys.argv[1:]
+binding = ReviewRequest(owner, repository, int(number), base_sha, head_sha,
+                        "maintainer", "review", generated_at="bluefin-review")
 adapter = GooseHarness(availability=GooseHarness.probe())
+registry = HarnessRegistry()
 registry.register(adapter)
-registry.require_ready("goose")
-assert adapter.capabilities.invocation and adapter.capabilities.result_conversion
-assert adapter.capabilities.exact_binding and adapter.capabilities.provenance
+selected = registry.require_ready("goose")
+result = selected.stream(
+    binding, prompt=prompt, steer=None,
+    extra_args=tuple(["--check-scope", scope] if scope else [])
+    + ((range_name,) if range_name else ()),
+    on_line=lambda line: print(line, flush=True),
+)
+raise SystemExit(int(result.live.get("exit_code", 1)))
 PY
 }
 
@@ -224,8 +235,6 @@ report_incomplete_review() {
 # when a duplicate cluster exists. Without the overlay, the --instructions
 # pointer carries the same doctrine.
 goose_review() {
-  goose_registry_ready || return $?
-  local -a argv=(goose review)
   local scope=""
   if [[ -d "${SCOPE_ROOT}/.agents" ]]; then
     scope="$(mktemp -d "${TMPDIR:-/tmp}/bluefin-review-scope.XXXXXX")"
@@ -250,15 +259,23 @@ goose_review() {
         printf '\n'
       } >"${scope}/.agents/checks/maintainer-steering.md"
     fi
-    argv+=(--check-scope "$scope")
-  else
-    local instructions
-    instructions="$(review_instructions)"
-    if [[ -n "$instructions" ]]; then argv+=(--instructions "$instructions"); fi
   fi
 
+  local prompt=""
+  [[ -n "$scope" ]] || prompt="$(review_instructions)"
+  local owner="${BLUEFIN_REVIEW_OWNER:-local}"
+  local repository="${BLUEFIN_REVIEW_REPOSITORY:-review}"
+  local number="${BLUEFIN_REVIEW_PULL_REQUEST:-1}"
+  local head_sha base_sha
+  head_sha="$(git rev-parse HEAD 2>/dev/null || true)"
+  base_sha="$head_sha"
+  if [[ ! "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    head_sha=0000000000000000000000000000000000000000
+    base_sha="$head_sha"
+  fi
   local status=0
-  run_reviewed "${argv[@]}" "$@" || status=$?
+  run_reviewed run_registered_review "${1:-}" "$scope" "$prompt" \
+    "$owner" "$repository" "$number" "$base_sha" "$head_sha" || status=$?
   if [[ -n "$scope" ]]; then rm -rf "$scope"; fi
   return "$status"
 }
@@ -459,7 +476,9 @@ run_goose_review() {
     fi
 
     banner
-    BLUEFIN_REVIEW_RELATED="$local_related" goose_review "origin/${base}...HEAD"
+    BLUEFIN_REVIEW_OWNER="${repo%%/*}" BLUEFIN_REVIEW_REPOSITORY="${repo##*/}" \
+      BLUEFIN_REVIEW_PULL_REQUEST="$number" BLUEFIN_REVIEW_RELATED="$local_related" \
+      goose_review "origin/${base}...HEAD"
   )
 }
 

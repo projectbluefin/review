@@ -10,7 +10,9 @@ mkdir -p "$scratch/bin"
 
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then exit 0; fi
 printf '%s\n' "$*" >"${GOOSE_ARGS:?}"
+printf '%s\n' 'adapter invoked' >"${GOOSE_ADAPTER_CALLED:-/dev/null}"
 exit 23
 EOF
 chmod +x "$scratch/bin/goose"
@@ -29,6 +31,7 @@ export BLUEFIN_REVIEW_REPOSITORY_ROOT="$scratch/absent"
 # accepted anything, so the bogus contract went unnoticed.
 set +e
 banner="$(PATH="$scratch/bin:$PATH" GOOSE_ARGS="$scratch/goose-args" \
+  GOOSE_ADAPTER_CALLED="$scratch/adapter-called" \
   "$review" main...HEAD)"
 status=$?
 set -e
@@ -36,6 +39,7 @@ set -e
 [[ "$banner" == "$expected_banner" ]]
 [[ "$status" -eq 23 ]]
 [[ "$(cat "$scratch/goose-args")" == "review main...HEAD" ]]
+[[ -f "$scratch/adapter-called" ]]
 
 # --- no arguments still reviews the working tree ------------------------------
 set +e
@@ -108,6 +112,7 @@ set -e
 # review is the worst outcome this tool can produce, so it gets its own status.
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then exit 0; fi
 cat >&2 <<'OUT'
 goose review: discovered 2 check(s):
 goose review: check 'bluefin-doctrine' failed: parse check JSON: The model returned an empty response.
@@ -136,6 +141,7 @@ set -e
 # A run where every check answered stays clean, and stays exit 0.
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then exit 0; fi
 echo "goose review: check 'bluefin-doctrine' completed: 0 finding(s)" >&2
 echo "goose review: orchestrator emitted 0 finding(s) from 1 check(s)" >&2
 exit 0
@@ -154,6 +160,7 @@ set -e
 # restore the exit-code stub for the assertions that follow
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then exit 0; fi
 printf '%s\n' "$*" >"${GOOSE_ARGS:?}"
 exit 23
 EOF
@@ -356,6 +363,7 @@ cp "$repo_root/image/review-scope/checks/bluefin-doctrine.md" \
 
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then exit 0; fi
 printf '%s\0' "$@" >"${GOOSE_ARGV:?}"
 scope=""
 while (($#)); do
@@ -420,6 +428,7 @@ grep -q 'name: cluster-resolution' "$scratch/scope-cluster2"
 # additional check in the scratch scope, never as a replacement for doctrine.
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then exit 0; fi
 scope=""
 while (($#)); do
   case "$1" in
