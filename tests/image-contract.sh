@@ -528,6 +528,10 @@ forbid image/config/local-agent-policy.md \
 # shellcheck disable=SC2016 # Literal source assertions, not shell expansions.
 require image/entrypoint.sh \
   'selected_backend="${AGENT_BACKEND:-goose}"' \
+  'command -v codex >/dev/null 2>&1' \
+  'codex --version >/dev/null 2>&1' \
+  '/home/dev/.codex/auth.json' \
+  'Codex backend selected but its subscription auth.json is missing.' \
   'command -v pi >/dev/null 2>&1' \
   'pi --version >/dev/null 2>&1' \
   'ANTHROPIC_API_KEY' \

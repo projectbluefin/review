@@ -286,6 +286,7 @@ require_no_running_instance() {
   fi
   owner_pid="$(container_owner_pid "$name")"
   if [[ -z "$owner_pid" ]]; then
+    cleanup_codex_auth_staging_dir "$(podman inspect --format '{{index .Config.Labels "review.codex-auth"}}' "$name" 2>/dev/null || true)"
     echo "✓ reclaiming ${name} from a run whose terminal is gone."
     return 0
   fi
@@ -484,6 +485,12 @@ cleanup_codex_auth_file() {
   CODEX_AUTH_FILE=""
   CODEX_AUTH_STAGING_DIR=""
   return 0
+}
+cleanup_codex_auth_staging_dir() {
+  local staging_dir="${1:-}"
+  [[ "$staging_dir" == /* && "$staging_dir" == */review-codex-auth.* ]] || return 0
+  rm -f -- "${staging_dir}/auth.json"
+  rmdir -- "$staging_dir" 2>/dev/null || true
 }
 resolve_review_backend() {
   REVIEW_BACKEND="${BLUEFIN_REVIEW_BACKEND:-}"
@@ -865,9 +872,14 @@ review-container profile="" effort="":
       echo "✓ Pi credential passed to the agent (value not shown)."
     fi
     CODEX_AUTH_STAGING_DIR=""
-    trap cleanup_codex_auth_file EXIT
+    if [[ "$DETACH" != 1 ]]; then
+      trap cleanup_codex_auth_file EXIT
+    fi
     if [[ "$BACKEND" == codex ]]; then
       stage_codex_auth_file
+      if [[ "$DETACH" == 1 ]]; then
+        CONTAINER_ARGS+=(--label "review.codex-auth=${CODEX_AUTH_STAGING_DIR}")
+      fi
       CONTAINER_ARGS+=(--volume "$CODEX_AUTH_FILE:/home/dev/.codex/auth.json:rw,z")
       echo "✓ Codex subscription login staged as one private file (contents not shown; host cache not mounted)."
     fi
@@ -896,8 +908,9 @@ review-container profile="" effort="":
         status=0
       else
         status=$?
+        cleanup_codex_auth_file
       fi
-      cleanup_codex_auth_file
+      [[ "$DETACH" == 1 ]] || cleanup_codex_auth_file
       exit "$status"
     fi
     exec "${CONTAINER_ARGS[@]}"
@@ -910,6 +923,7 @@ review-container profile="" effort="":
 review-stop name="review-container":
     #!/usr/bin/env bash
     set -euo pipefail
+    {{shared_functions}}
     NAME="{{name}}"
     [[ "$NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || {
       echo "ERROR: '${NAME}' is not a valid container name." >&2
@@ -928,7 +942,9 @@ review-stop name="review-container":
       echo "ERROR: ${NAME} is an attended run; press Ctrl-C in its terminal instead." >&2
       exit 1
     fi
+    codex_auth_staging_dir="$(podman inspect --format '{{{{index .Config.Labels "review.codex-auth"}}' "$NAME" 2>/dev/null || true)"
     podman stop "$NAME" >/dev/null
+    cleanup_codex_auth_staging_dir "$codex_auth_staging_dir"
     echo "✓ stopped the detached worker ${NAME}."
 
 # The maintainer review dashboard over the Bluefin PR queue — no Hive.

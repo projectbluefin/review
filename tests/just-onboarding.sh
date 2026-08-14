@@ -165,6 +165,8 @@ case "${1:-}" in
     ;;
   stop)
     printf '%s\n' "$*" >>"${RUNNER_LOG:?}"
+    codex_auth_source="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "${CREDENTIAL_LOG:?}")"
+    [[ -z "$codex_auth_source" ]] || rm -f -- "$codex_auth_source"
     exit 0
     ;;
   container)
@@ -235,9 +237,13 @@ while (($#)); do
       esac
       shift 2
       ;;
+    --detach) detached=true; shift ;;
     *) shift ;;
   esac
 done
+if [[ "${FAKE_PODMAN_DETACH_SUCCESS:-0}" == 1 && "${detached:-false}" == true ]]; then
+  exit 0
+fi
 exit 97
 EOF
 chmod +x "$fake_bin"/*
@@ -650,6 +656,20 @@ assert_file_not_contains "--interactive" "$runner_log"
 assert_file_not_contains "--tty" "$runner_log"
 assert_contains "just review-stop review-container" "$OUT"
 assert_contains "podman logs -f review-container" "$OUT"
+
+begin "review-container: detached Codex auth survives until review-stop"
+reset_logs
+mkdir -p "$home/.codex"
+printf '{"tokens":{"access_token":"codex-test-secret"}}\n' >"$home/.codex/auth.json"
+chmod 0400 "$home/.codex/auth.json"
+run_recipe review-container GH_READY=1 TOOL=codex REVIEW_DETACH=1 FAKE_PODMAN_DETACH_SUCCESS=1
+codex_auth_mount="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "$credential_log")"
+assert_file_exists "$codex_auth_mount"
+assert_file_contains "--label review.codex-auth=" "$runner_log"
+run_recipe review-stop FAKE_PODMAN_RUNNING=1 FAKE_PODMAN_OWNER_LABEL=detached
+assert_file_not_exists "$codex_auth_mount"
+rm -f "$home/.codex/auth.json"
+rmdir "$home/.codex"
 
 begin "review-container: a running detached worker is never reclaimed"
 reset_logs
