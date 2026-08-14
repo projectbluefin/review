@@ -487,11 +487,16 @@ cleanup_codex_auth_file() {
   return 0
 }
 cleanup_codex_auth_staging_dir() {
-  local staging_dir="${1:-}"
+  local staging_dir="${1:-}" invoking_uid
   local stage_root=/tmp
+  invoking_uid="$(id -u)"
   [[ "$staging_dir" =~ ^${stage_root%/}/review-codex-auth\.[[:alnum:]]{6}$ ]] || return 0
   [[ -d "$staging_dir" && ! -L "$staging_dir" ]] || return 0
   [[ -f "$staging_dir/auth.json" && ! -L "$staging_dir/auth.json" ]] || return 0
+  [[ "$(stat -c %u "$staging_dir")" == "$invoking_uid" ]] || return 0
+  [[ "$(stat -c %a "$staging_dir")" == 700 ]] || return 0
+  [[ "$(stat -c %u "$staging_dir/auth.json")" == "$invoking_uid" ]] || return 0
+  [[ "$(stat -c %a "$staging_dir/auth.json")" == 600 ]] || return 0
   [[ "$(find "$staging_dir" -mindepth 1 -maxdepth 1 -print | wc -l)" == 1 ]] || return 0
   rm -f -- "${staging_dir}/auth.json"
   rmdir -- "$staging_dir" 2>/dev/null || true

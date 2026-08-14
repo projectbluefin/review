@@ -742,10 +742,28 @@ reset_logs
 valid_stage="/tmp/review-codex-auth.ABCDEF"
 mkdir -p "$valid_stage"
 printf secret >"$valid_stage/auth.json"
+chmod 0700 "$valid_stage"
+chmod 0600 "$valid_stage/auth.json"
 run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
   FAKE_PODMAN_OWNER_LABEL=detached FAKE_PODMAN_CODEX_AUTH_LABEL="$valid_stage"
 assert_zero_status "$STATUS" "valid auth label cleanup must succeed"
 assert_file_not_exists "$valid_stage"
+
+begin "review-stop: public Codex auth staging remains untouched"
+reset_logs
+public_dir="/tmp/review-codex-auth.ABCDEF"
+mkdir -p "$public_dir"
+printf secret >"$public_dir/auth.json"
+chmod 0755 "$public_dir"
+chmod 0644 "$public_dir/auth.json"
+run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
+  FAKE_PODMAN_OWNER_LABEL=detached FAKE_PODMAN_CODEX_AUTH_LABEL="$public_dir"
+assert_zero_status "$STATUS" "public auth staging must not make review-stop fail"
+assert_file_exists "$public_dir/auth.json"
+assert_eq "755" "$(stat -c '%a' "$public_dir")" "public staging directory mode changed"
+assert_eq "644" "$(stat -c '%a' "$public_dir/auth.json")" "public auth file mode changed"
+rm -f "$public_dir/auth.json"
+rmdir "$public_dir"
 
 begin "review-container: a running detached worker is never reclaimed"
 reset_logs
@@ -1366,6 +1384,19 @@ begin "static: ownership is proven from the label, never guessed"
 if grep -n 'pgrep' "$code"; then
   fail "container ownership must come from the owner label, not a pgrep heuristic"
 fi
+
+begin "static: Codex cleanup requires invoking ownership and private modes"
+cleanup_body="$(sed -n '/^cleanup_codex_auth_staging_dir()/,/^}/p' "$code")"
+grep -Fq 'stat -c %u "$staging_dir"' <<<"$cleanup_body" ||
+  fail "Codex cleanup must inspect staging-directory ownership"
+grep -Fq 'stat -c %a "$staging_dir"' <<<"$cleanup_body" ||
+  fail "Codex cleanup must inspect staging-directory mode"
+grep -Fq 'stat -c %u "$staging_dir/auth.json"' <<<"$cleanup_body" ||
+  fail "Codex cleanup must inspect auth-file ownership"
+grep -Fq 'stat -c %a "$staging_dir/auth.json"' <<<"$cleanup_body" ||
+  fail "Codex cleanup must inspect auth-file mode"
+grep -Fq 'id -u' <<<"$cleanup_body" ||
+  fail "Codex cleanup must compare ownership with the invoking UID"
 
 begin "static: nothing here filters the work Hive assigns"
 # Hive's selectTask is the sole authority on what gets worked on: the hub's
