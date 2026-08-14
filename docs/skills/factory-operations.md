@@ -1,6 +1,6 @@
 ---
 name: factory-operations
-version: "1.0"
+version: "1.1"
 last_updated: 2026-08-14
 id: factory-operations
 one_line_purpose: Keep bounded factory work moving until it lands or is externally blocked.
@@ -40,6 +40,10 @@ state.
   work.
 - Put important transition receipts in the repository's durable issue or pull
   request system.
+- When an authorized repository owner explicitly clears a lane and current
+  remote PR, branch, and assignee evidence is clean, an unpushed planning
+  reference is advisory rather than ACTIVE ownership; record the clearance and
+  dispatch. Actual overlapping maintainer branches or PRs take precedence.
 - Repair concrete, validated failures without speculative re-architecture.
 - Knowing the next steps is not a stop condition. Continue until the outcome
   is merged or concretely externally blocked.
