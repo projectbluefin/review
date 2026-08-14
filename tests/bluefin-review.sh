@@ -270,6 +270,8 @@ if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
 printf '%s\n' "$$" >"${GOOSE_PID_FILE:?}"
 printf '%s\n' "goose review: check 'main' completed: 0 finding(s)"
 printf '%s\n' 'goose review: orchestrator emitted 0 finding(s) from 1 check(s) (main: ran, 0 finding(s))'
+printf '%s\n' complete >"${GOOSE_COMPLETION_SENTINEL}.tmp"
+mv "${GOOSE_COMPLETION_SENTINEL}.tmp" "$GOOSE_COMPLETION_SENTINEL"
 exit 0
 EOF
 chmod +x "$scratch/bin/goose"
@@ -285,8 +287,8 @@ set -T
 boundary_debug() {
   [[ -n "${BOUNDARY_TRACE-}" ]] && printf '%s\n' "${BASH_COMMAND-}" >>"$BOUNDARY_TRACE"
   case "${BASH_COMMAND-}" in
-    *REVIEW_CHILD_PID*)
-      if [[ "${BOUNDARY_PHASE-}" == adapter ]]; then
+    'REVIEW_CHILD_PID=""')
+      if [[ "${BOUNDARY_PHASE-}" == adapter && -e "${GOOSE_COMPLETION_SENTINEL-}" ]]; then
         : >"${BOUNDARY_MARKER:?}"
         sleep 1
       fi
@@ -304,16 +306,17 @@ EOF
 
 run_boundary_signal() {
   local signal="$1" expected="$2" label="$3"
-  rm -f "$scratch/boundary-marker" "$scratch/boundary-kills" "$scratch/boundary-pid"
+  local trace="$scratch/boundary-$label-trace"
+  rm -f "$scratch/boundary-marker" "$scratch/boundary-kills" "$scratch/boundary-pid" "$scratch/boundary-$label-sentinel" "$trace"
   if [[ "$signal" == INT ]]; then
     BASH_ENV="$scratch/debug-boundary.env" PATH="$scratch/bin:$PATH" \
       GOOSE_PID_FILE="$scratch/boundary-pid" KILL_LOG="$scratch/boundary-kills" \
-      BOUNDARY_MARKER="$scratch/boundary-marker" BOUNDARY_PHASE=adapter BOUNDARY_TRACE="/tmp/issue-239-boundary-trace" \
+      GOOSE_COMPLETION_SENTINEL="$scratch/boundary-$label-sentinel" BOUNDARY_MARKER="$scratch/boundary-marker" BOUNDARY_PHASE=adapter BOUNDARY_TRACE="$trace" \
       env --default-signal=SIGINT setsid "$review" main...HEAD >"$scratch/boundary-$label-output" 2>&1 &
   else
     BASH_ENV="$scratch/debug-boundary.env" PATH="$scratch/bin:$PATH" \
       GOOSE_PID_FILE="$scratch/boundary-pid" KILL_LOG="$scratch/boundary-kills" \
-      BOUNDARY_MARKER="$scratch/boundary-marker" BOUNDARY_PHASE=adapter BOUNDARY_TRACE="/tmp/issue-239-boundary-trace" "$review" main...HEAD \
+      GOOSE_COMPLETION_SENTINEL="$scratch/boundary-$label-sentinel" BOUNDARY_MARKER="$scratch/boundary-marker" BOUNDARY_PHASE=adapter BOUNDARY_TRACE="$trace" "$review" main...HEAD \
       >"$scratch/boundary-$label-output" 2>&1 &
   fi
   local launcher=$!
@@ -332,6 +335,8 @@ run_boundary_signal() {
   local actual=$?
   set -e
   [[ "$actual" -eq "$expected" ]]
+  [[ "$(tail -n 2 "$trace" | head -n 1)" == "wait \"\$REVIEW_CHILD_PID\"" ]]
+  [[ "$(tail -n 1 "$trace")" == 'REVIEW_CHILD_PID=""' ]]
   [[ ! -s "$scratch/boundary-kills" ]]
 }
 
@@ -349,12 +354,12 @@ for signal in TERM INT; do
   if [[ "$signal" == INT ]]; then
     BASH_ENV="$scratch/debug-boundary.env" BLUEFIN_REVIEW_SCOPE_ROOT="$scratch/overlay" \
       TMPDIR="$scratch/tmp" PATH="$scratch/bin:$PATH" GOOSE_PID_FILE="$scratch/boundary-pid" \
-      KILL_LOG="$scratch/boundary-kills" BOUNDARY_MARKER="$scratch/boundary-marker" BOUNDARY_PHASE=scope BOUNDARY_TRACE="/tmp/issue-239-boundary-trace" \
+      GOOSE_COMPLETION_SENTINEL="$scratch/scope-$signal-sentinel" KILL_LOG="$scratch/boundary-kills" BOUNDARY_MARKER="$scratch/boundary-marker" BOUNDARY_PHASE=scope BOUNDARY_TRACE="$scratch/scope-$signal-trace" \
       env --default-signal=SIGINT setsid "$review" main...HEAD >"$scratch/scope-$signal-output" 2>&1 &
   else
     BASH_ENV="$scratch/debug-boundary.env" BLUEFIN_REVIEW_SCOPE_ROOT="$scratch/overlay" \
       TMPDIR="$scratch/tmp" PATH="$scratch/bin:$PATH" GOOSE_PID_FILE="$scratch/boundary-pid" \
-      KILL_LOG="$scratch/boundary-kills" BOUNDARY_MARKER="$scratch/boundary-marker" BOUNDARY_PHASE=scope BOUNDARY_TRACE="/tmp/issue-239-boundary-trace" \
+      GOOSE_COMPLETION_SENTINEL="$scratch/scope-$signal-sentinel" KILL_LOG="$scratch/boundary-kills" BOUNDARY_MARKER="$scratch/boundary-marker" BOUNDARY_PHASE=scope BOUNDARY_TRACE="$scratch/scope-$signal-trace" \
       "$review" main...HEAD >"$scratch/scope-$signal-output" 2>&1 &
   fi
   launcher=$!
