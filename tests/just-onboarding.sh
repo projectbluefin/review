@@ -1387,13 +1387,13 @@ fi
 
 begin "static: Codex cleanup requires invoking ownership and private modes"
 cleanup_body="$(sed -n '/^cleanup_codex_auth_staging_dir()/,/^}/p' "$code")"
-grep -Fq 'stat -c %u "$staging_dir"' <<<"$cleanup_body" ||
+grep -Fq "stat -c %u \"\$staging_dir\"" <<<"$cleanup_body" ||
   fail "Codex cleanup must inspect staging-directory ownership"
-grep -Fq 'stat -c %a "$staging_dir"' <<<"$cleanup_body" ||
+grep -Fq "stat -c %a \"\$staging_dir\"" <<<"$cleanup_body" ||
   fail "Codex cleanup must inspect staging-directory mode"
-grep -Fq 'stat -c %u "$staging_dir/auth.json"' <<<"$cleanup_body" ||
+grep -Fq "stat -c %u \"\$staging_dir/auth.json\"" <<<"$cleanup_body" ||
   fail "Codex cleanup must inspect auth-file ownership"
-grep -Fq 'stat -c %a "$staging_dir/auth.json"' <<<"$cleanup_body" ||
+grep -Fq "stat -c %a \"\$staging_dir/auth.json\"" <<<"$cleanup_body" ||
   fail "Codex cleanup must inspect auth-file mode"
 grep -Fq 'id -u' <<<"$cleanup_body" ||
   fail "Codex cleanup must compare ownership with the invoking UID"
