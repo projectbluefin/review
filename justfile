@@ -462,7 +462,7 @@ resolve_codex_auth_file() {
   return 0
 }
 stage_codex_auth_file() {
-  local stage_root="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
+  local stage_root=/tmp
   CODEX_AUTH_FILE=""
   CODEX_AUTH_STAGING_DIR=""
   resolve_codex_auth_file
@@ -488,11 +488,8 @@ cleanup_codex_auth_file() {
 }
 cleanup_codex_auth_staging_dir() {
   local staging_dir="${1:-}"
-  local stage_root="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
-  if [[ "$stage_root" != /* || ! -d "$stage_root" || ! -w "$stage_root" ]]; then
-    stage_root=/tmp
-  fi
-  [[ "$staging_dir" == "${stage_root%/}"/review-codex-auth.[[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]] ]] || return 0
+  local stage_root=/tmp
+  [[ "$staging_dir" =~ ^${stage_root%/}/review-codex-auth\.[[:alnum:]]{6}$ ]] || return 0
   [[ -d "$staging_dir" && ! -L "$staging_dir" ]] || return 0
   [[ -f "$staging_dir/auth.json" && ! -L "$staging_dir/auth.json" ]] || return 0
   [[ "$(find "$staging_dir" -mindepth 1 -maxdepth 1 -print | wc -l)" == 1 ]] || return 0

@@ -165,8 +165,6 @@ case "${1:-}" in
     ;;
   stop)
     printf '%s\n' "$*" >>"${RUNNER_LOG:?}"
-    codex_auth_source="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "${CREDENTIAL_LOG:?}")"
-    [[ -z "$codex_auth_source" ]] || rm -f -- "$codex_auth_source"
     exit 0
     ;;
   container)
@@ -414,7 +412,7 @@ assert_not_contains "Goose has no usable provider configuration" "$OUT"
 assert_not_contains "Copilot" "$OUT"
 assert_file_contains "--env AGENT_BACKEND=codex" "$runner_log"
 codex_auth_mount="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "$credential_log")"
-assert_contains "${tmp_root}/" "$codex_auth_mount"
+assert_contains "/tmp/review-codex-auth." "$codex_auth_mount"
 [[ "$codex_auth_mount" != "$home/.codex/auth.json" ]] || fail "host Codex auth must not be mounted directly"
 assert_file_not_contains "codex-test-secret" "$runner_log"
 assert_file_not_contains "codex-test-secret" "$OUT"
@@ -550,7 +548,7 @@ chmod 0400 "$home/.codex/auth.json"
 run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
   BLUEFIN_REVIEW_BACKEND=codex
 codex_auth_mount="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "$credential_log")"
-assert_contains "${tmp_root}/" "$codex_auth_mount"
+assert_contains "/tmp/review-codex-auth." "$codex_auth_mount"
 [[ "$codex_auth_mount" != "$home/.codex/auth.json" ]] || fail "host Codex auth must not be mounted directly"
 assert_file_contains "CODEX_AUTH_DIRECT:no" "$credential_log"
 assert_file_not_exists "$codex_auth_mount"
@@ -671,7 +669,25 @@ run_recipe review-container GH_READY=1 TOOL=codex REVIEW_DETACH=1 FAKE_PODMAN_DE
 codex_auth_mount="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "$credential_log")"
 assert_file_exists "$codex_auth_mount"
 assert_file_contains "--label review.codex-auth=" "$runner_log"
-run_recipe review-stop FAKE_PODMAN_RUNNING=1 FAKE_PODMAN_OWNER_LABEL=detached
+auth_label="$(sed -n 's/.*--label review.codex-auth=\([^ ]*\).*/\1/p' "$runner_log")"
+run_recipe review-stop FAKE_PODMAN_RUNNING=1 FAKE_PODMAN_OWNER_LABEL=detached \
+  FAKE_PODMAN_CODEX_AUTH_LABEL="$auth_label" XDG_RUNTIME_DIR= TMPDIR=/tmp
+assert_file_not_exists "$codex_auth_mount"
+rm -f "$home/.codex/auth.json"
+rmdir "$home/.codex"
+
+begin "review-container: stale Codex auth cleanup survives runtime drift"
+reset_logs
+mkdir -p "$home/.codex"
+printf '{"tokens":{"access_token":"codex-test-secret"}}\n' >"$home/.codex/auth.json"
+chmod 0400 "$home/.codex/auth.json"
+run_recipe review-container GH_READY=1 TOOL=codex REVIEW_DETACH=1 \
+  FAKE_PODMAN_DETACH_SUCCESS=1
+codex_auth_mount="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "$credential_log")"
+assert_file_exists "$codex_auth_mount"
+auth_label="$(sed -n 's/.*--label review.codex-auth=\([^ ]*\).*/\1/p' "$runner_log")"
+run_recipe review-container GH_READY=1 TOOL=codex FAKE_PODMAN_RUNNING=1 \
+  FAKE_PODMAN_CODEX_AUTH_LABEL="$auth_label" XDG_RUNTIME_DIR= TMPDIR=/tmp
 assert_file_not_exists "$codex_auth_mount"
 rm -f "$home/.codex/auth.json"
 rmdir "$home/.codex"
@@ -695,21 +711,21 @@ mkdir -p "$outside_dir"
 printf secret >"$outside_dir/auth.json"
 for unsafe_label in \
   "$outside_dir" \
-  "$tmp_root/review-codex-auth.ABCDE" \
-  "$tmp_root/review-codex-auth.ABCDEFG" \
-  "$tmp_root/review-codex-auth.ABCDEF/../outside-review-codex-auth.ABCDEF"; do
+  "/tmp/review-codex-auth.ABCDE" \
+  "/tmp/review-codex-auth.ABCDEFG" \
+  "/tmp/review-codex-auth.ABCDEF/../outside-review-codex-auth.ABCDEF"; do
   run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
     FAKE_PODMAN_OWNER_LABEL=detached FAKE_PODMAN_CODEX_AUTH_LABEL="$unsafe_label"
   assert_zero_status "$STATUS" "unsafe auth label must not make review-stop fail"
   assert_file_exists "$outside_dir/auth.json"
 done
-symlink_stage="$tmp_root/review-codex-auth.SYMLNK"
+symlink_stage="/tmp/review-codex-auth.SYMLNK"
 ln -s "$outside_dir" "$symlink_stage"
 run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
   FAKE_PODMAN_OWNER_LABEL=detached FAKE_PODMAN_CODEX_AUTH_LABEL="$symlink_stage"
 assert_file_exists "$outside_dir/auth.json"
 rm -f "$symlink_stage"
-extra_stage="$tmp_root/review-codex-auth.EXTRA1"
+extra_stage="/tmp/review-codex-auth.EXTRA1"
 mkdir -p "$extra_stage"
 printf secret >"$extra_stage/auth.json"
 printf extra >"$extra_stage/extra"
@@ -723,7 +739,7 @@ rmdir "$outside_dir"
 
 begin "review-stop: valid Codex auth label requires a private exact staging directory"
 reset_logs
-valid_stage="$tmp_root/review-codex-auth.ABCDEF"
+valid_stage="/tmp/review-codex-auth.ABCDEF"
 mkdir -p "$valid_stage"
 printf secret >"$valid_stage/auth.json"
 run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
