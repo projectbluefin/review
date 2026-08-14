@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 review="$repo_root/image/bin/bluefin-review"
+export BLUEFIN_REVIEW_HARNESS_ROOT="$repo_root/image"
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 mkdir -p "$scratch/bin"

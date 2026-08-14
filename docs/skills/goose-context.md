@@ -19,6 +19,12 @@ metadata:
 
 # Goose Context
 
+Maintainer reviews use Goose as the `goose` entry in the shared harness
+registry. The adapter owns readiness, exact-head invocation, streaming,
+cancellation, redacted evidence, and structured `ReviewResult` conversion;
+body drafting is explicitly unsupported and never falls back to another
+harness.
+
 ## When to Use
 
 Load this when changing Goose configuration, skill routing, or the

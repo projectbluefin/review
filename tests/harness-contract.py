@@ -76,6 +76,35 @@ class HarnessContract(unittest.TestCase):
         self.assertTrue(adapter.capabilities.exact_binding)
         self.assertTrue(adapter.capabilities.provenance)
 
+    def test_goose_registry_owns_invocation_and_result_conversion(self):
+        adapter = GooseHarness(availability=Availability.READY)
+        command = adapter.command(self.binding, prompt="inspect", model="gpt-5.6-luna", effort="high")
+        self.assertEqual(command[:2], ["goose", "review"])
+        self.assertIn("project/review#166", command[-1])
+        self.assertIn("base=" + "a" * 40, command[-1])
+        self.assertIn("head=" + "b" * 40, command[-1])
+        result = adapter.convert(
+            "goose review: check 'main' completed: 0 finding(s)\n"
+            "goose review: orchestrator emitted 0 finding(s) from 1 check(s) (main: ran, 0 finding(s))",
+            self.binding,
+            0,
+            model="gpt-5.6-luna",
+            effort="high",
+        )
+        self.assertEqual(result.state, "complete")
+        self.assertEqual(result.provenance["head_sha"], "b" * 40)
+        self.assertEqual(result.provenance["backend"], "goose")
+
+    def test_goose_failures_are_explicit_and_fail_closed(self):
+        for state in (Availability.UNAVAILABLE_BINARY, Availability.UNAVAILABLE_AUTH,
+                      Availability.FAILED_CONFORMANCE):
+            with self.subTest(state=state), self.assertRaises(RuntimeError):
+                GooseHarness(availability=state).invoke(self.binding, prompt="inspect")
+        adapter = GooseHarness(availability=Availability.READY)
+        self.assertEqual(adapter.convert("not a Goose result", self.binding, 0).state, "unparsable")
+        self.assertEqual(adapter.convert("", self.binding, 23).state, "failed")
+        self.assertEqual(adapter.convert("", self.binding, 65).state, "incomplete")
+
     def test_binding_is_exact_context_shape(self):
         self.assertEqual(f"{self.binding.owner}/{self.binding.repository}", "project/review")
         self.assertEqual(self.binding.pull_request_number, 166)

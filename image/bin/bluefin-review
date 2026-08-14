@@ -59,6 +59,22 @@ SCOPE_ROOT="${BLUEFIN_REVIEW_SCOPE_ROOT:-/opt/bluefin/review-scope}"
 # a clean result.
 PULL_FETCH_LIMIT="${BLUEFIN_REVIEW_PULL_LIMIT:-200}"
 
+goose_registry_ready() {
+  local root="${BLUEFIN_REVIEW_HARNESS_ROOT:-/opt/bluefin}"
+  PYTHONPATH="${root}:${root}/tui${PYTHONPATH:+:${PYTHONPATH}}" \
+    python3 - <<'PY'
+from harness.goose import GooseHarness
+from harness.registry import HarnessRegistry
+
+registry = HarnessRegistry()
+adapter = GooseHarness(availability=GooseHarness.probe())
+registry.register(adapter)
+registry.require_ready("goose")
+assert adapter.capabilities.invocation and adapter.capabilities.result_conversion
+assert adapter.capabilities.exact_binding and adapter.capabilities.provenance
+PY
+}
+
 repository_context_instructions() {
   local root="${BLUEFIN_REVIEW_REPOSITORY_ROOT:-$PWD}"
   python3 - "$root" <<'PY'
@@ -208,6 +224,7 @@ report_incomplete_review() {
 # when a duplicate cluster exists. Without the overlay, the --instructions
 # pointer carries the same doctrine.
 goose_review() {
+  goose_registry_ready || return $?
   local -a argv=(goose review)
   local scope=""
   if [[ -d "${SCOPE_ROOT}/.agents" ]]; then
