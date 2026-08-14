@@ -186,7 +186,10 @@ PATH="$scratch/bin:$PATH" HIVE_WORKSPACE_DIR="$scratch/workspace" \
   GOOSE_PID_FILE="$scratch/goose-pid" GH_CALLS="$scratch/gh-calls-signal" \
   "$review" pr projectbluefin/alpha 31 >"$scratch/signal-output" 2>&1 &
 launcher_pid=$!
-for _ in {1..50}; do [[ -s "$scratch/goose-pid" ]] && break; sleep 0.1; done
+for _ in {1..50}; do
+  [[ -s "$scratch/goose-pid" ]] && break
+  sleep 0.1
+done
 [[ -s "$scratch/goose-pid" ]]
 goose_pid="$(<"$scratch/goose-pid")"
 kill -TERM "$launcher_pid"
