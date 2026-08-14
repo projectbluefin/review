@@ -2446,7 +2446,7 @@ class ReviewDashboard(App):
                 if not isinstance(value, tuple) or len(value) != 2:
                     return
                 body, body_file = value
-                if body is None:
+                if not isinstance(body, str) or not isinstance(body_file, str) or not body_file:
                     return
                 if not body and verdict != "approve":
                     self.notify(

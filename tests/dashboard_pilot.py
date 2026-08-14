@@ -150,8 +150,9 @@ async def main() -> int:
             dashboard.leave_review(review_stop)
             callback["handler"]("approve")
             callback["handler"]("unpreviewed body")
+            callback["handler"]((123, "not-a-body-file"))
             check(not mutations and not list(Path(body_dir).rglob("*")),
-                  "a bare ReviewBody result must not create a file or mutate")
+                  "malformed ReviewBody results must not create a file or mutate")
         finally:
             tui.TRACE_PATH = original_trace
 
@@ -1327,8 +1328,10 @@ async def main() -> int:
     # Missing Codex must degrade generation without touching manual prose.
     unavailable_backend = tui.ACTIVE_BACKEND
     original_unavailable_draft = tui.CodexHarness.draft
+    unavailable_probe_calls = []
 
     def unavailable_probe(cls):
+        unavailable_probe_calls.append(True)
         return tui.Availability.UNAVAILABLE_BINARY
 
     def unavailable_draft(self, request):
@@ -1338,6 +1341,8 @@ async def main() -> int:
     tui.CodexHarness.draft = unavailable_draft
     tui.ACTIVE_BACKEND = "codex"
     try:
+        check(tui.ACTIVE_BACKEND == "codex",
+              "unavailable Codex pilot must explicitly select Codex")
         app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -1362,12 +1367,15 @@ async def main() -> int:
             await pilot.pause()
             check(editor.text == "manual maintainer body",
                   "unavailable Codex must preserve the manual review body")
+            check(unavailable_probe_calls,
+                  "unavailable Codex must be reached during generation")
             check(any("unavailable" in notification.message.lower()
                       for notification in app._notifications),
                   "unavailable Codex must show a degraded generation message")
     finally:
         tui.CodexHarness.probe = original_probe
         tui.CodexHarness.draft = original_unavailable_draft
+        tui.ACTIVE_BACKEND = unavailable_backend
         check(tui.ACTIVE_BACKEND == unavailable_backend,
               "unavailable Codex pilot must restore the prior backend")
 
