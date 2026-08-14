@@ -2275,7 +2275,10 @@ class ReviewDashboard(App):
             if state == "merged":
                 stop.selected = False
                 stop.failure = ""
-            elif state in ("blocked", "failed"):
+            elif state in ("blocked", "failed", "awaiting-stable"):
+                # blocked/failed need a maintainer; an agent that exits with
+                # a PR still short of :stable has not finished, whatever its
+                # exit code — the row keeps the reason and stays selected.
                 stop.selected = True
                 stop.failure = f"{state}: {event.get('note', 'no reason given')}"
         self.refresh_rows()

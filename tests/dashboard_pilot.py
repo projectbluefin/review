@@ -359,6 +359,10 @@ async def main() -> int:
                 all(stop.key in prompt_text for stop in task.stops),
                 "the agent brief must name every selected pull request",
             )
+            check(
+                ":stable" in prompt_text and "awaiting-stable" in prompt_text,
+                "the brief must define done as the change published on :stable",
+            )
             for _ in range(200):
                 if not any(s.selected for s in app.stops):
                     break

@@ -85,6 +85,10 @@ grep -q 'def parse_status' "$landing_py" ||
   fail "the landing module must parse the agent's JSONL status report"
 grep -q 'BLUEFIN_REVIEW_LANDING_COMMAND' "$landing_py" ||
   fail "the landing command must be overridable for tests"
+grep -q 'awaiting-stable' "$landing_py" ||
+  fail "a merge is not done until :stable carries the change"
+grep -q ':stable' "$landing_py" ||
+  fail "the landing brief must define done as :stable published"
 
 # The gate is the typed pull request number: no y/yes, no timeout.
 grep -q 'class ConfirmMutation' "$tui" || fail "the ConfirmMutation gate must exist"

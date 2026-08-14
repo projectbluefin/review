@@ -34,11 +34,15 @@ DEFAULT_LANDING_COMMAND = "goose run --no-session -i @PROMPT"
 # "blocked" and "failed" differ: blocked means the rules forbid landing
 # (draft, failing required checks, no permission); failed means the attempt
 # itself errored. Both come back to the batch selected, with the note.
+# A GitHub merge is not "done": done is the merged commit published on the
+# repository's :stable image tag. "merged" is only reported once :stable
+# carries the change.
 PR_STATES = (
     "diagnosing",
     "fixing",
     "waiting-ci",
     "merging",
+    "awaiting-stable",
     "merged",
     "blocked",
     "failed",
@@ -123,13 +127,21 @@ For each pull request, in order:
    then squash-merge: `gh pr merge --squash`. If GitHub refuses (branch
    protection, review requirements), do not force anything — add the `lgtm`
    label instead and move on.
-5. Never merge a draft, never merge with failing required checks, never pass
+5. A GitHub merge is not done. Done is the merged commit published on the
+   image's `:stable` tag: report `awaiting-stable` right after merging, then
+   watch the repository's publish workflow for the merge commit and verify
+   the `:stable` tag moved onto it (the image's
+   `org.opencontainers.image.revision` label is the commit — `skopeo inspect
+   docker://<image>:stable`). Only when `:stable` carries the change, report
+   `merged`. If the publish fails, that failure is the deliverable: report
+   `failed` with the evidence.
+6. Never merge a draft, never merge with failing required checks, never pass
    `--admin` or any flag that bypasses branch protection, never force-push.
    A pull request the rules cannot land is reported, not forced.
 
 Report every state change by appending exactly one JSON line to
 {task.status_path} (create it; one object per line, no other output there):
-{{"pr": "org/repo#N", "state": "diagnosing|fixing|waiting-ci|merging|merged|blocked|failed", "note": "short reason"}}
+{{"pr": "org/repo#N", "state": "diagnosing|fixing|waiting-ci|merging|awaiting-stable|merged|blocked|failed", "note": "short reason"}}
 When the batch is fully handled, append:
 {{"state": "done", "note": "one-line summary for the maintainer"}}
 Everything else you print goes to the maintainer's log; keep it terse.

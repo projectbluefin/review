@@ -202,12 +202,18 @@ its own process group so `[x]` stops it whole.
 
 The agent reports, the screen polls: every per-PR state change is one JSON
 line in the task's status file (`diagnosing|fixing|waiting-ci|merging|
-merged|blocked|failed`, then a task-level `done`), and `LandingScreen`
-([A], auto-pushed on dispatch) renders all batches, per-PR state, the agent
-log tail, and Hive stats. Never scrape agent prose for status. When a task
-finishes, `landing_finished` folds the report onto the rows: merged leaves
-the batch; blocked and failed stay selected with the agent's reason — the
-same rule as every other failure.
+awaiting-stable|merged|blocked|failed`, then a task-level `done`), and
+`LandingScreen` ([A], auto-pushed on dispatch) renders all batches, per-PR
+state, the agent log tail, and Hive stats. Never scrape agent prose for
+status. When a task finishes, `landing_finished` folds the report onto the
+rows: merged leaves the batch; blocked, failed, and awaiting-stable stays
+selected with the agent's reason — the same rule as every other failure.
+
+**Done is `:stable`, not the merge.** A GitHub merge only starts the
+publish pipeline; the batch item is landed when the image's `:stable` tag
+carries the merged commit (verified via the publish workflow and the
+image's `org.opencontainers.image.revision` label). The agent reports
+`awaiting-stable` at merge and `merged` only once `:stable` has it.
 - **The completed card reuses those paths.** `L`, `a`, `m`, and `u` return to
   the queue's existing handlers, so permissions, live-head checks, exact
   commands, and typed-number confirmation remain the authority boundary.
