@@ -96,6 +96,7 @@ COMMANDS = (
     CommandSpec("pane_next", "l", "pane_next", "next pane"),
     CommandSpec("activate", "enter", "activate", "inspect highlighted item"),
     CommandSpec("back", "escape", "back", "back"),
+    CommandSpec("back_alias", "q", "back", "back"),
     CommandSpec("quit", "ctrl+q", "quit", "quit"),
     CommandSpec("steer", "slash", "steer", "steer review"),
     CommandSpec("review", "r", "review", "start a review"),
@@ -138,7 +139,7 @@ def bindings_for(_owner) -> list[Binding]:
 KEYS_READING = (
     " [b]r[/b] review [b]v[/b] diff [b]o[/b] open [b]h[/b] handoff"
     " [b]/[/b] steer [b]f[/b] filter [b]b[/b] batch [b]A[/b] agents [b]H[/b] hive"
-    " [b]R[/b] refresh [b]q[/b] quit"
+    " [b]R[/b] refresh [b]q[/b]/Esc back"
 )
 KEYS_ACTING = (
     " [b]L[/b] leave review [b]a[/b] approve+queue · land batch [b]m[/b] merge"
@@ -1596,6 +1597,10 @@ class ReviewDashboard(App):
         self.push_screen(ReviewScreen(stop, steer=steer))
 
     def on_key(self, event) -> None:
+        if event.key == "q" and not isinstance(self.focused, Input):
+            event.stop()
+            self.action_back()
+            return
         if event.key == "escape" and self.focused is self.query_one("#steer", Input):
             event.stop()
             self.query_one("#queue", ListView).focus()
@@ -2143,7 +2148,7 @@ class ReviewDashboard(App):
     def action_back(self) -> None:
         if self.focused is self.query_one("#steer", Input):
             self.query_one("#queue", ListView).focus()
-        elif self.screen_stack:
+        elif len(self.screen_stack) > 1:
             self.pop_screen()
 
     def action_help(self) -> None:

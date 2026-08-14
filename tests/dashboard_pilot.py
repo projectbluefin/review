@@ -134,6 +134,20 @@ async def main() -> int:
          "open_command_palette", "help"} <= ids,
         "navigation and current review commands must be semantic registry entries",
     )
+    back_commands = [command for command in registry if command.action == "back"]
+    check(
+        {command.key for command in back_commands} == {"escape", "q"},
+        "Escape and q must project the same semantic back action",
+    )
+    check(
+        [command.key for command in registry if command.action == "quit"] == ["ctrl+q"],
+        "Ctrl-q must be the sole global quit binding",
+    )
+    palette_commands = [command for command in registry if command.id.startswith("open_command_palette")]
+    check(
+        {command.key for command in palette_commands} == {"ctrl+p", ":"},
+        "Ctrl-p and : must project the real command palette action",
+    )
     check(
         tui.ReviewDashboard.BINDINGS == tui.bindings_for(tui.ReviewDashboard),
         "dashboard bindings must be generated from the semantic registry",
@@ -266,6 +280,33 @@ async def main() -> int:
         check(
             "[b]l[/b]" not in tui.KEYS_ACTING and "[b]p[/b]" not in tui.KEYS_ACTING,
             f"the acting key line must not advertise label or priority, got {tui.KEYS_ACTING!r}",
+        )
+        root_screen = app.screen
+        await pilot.press("q")
+        await pilot.pause()
+        check(app.screen is root_screen, "q must be safe on the root screen")
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        check(type(app.screen).__name__ == "CommandPalette", "Ctrl-p must open Textual's command palette")
+        await pilot.press("escape")
+        await pilot.press(":")
+        await pilot.pause()
+        check(type(app.screen).__name__ == "CommandPalette", ": must open Textual's command palette")
+        await pilot.press("escape")
+        app.push_screen(tui.ReviewVerdict())
+        await pilot.pause()
+        modal = app.screen
+        await pilot.press("q")
+        await pilot.pause()
+        check(app.screen is root_screen and app.screen is not modal, "q must close a pushed screen")
+        await pilot.press("/")
+        await pilot.press("q")
+        await pilot.pause()
+        check(app.query_one("#steer", tui.Input).value == "q", "q must remain typed editor input")
+        check(
+            any(binding.key == "ctrl+q" and binding.action == "quit"
+                for binding in tui.ReviewDashboard.BINDINGS),
+            "Ctrl-q must remain the quit binding",
         )
 
     async def run_review(exit_code: int, output: str):
