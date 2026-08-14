@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import tempfile
+from types import SimpleNamespace
 from pathlib import Path
 
 TUI_DIR = Path(
@@ -296,9 +297,50 @@ async def main() -> int:
         app.push_screen(tui.ReviewVerdict())
         await pilot.pause()
         modal = app.screen
+        check(isinstance(modal, tui.ReviewVerdict), "q acceptance must start on ReviewVerdict")
         await pilot.press("q")
         await pilot.pause()
         check(app.screen is root_screen and app.screen is not modal, "q must close a pushed screen")
+
+        harness_option = SimpleNamespace(
+            harness=SimpleNamespace(branding=SimpleNamespace(
+                harness_id="test", terminal_badge="TT", display_name="Test",
+            )),
+            discovery=SimpleNamespace(availability=SimpleNamespace(value="ready"),
+                                      model="test", reasoning="low"),
+            status="ready",
+        )
+        for screen in (
+            tui.MergeRecovery(tui.Stop("projectbluefin/review", 165, "review", "review"), "BEHIND"),
+            tui.HarnessTakeoff([harness_option], harness_option),
+        ):
+            app.push_screen(screen)
+            await pilot.pause()
+            active = app.screen
+            check(app.screen is screen, f"q acceptance must positively activate {type(screen).__name__}")
+            await pilot.press("q")
+            await pilot.pause()
+            check(app.screen is not active, f"q must dismiss {type(screen).__name__}")
+
+        app.push_screen(tui.ConfirmMutation([["gh", "pr", "merge"]], "165"))
+        await pilot.pause()
+        check(isinstance(app.screen, tui.ConfirmMutation), "q acceptance must activate ConfirmMutation")
+        await pilot.press("q")
+        await pilot.pause()
+        check(app.screen.query_one(tui.Input).value == "q", "q must type in the confirmation input")
+        await pilot.press("ctrl+a")
+        await pilot.press("1", "6", "5")
+        await pilot.press("enter")
+        await pilot.pause()
+        check(app.screen is root_screen, "typed PR-number confirmation must remain functional")
+
+        app.action_comment()
+        await pilot.pause()
+        check(type(app.screen).__name__ == "CommentBody", "q acceptance must activate CommentBody")
+        await pilot.press("q")
+        check(app.screen.query_one(tui.Input).value == "q", "q must type in the comment input")
+        await pilot.press("escape")
+        await pilot.pause()
         await pilot.press("/")
         await pilot.press("q")
         await pilot.pause()

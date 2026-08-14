@@ -133,6 +133,12 @@ def bindings_for(_owner) -> list[Binding]:
             for command in COMMANDS if command.key]
 
 
+def back_bindings(dismiss_action: str) -> list[Binding]:
+    """Project the semantic back keys onto a pushed screen's dismiss action."""
+    return [Binding(command.key, dismiss_action, command.label)
+            for command in COMMANDS if command.action == "back"]
+
+
 # The key map, split by what a key costs you. Nothing on the first line
 # changes anything on GitHub; everything on the second goes through the
 # typed-number gate.
@@ -751,7 +757,7 @@ class ConfirmMutation(ModalScreen[bool]):
     it. Every command that will run is shown here, before the one gate.
     """
 
-    BINDINGS = [Binding("escape", "dismiss(False)", "abort")]
+    BINDINGS = back_bindings("dismiss(False)")
 
     def __init__(self, commands: list[list[str]], expected: str) -> None:
         super().__init__()
@@ -792,7 +798,7 @@ class MergeRecovery(ModalScreen[str | None]):
     whatever is not fixed now stays selected so it comes back with the batch.
     """
 
-    BINDINGS = [Binding("escape", "dismiss(None)", "keep it queued")]
+    BINDINGS = back_bindings("dismiss(None)")
 
     def __init__(self, stop: Stop, message: str) -> None:
         super().__init__()
@@ -836,7 +842,7 @@ class MergeRecovery(ModalScreen[str | None]):
 class ReviewVerdict(ModalScreen[str | None]):
     """Pick what kind of review to leave. One keystroke, Esc aborts."""
 
-    BINDINGS = [Binding("escape", "dismiss(None)", "close")]
+    BINDINGS = back_bindings("dismiss(None)")
 
     CHOICES = [
         ("approve", "approve"),
@@ -860,7 +866,7 @@ class ReviewVerdict(ModalScreen[str | None]):
 class ReviewBody(ModalScreen[str | None]):
     """The review body. Required for anything but a bare approval."""
 
-    BINDINGS = [Binding("escape", "dismiss(None)", "close")]
+    BINDINGS = back_bindings("dismiss(None)")
 
     def __init__(self, verdict: str) -> None:
         super().__init__()
@@ -957,7 +963,7 @@ class DiffScreen(ModalScreen[None]):
 class HarnessTakeoff(ModalScreen[str | None]):
     """One explicit maintainer choice before a selected harness starts."""
 
-    BINDINGS = [Binding("escape", "dismiss(None)", "cancel")]
+    BINDINGS = back_bindings("dismiss(None)")
 
     def __init__(self, options: list[HarnessOption], initial: HarnessOption | None,
                  initial_preference: Preference | None = None) -> None:
@@ -2345,7 +2351,7 @@ class ReviewDashboard(App):
 
         # Reuse the confirm modal's input for the body first.
         class CommentBody(ModalScreen[str | None]):
-            BINDINGS = [Binding("escape", "dismiss(None)", "close")]
+            BINDINGS = back_bindings("dismiss(None)")
 
             def compose(self) -> ComposeResult:
                 with Vertical(id="confirm-box"):
