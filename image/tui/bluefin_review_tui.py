@@ -2442,11 +2442,21 @@ class ReviewDashboard(App):
             if not verdict:
                 return
 
+            review_body = ReviewBody(stop, verdict)
+
             def with_body(value) -> None:
                 if not isinstance(value, tuple) or len(value) != 2:
                     return
                 body, body_file = value
                 if not isinstance(body, str) or not isinstance(body_file, str) or not body_file:
+                    return
+                if body != review_body.previewed_body or body_file != review_body.body_file:
+                    return
+                try:
+                    with open(body_file, encoding="utf-8") as source:
+                        if source.read() != body:
+                            return
+                except (OSError, UnicodeError):
                     return
                 if not body and verdict != "approve":
                     self.notify(
@@ -2472,7 +2482,7 @@ class ReviewDashboard(App):
                     on_cancel=clean_body_file,
                 )
 
-            self.push_screen(ReviewBody(stop, verdict), with_body)
+            self.push_screen(review_body, with_body)
 
         self.push_screen(ReviewVerdict(), with_verdict)
 

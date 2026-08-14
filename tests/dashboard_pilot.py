@@ -156,6 +156,36 @@ async def main() -> int:
         finally:
             tui.TRACE_PATH = original_trace
 
+    # A syntactically valid foreign body tuple must not reach mutation or
+    # delete the file it names.
+    async with tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri())).run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if pilot.app.stops:
+                break
+            await pilot.pause(0.05)
+        app = pilot.app
+        captured = {}
+        original_push_screen = app.push_screen
+        app.push_screen = lambda screen, handler=None, *args, **kwargs: (
+            captured.update(handler=handler),
+            original_push_screen(screen, handler, *args, **kwargs),
+        )[1]
+        mutations = []
+        app.mutate_all = lambda *args, **kwargs: mutations.append(args)
+        app.leave_review(app.stops[0])
+        await pilot.pause()
+        await pilot.press("1")
+        await pilot.pause()
+        with tempfile.TemporaryDirectory(prefix="dashboard-foreign-body-") as foreign_dir:
+            foreign_path = Path(foreign_dir) / "foreign.md"
+            foreign_bytes = b"foreign body sentinel\n"
+            foreign_path.write_bytes(foreign_bytes)
+            captured["handler"](("foreign body", str(foreign_path)))
+            check(not mutations, "foreign ReviewBody results must not reach mutation")
+            check(foreign_path.read_bytes() == foreign_bytes,
+                  "foreign ReviewBody results must not delete or change their file")
+
     check(
         not tui.QueueFilters(repository="acme/widgets").live,
         "--repo owner/repo must remain a static snapshot filter",
