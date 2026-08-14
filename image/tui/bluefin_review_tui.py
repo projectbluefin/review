@@ -638,7 +638,7 @@ class BatchPlanScreen(ModalScreen[bool]):
 
     BINDINGS = [
         Binding("enter", "dispatch", "dispatch the batch"),
-        Binding("escape", "dismiss(False)", "abort"),
+        *back_bindings("dismiss(False)"),
     ]
 
     def __init__(self, task: "landing.LandingTask") -> None:
@@ -672,7 +672,7 @@ class LandingScreen(Screen):
     """
 
     BINDINGS = [
-        Binding("escape", "dismiss(None)", "back to the queue"),
+        *back_bindings("dismiss(None)"),
         Binding("x", "stop_agent", "stop the running agent"),
     ]
 
@@ -897,10 +897,7 @@ class DiffScreen(ModalScreen[None]):
     diff lexer, and every byte GitHub returned.
     """
 
-    BINDINGS = [
-        Binding("escape", "dismiss", "close"),
-        Binding("q", "dismiss", "close"),
-    ]
+    BINDINGS = back_bindings("dismiss")
 
     # Rich renders the whole diff before Textual paints it, so an enormous
     # one is a visible stall. Cut with the size named, never silently.
@@ -1035,8 +1032,7 @@ class ReviewScreen(Screen):
     """
 
     BINDINGS = [
-        Binding("escape", "close", "close"),
-        Binding("q", "close", "close"),
+        *back_bindings("close"),
         Binding("x", "stop", "stop review"),
         Binding("L", "leave_review", "leave a review"),
         Binding("a", "queue", "approve and queue"),

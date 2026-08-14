@@ -153,6 +153,23 @@ async def main() -> int:
         tui.ReviewDashboard.BINDINGS == tui.bindings_for(tui.ReviewDashboard),
         "dashboard bindings must be generated from the semantic registry",
     )
+    back_projection = {
+        tui.BatchPlanScreen: "dismiss(False)",
+        tui.LandingScreen: "dismiss(None)",
+        tui.DiffScreen: "dismiss",
+        tui.ReviewScreen: "close",
+        tui.ReviewVerdict: "dismiss(None)",
+        tui.MergeRecovery: "dismiss(None)",
+        tui.HarnessTakeoff: "dismiss(None)",
+    }
+    for screen_type, action in back_projection.items():
+        projected = tui.back_bindings(action)
+        back_keys = {binding.key for binding in projected}
+        check(
+            [binding for binding in screen_type.BINDINGS if binding.key in back_keys]
+            == projected,
+            f"{screen_type.__name__} back keys must project from COMMANDS",
+        )
 
     # ── the default view hides nothing ───────────────────────────────────
     # The regression this pins: the dashboard defaulted to the 'review'
@@ -302,6 +319,13 @@ async def main() -> int:
         await pilot.pause()
         check(app.screen is root_screen and app.screen is not modal, "q must close a pushed screen")
 
+        app.push_screen(tui.DiffScreen(tui.Stop("projectbluefin/review", 165, "review", "review")))
+        await pilot.pause()
+        check(isinstance(app.screen, tui.DiffScreen), "q acceptance must activate DiffScreen")
+        await pilot.press("q")
+        await pilot.pause()
+        check(app.screen is root_screen, "q must close DiffScreen")
+
         harness_option = SimpleNamespace(
             harness=SimpleNamespace(branding=SimpleNamespace(
                 harness_id="test", terminal_badge="TT", display_name="Test",
@@ -333,6 +357,14 @@ async def main() -> int:
         await pilot.press("enter")
         await pilot.pause()
         check(app.screen is root_screen, "typed PR-number confirmation must remain functional")
+
+        app.push_screen(tui.ReviewBody("comment"))
+        await pilot.pause()
+        await pilot.press("q")
+        check(app.screen.query_one(tui.Input).value == "q", "q must type in the review body input")
+        await pilot.press("escape")
+        await pilot.pause()
+        check(app.screen is root_screen, "Escape must close ReviewBody")
 
         app.action_comment()
         await pilot.pause()
@@ -372,6 +404,7 @@ async def main() -> int:
                 ],
             }
             app.stops[0].overlap = {"duplicates": [44], "overlaps": [45, 46]}
+            root_screen = app.screen
             await pilot.press("r")
             await pilot.pause()
             screen = app.screen
@@ -393,6 +426,9 @@ async def main() -> int:
             await pilot.press("e")
             await pilot.pause()
             check("hidden" in raw.classes, "[e] must return to the decision card")
+            await pilot.press("q")
+            await pilot.pause()
+            check(app.screen is root_screen, "q must close ReviewScreen")
             return str(status.render()), set(status.classes), str(card.render())
 
     # ── a selected batch dispatches one landing agent behind one gate ────
@@ -511,8 +547,9 @@ async def main() -> int:
                 isinstance(app.screen, tui.LandingScreen),
                 "[A] must reopen the live batch queue",
             )
-            await pilot.press("escape")
+            await pilot.press("q")
             await pilot.pause()
+            check(not isinstance(app.screen, tui.LandingScreen), "q must return from LandingScreen")
     gh_log.write_text("")
 
     # ── aborting the plan gate dispatches nothing ────────────────────────
@@ -539,6 +576,12 @@ async def main() -> int:
             not app.landing_queue and landing_log.read_text() == "",
             "escape must abort the batch without dispatching an agent",
         )
+        app.action_merge()
+        await pilot.pause()
+        check(isinstance(app.screen, tui.BatchPlanScreen), "BatchPlanScreen must activate")
+        await pilot.press("q")
+        await pilot.pause()
+        check(not isinstance(app.screen, tui.BatchPlanScreen), "q must abort BatchPlanScreen")
     gh_log.write_text("")
 
     # ── merging without lgtm is a maintainer power ───────────────────────
