@@ -73,13 +73,79 @@ QUEUE_LABEL = "lgtm"
 QUEUE_LABEL_COLOUR = "238636"
 QUEUE_LABEL_DESCRIPTION = "This PR has been approved by a maintainer"
 
+# The semantic registry is the source for bindings, help, and the command
+# palette. IDs are stable so clickable surfaces can consume the same contract.
+@dataclass(frozen=True)
+class CommandSpec:
+    id: str
+    key: str
+    action: str
+    label: str
+    mutating: bool = False
+    suspended_in_editor: bool = True
+
+
+COMMANDS = (
+    CommandSpec("navigate_down", "j", "navigate_down", "next item"),
+    CommandSpec("navigate_up", "k", "navigate_up", "previous item"),
+    CommandSpec("navigate_first", "g", "navigate_first", "first item"),
+    CommandSpec("navigate_last", "G", "navigate_last", "last item"),
+    CommandSpec("navigate_page_down", "ctrl+d", "navigate_page_down", "page down"),
+    CommandSpec("navigate_page_up", "ctrl+u", "navigate_page_up", "page up"),
+    CommandSpec("pane_previous", "h", "pane_previous", "previous pane"),
+    CommandSpec("pane_next", "l", "pane_next", "next pane"),
+    CommandSpec("activate", "enter", "activate", "inspect highlighted item"),
+    CommandSpec("back", "escape", "back", "back"),
+    CommandSpec("back_alias", "q", "back", "back"),
+    CommandSpec("quit", "ctrl+q", "quit", "quit"),
+    CommandSpec("steer", "slash", "steer", "steer review"),
+    CommandSpec("review", "r", "review", "start a review"),
+    CommandSpec("copy_review_context", "y", "handoff", "copy review context"),
+    CommandSpec("open_command_palette", "ctrl+p", "command_palette", "command palette"),
+    CommandSpec("open_command_palette_alias", ":", "command_palette", "command palette"),
+    CommandSpec("help", "?", "help", "key help"),
+    CommandSpec("leave_review", "L", "leave_review", "leave a review"),
+    CommandSpec("batch", "b", "batch", "batch select"),
+    CommandSpec("docs", "d", "docs", "update docs"),
+    CommandSpec("ghost_build", "", "ghost_build", "ghost build", mutating=True),
+    CommandSpec("open_browser", "o", "open_browser", "open"),
+    CommandSpec("view_diff", "v", "view_diff", "diff"),
+    CommandSpec("comment", "c", "comment", "comment", mutating=True),
+    CommandSpec("approve_or_land", "a", "merge", "approve+queue / land batch", mutating=True),
+    CommandSpec("agents", "A", "agents", "batch queue"),
+    CommandSpec("merge_now", "m", "merge_now", "merge now", mutating=True),
+    CommandSpec("reject", "x", "reject", "reject", mutating=True),
+    CommandSpec("update_branch", "u", "update_branch", "update branch", mutating=True),
+    CommandSpec("select_mechanical", "U", "select_mechanical", "select mechanical"),
+    CommandSpec("resolve_duplicates", "M", "resolve_cluster", "resolve dupes", mutating=True),
+    CommandSpec("filter", "f", "filter", "filter"),
+    CommandSpec("hive", "H", "hive", "ask hive"),
+    CommandSpec("refresh", "R", "refresh", "refresh"),
+)
+
+
+def command_registry() -> tuple[CommandSpec, ...]:
+    return COMMANDS
+
+
+def bindings_for(_owner) -> list[Binding]:
+    return [Binding(command.key, command.action, command.label)
+            for command in COMMANDS if command.key]
+
+
+def back_bindings(dismiss_action: str) -> list[Binding]:
+    """Project the semantic back keys onto a pushed screen's dismiss action."""
+    return [Binding(command.key, dismiss_action, command.label)
+            for command in COMMANDS if command.action == "back"]
+
+
 # The key map, split by what a key costs you. Nothing on the first line
 # changes anything on GitHub; everything on the second goes through the
 # typed-number gate.
 KEYS_READING = (
     " [b]r[/b] review [b]v[/b] diff [b]o[/b] open [b]h[/b] handoff"
     " [b]/[/b] steer [b]f[/b] filter [b]b[/b] batch [b]A[/b] agents [b]H[/b] hive"
-    " [b]R[/b] refresh [b]q[/b] quit"
+    " [b]R[/b] refresh [b]q[/b]/Esc back"
 )
 KEYS_ACTING = (
     " [b]L[/b] leave review [b]a[/b] approve+queue · land batch [b]m[/b] merge"
@@ -572,7 +638,7 @@ class BatchPlanScreen(ModalScreen[bool]):
 
     BINDINGS = [
         Binding("enter", "dispatch", "dispatch the batch"),
-        Binding("escape", "dismiss(False)", "abort"),
+        *back_bindings("dismiss(False)"),
     ]
 
     def __init__(self, task: "landing.LandingTask") -> None:
@@ -606,7 +672,7 @@ class LandingScreen(Screen):
     """
 
     BINDINGS = [
-        Binding("escape", "dismiss(None)", "back to the queue"),
+        *back_bindings("dismiss(None)"),
         Binding("x", "stop_agent", "stop the running agent"),
     ]
 
@@ -691,7 +757,7 @@ class ConfirmMutation(ModalScreen[bool]):
     it. Every command that will run is shown here, before the one gate.
     """
 
-    BINDINGS = [Binding("escape", "dismiss(False)", "abort")]
+    BINDINGS = back_bindings("dismiss(False)")
 
     def __init__(self, commands: list[list[str]], expected: str) -> None:
         super().__init__()
@@ -732,7 +798,7 @@ class MergeRecovery(ModalScreen[str | None]):
     whatever is not fixed now stays selected so it comes back with the batch.
     """
 
-    BINDINGS = [Binding("escape", "dismiss(None)", "keep it queued")]
+    BINDINGS = back_bindings("dismiss(None)")
 
     def __init__(self, stop: Stop, message: str) -> None:
         super().__init__()
@@ -776,7 +842,7 @@ class MergeRecovery(ModalScreen[str | None]):
 class ReviewVerdict(ModalScreen[str | None]):
     """Pick what kind of review to leave. One keystroke, Esc aborts."""
 
-    BINDINGS = [Binding("escape", "dismiss(None)", "close")]
+    BINDINGS = back_bindings("dismiss(None)")
 
     CHOICES = [
         ("approve", "approve"),
@@ -800,7 +866,7 @@ class ReviewVerdict(ModalScreen[str | None]):
 class ReviewBody(ModalScreen[str | None]):
     """The review body. Required for anything but a bare approval."""
 
-    BINDINGS = [Binding("escape", "dismiss(None)", "close")]
+    BINDINGS = back_bindings("dismiss(None)")
 
     def __init__(self, verdict: str) -> None:
         super().__init__()
@@ -831,10 +897,7 @@ class DiffScreen(ModalScreen[None]):
     diff lexer, and every byte GitHub returned.
     """
 
-    BINDINGS = [
-        Binding("escape", "dismiss", "close"),
-        Binding("q", "dismiss", "close"),
-    ]
+    BINDINGS = back_bindings("dismiss")
 
     # Rich renders the whole diff before Textual paints it, so an enormous
     # one is a visible stall. Cut with the size named, never silently.
@@ -897,7 +960,7 @@ class DiffScreen(ModalScreen[None]):
 class HarnessTakeoff(ModalScreen[str | None]):
     """One explicit maintainer choice before a selected harness starts."""
 
-    BINDINGS = [Binding("escape", "dismiss(None)", "cancel")]
+    BINDINGS = back_bindings("dismiss(None)")
 
     def __init__(self, options: list[HarnessOption], initial: HarnessOption | None,
                  initial_preference: Preference | None = None) -> None:
@@ -969,8 +1032,7 @@ class ReviewScreen(Screen):
     """
 
     BINDINGS = [
-        Binding("escape", "close", "close"),
-        Binding("q", "close", "close"),
+        *back_bindings("close"),
         Binding("x", "stop", "stop review"),
         Binding("L", "leave_review", "leave a review"),
         Binding("a", "queue", "approve and queue"),
@@ -1330,30 +1392,7 @@ class ReviewDashboard(App):
     #takeoff-box { border: heavy cyan; background: $surface; width: 80%; height: auto; padding: 1 2; margin: 4 4; }
     """
 
-    BINDINGS = [
-        Binding("r", "review", "start a review"),
-        Binding("L", "leave_review", "leave a review"),
-        Binding("b", "batch", "batch select"),
-        Binding("d", "docs", "update docs"),
-        Binding("g", "ghost_build", "ghost build"),
-        Binding("o", "open_browser", "open"),
-        Binding("v", "view_diff", "diff"),
-        Binding("c", "comment", "comment"),
-        Binding("a", "merge", "approve+queue / land batch"),
-        Binding("A", "agents", "batch queue"),
-        Binding("m", "merge_now", "merge now"),
-        Binding("x", "reject", "reject"),
-        Binding("h", "handoff", "handoff"),
-        Binding("slash", "steer", "steer review"),
-        Binding("f", "filter", "filter"),
-        Binding("H", "hive", "ask hive"),
-        Binding("R", "refresh", "refresh"),
-        Binding("f5", "refresh", "refresh", show=False),
-        Binding("u", "update_branch", "update branch"),
-        Binding("U", "select_mechanical", "select mechanical"),
-        Binding("M", "resolve_cluster", "resolve dupes", show=False),
-        Binding("q", "quit", "quit"),
-    ]
+    BINDINGS = bindings_for("dashboard")
 
     def __init__(self, filters: QueueFilters | None = None) -> None:
         super().__init__()
@@ -1560,6 +1599,10 @@ class ReviewDashboard(App):
         self.push_screen(ReviewScreen(stop, steer=steer))
 
     def on_key(self, event) -> None:
+        if event.key == "q" and not isinstance(self.focused, Input):
+            event.stop()
+            self.action_back()
+            return
         if event.key == "escape" and self.focused is self.query_one("#steer", Input):
             event.stop()
             self.query_one("#queue", ListView).focus()
@@ -2071,6 +2114,49 @@ class ReviewDashboard(App):
 
     # ── actions ───────────────────────────────────────────────────────────
 
+    def _queue(self) -> ListView:
+        return self.query_one("#queue", ListView)
+
+    def action_navigate_down(self) -> None:
+        self._queue().action_cursor_down()
+
+    def action_navigate_up(self) -> None:
+        self._queue().action_cursor_up()
+
+    def action_navigate_first(self) -> None:
+        self._queue().index = 0
+
+    def action_navigate_last(self) -> None:
+        self._queue().index = max(0, len(self._queue().children) - 1)
+
+    def action_navigate_page_down(self) -> None:
+        queue = self._queue()
+        queue.index = min(len(queue.children) - 1, queue.index + max(1, queue.size.height - 1))
+
+    def action_navigate_page_up(self) -> None:
+        queue = self._queue()
+        queue.index = max(0, queue.index - max(1, queue.size.height - 1))
+
+    def action_pane_previous(self) -> None:
+        self.focus_previous()
+
+    def action_pane_next(self) -> None:
+        self.focus_next()
+
+    def action_activate(self) -> None:
+        if self.current:
+            self.action_view_diff()
+
+    def action_back(self) -> None:
+        if self.focused is self.query_one("#steer", Input):
+            self.query_one("#queue", ListView).focus()
+        elif len(self.screen_stack) > 1:
+            self.pop_screen()
+
+    def action_help(self) -> None:
+        entries = "  ".join(f"{c.key or '—'} {c.label}" for c in COMMANDS)
+        self.notify(entries, timeout=8)
+
     def action_batch(self) -> None:
         stop = self.current
         if not stop:
@@ -2261,7 +2347,7 @@ class ReviewDashboard(App):
 
         # Reuse the confirm modal's input for the body first.
         class CommentBody(ModalScreen[str | None]):
-            BINDINGS = [Binding("escape", "dismiss(None)", "close")]
+            BINDINGS = back_bindings("dismiss(None)")
 
             def compose(self) -> ComposeResult:
                 with Vertical(id="confirm-box"):

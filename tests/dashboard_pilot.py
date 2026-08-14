@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import tempfile
+from types import SimpleNamespace
 from pathlib import Path
 
 TUI_DIR = Path(
@@ -123,6 +124,53 @@ async def main() -> int:
 
     import bluefin_review_tui as tui
 
+    # Semantic navigation contract: bindings, help, and the palette must be
+    # projections of one registry rather than independent key lists.
+    registry = tui.command_registry()
+    ids = {command.id for command in registry}
+    check(
+        {"navigate_down", "navigate_up", "navigate_first", "navigate_last",
+         "navigate_page_down", "navigate_page_up", "pane_next", "pane_previous",
+         "activate", "back", "quit", "steer", "review", "copy_review_context",
+         "open_command_palette", "help"} <= ids,
+        "navigation and current review commands must be semantic registry entries",
+    )
+    back_commands = [command for command in registry if command.action == "back"]
+    check(
+        {command.key for command in back_commands} == {"escape", "q"},
+        "Escape and q must project the same semantic back action",
+    )
+    check(
+        [command.key for command in registry if command.action == "quit"] == ["ctrl+q"],
+        "Ctrl-q must be the sole global quit binding",
+    )
+    palette_commands = [command for command in registry if command.id.startswith("open_command_palette")]
+    check(
+        {command.key for command in palette_commands} == {"ctrl+p", ":"},
+        "Ctrl-p and : must project the real command palette action",
+    )
+    check(
+        tui.ReviewDashboard.BINDINGS == tui.bindings_for(tui.ReviewDashboard),
+        "dashboard bindings must be generated from the semantic registry",
+    )
+    back_projection = {
+        tui.BatchPlanScreen: "dismiss(False)",
+        tui.LandingScreen: "dismiss(None)",
+        tui.DiffScreen: "dismiss",
+        tui.ReviewScreen: "close",
+        tui.ReviewVerdict: "dismiss(None)",
+        tui.MergeRecovery: "dismiss(None)",
+        tui.HarnessTakeoff: "dismiss(None)",
+    }
+    for screen_type, action in back_projection.items():
+        projected = tui.back_bindings(action)
+        back_keys = {binding.key for binding in projected}
+        check(
+            [binding for binding in screen_type.BINDINGS if binding.key in back_keys]
+            == projected,
+            f"{screen_type.__name__} back keys must project from COMMANDS",
+        )
+
     # ── the default view hides nothing ───────────────────────────────────
     # The regression this pins: the dashboard defaulted to the 'review'
     # action, so a 121-pull-request queue rendered as five stops and the
@@ -168,6 +216,18 @@ async def main() -> int:
             app.filters.action == "" and len(app.stops) == 2,
             "[f] must cycle back to every action",
         )
+        await pilot.press("g")
+        check(app.query_one("#queue").index == 0, "g must select the first queue item")
+        await pilot.press("j")
+        check(app.query_one("#queue").index == 1, "j must move to the next queue item")
+        await pilot.press("k")
+        check(app.query_one("#queue").index == 0, "k must move to the previous queue item")
+        await pilot.press("G")
+        check(app.query_one("#queue").index == 1, "G must select the last queue item")
+        await pilot.press("ctrl+u")
+        check(app.query_one("#queue").index == 0, "Ctrl-u must page upward")
+        await pilot.press("ctrl+d")
+        check(app.query_one("#queue").index == 1, "Ctrl-d must page downward")
 
     # ── an explicit action filter still narrows ──────────────────────────
     app = tui.ReviewDashboard(
@@ -226,8 +286,8 @@ async def main() -> int:
             )
         binding_keys = {binding.key for binding in tui.ReviewDashboard.BINDINGS}
         check(
-            "l" not in binding_keys and "p" not in binding_keys,
-            f"label and priority bindings must be absent, got {sorted(binding_keys)}",
+            "l" in binding_keys and "p" not in binding_keys,
+            f"pane navigation must be present and priority must be absent, got {sorted(binding_keys)}",
         )
         review = [b for b in tui.ReviewDashboard.BINDINGS if b.action == "review"]
         check(len(review) == 1, f"exactly one binding must run a review, got {len(review)}")
@@ -238,6 +298,89 @@ async def main() -> int:
         check(
             "[b]l[/b]" not in tui.KEYS_ACTING and "[b]p[/b]" not in tui.KEYS_ACTING,
             f"the acting key line must not advertise label or priority, got {tui.KEYS_ACTING!r}",
+        )
+        root_screen = app.screen
+        await pilot.press("q")
+        await pilot.pause()
+        check(app.screen is root_screen, "q must be safe on the root screen")
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        check(type(app.screen).__name__ == "CommandPalette", "Ctrl-p must open Textual's command palette")
+        await pilot.press("escape")
+        await pilot.press(":")
+        await pilot.pause()
+        check(type(app.screen).__name__ == "CommandPalette", ": must open Textual's command palette")
+        await pilot.press("escape")
+        app.push_screen(tui.ReviewVerdict())
+        await pilot.pause()
+        modal = app.screen
+        check(isinstance(modal, tui.ReviewVerdict), "q acceptance must start on ReviewVerdict")
+        await pilot.press("q")
+        await pilot.pause()
+        check(app.screen is root_screen and app.screen is not modal, "q must close a pushed screen")
+
+        app.push_screen(tui.DiffScreen(tui.Stop("projectbluefin/review", 165, "review", "review")))
+        await pilot.pause()
+        check(isinstance(app.screen, tui.DiffScreen), "q acceptance must activate DiffScreen")
+        await pilot.press("q")
+        await pilot.pause()
+        check(app.screen is root_screen, "q must close DiffScreen")
+
+        harness_option = SimpleNamespace(
+            harness=SimpleNamespace(branding=SimpleNamespace(
+                harness_id="test", terminal_badge="TT", display_name="Test",
+            )),
+            discovery=SimpleNamespace(availability=SimpleNamespace(value="ready"),
+                                      model="test", reasoning="low"),
+            status="ready",
+        )
+        for screen in (
+            tui.MergeRecovery(tui.Stop("projectbluefin/review", 165, "review", "review"), "BEHIND"),
+            tui.HarnessTakeoff([harness_option], harness_option),
+        ):
+            app.push_screen(screen)
+            await pilot.pause()
+            active = app.screen
+            check(app.screen is screen, f"q acceptance must positively activate {type(screen).__name__}")
+            await pilot.press("q")
+            await pilot.pause()
+            check(app.screen is not active, f"q must dismiss {type(screen).__name__}")
+
+        app.push_screen(tui.ConfirmMutation([["gh", "pr", "merge"]], "165"))
+        await pilot.pause()
+        check(isinstance(app.screen, tui.ConfirmMutation), "q acceptance must activate ConfirmMutation")
+        await pilot.press("q")
+        await pilot.pause()
+        check(app.screen.query_one(tui.Input).value == "q", "q must type in the confirmation input")
+        await pilot.press("ctrl+a")
+        await pilot.press("1", "6", "5")
+        await pilot.press("enter")
+        await pilot.pause()
+        check(app.screen is root_screen, "typed PR-number confirmation must remain functional")
+
+        app.push_screen(tui.ReviewBody("comment"))
+        await pilot.pause()
+        await pilot.press("q")
+        check(app.screen.query_one(tui.Input).value == "q", "q must type in the review body input")
+        await pilot.press("escape")
+        await pilot.pause()
+        check(app.screen is root_screen, "Escape must close ReviewBody")
+
+        app.action_comment()
+        await pilot.pause()
+        check(type(app.screen).__name__ == "CommentBody", "q acceptance must activate CommentBody")
+        await pilot.press("q")
+        check(app.screen.query_one(tui.Input).value == "q", "q must type in the comment input")
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.press("/")
+        await pilot.press("q")
+        await pilot.pause()
+        check(app.query_one("#steer", tui.Input).value == "q", "q must remain typed editor input")
+        check(
+            any(binding.key == "ctrl+q" and binding.action == "quit"
+                for binding in tui.ReviewDashboard.BINDINGS),
+            "Ctrl-q must remain the quit binding",
         )
 
     async def run_review(exit_code: int, output: str):
@@ -261,6 +404,7 @@ async def main() -> int:
                 ],
             }
             app.stops[0].overlap = {"duplicates": [44], "overlaps": [45, 46]}
+            root_screen = app.screen
             await pilot.press("r")
             await pilot.pause()
             screen = app.screen
@@ -282,6 +426,9 @@ async def main() -> int:
             await pilot.press("e")
             await pilot.pause()
             check("hidden" in raw.classes, "[e] must return to the decision card")
+            await pilot.press("q")
+            await pilot.pause()
+            check(app.screen is root_screen, "q must close ReviewScreen")
             return str(status.render()), set(status.classes), str(card.render())
 
     # ── a selected batch dispatches one landing agent behind one gate ────
@@ -400,8 +547,9 @@ async def main() -> int:
                 isinstance(app.screen, tui.LandingScreen),
                 "[A] must reopen the live batch queue",
             )
-            await pilot.press("escape")
+            await pilot.press("q")
             await pilot.pause()
+            check(not isinstance(app.screen, tui.LandingScreen), "q must return from LandingScreen")
     gh_log.write_text("")
 
     # ── aborting the plan gate dispatches nothing ────────────────────────
@@ -428,6 +576,12 @@ async def main() -> int:
             not app.landing_queue and landing_log.read_text() == "",
             "escape must abort the batch without dispatching an agent",
         )
+        app.action_merge()
+        await pilot.pause()
+        check(isinstance(app.screen, tui.BatchPlanScreen), "BatchPlanScreen must activate")
+        await pilot.press("q")
+        await pilot.pause()
+        check(not isinstance(app.screen, tui.BatchPlanScreen), "q must abort BatchPlanScreen")
     gh_log.write_text("")
 
     # ── merging without lgtm is a maintainer power ───────────────────────

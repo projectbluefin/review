@@ -1,7 +1,7 @@
 ---
 name: review-dashboard
 version: "1.3"
-last_updated: 2026-08-11
+last_updated: 2026-08-14
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
 entry_point: docs/skills/review-dashboard.md
@@ -58,6 +58,15 @@ Review-body intent is `GENERATE_BODY`, `EDIT_BODY`, `PREVIEW_BODY`, and
 be suppressed while a text editor owns focus. `mutating` identifies a
 GitHub-side mutation; `confirmation_required` also records local preparation
 actions that require explicit human consent.
+
+The live TUI exposes one `command_registry()` from
+`image/tui/bluefin_review_tui.py`. Bindings and help/palette entries are
+projections of that registry, including `j/k`, `g/G`, `Ctrl-d/Ctrl-u`, `h/l`,
+Enter, Escape, `Ctrl-q`, `/`, `r`, `y`, `Ctrl-p`, `:`, and `?`. Textual
+editor and confirmation focus remains authoritative: suspended commands do
+not consume typed prose or PR numbers. `u` remains the gated branch update;
+`U` selects live-evidence mechanical Renovate rows; `a` retains its
+approve+queue or selected-batch landing meanings.
 
 `QueueRow` and `DecisionCard` carry the pull-request identity, TL;DR, current
 and reviewed heads, freshness, CI, mergeability, provenance, verification,
