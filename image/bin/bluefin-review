@@ -17,16 +17,7 @@ REVIEW_INCOMPLETE=65
 REVIEW_CHILD_PID=""
 
 request_review_cancel() {
-  cancel_review_descendants() {
-    local parent="$1" child
-    while read -r child; do
-      [[ -n "$child" ]] || continue
-      cancel_review_descendants "$child"
-      kill -TERM "$child" 2>/dev/null || true
-    done < <(pgrep -P "$parent" 2>/dev/null || true)
-  }
   if [[ -n "$REVIEW_CHILD_PID" ]]; then
-    cancel_review_descendants "$REVIEW_CHILD_PID"
     kill -TERM "$REVIEW_CHILD_PID" 2>/dev/null || true
   fi
 }
@@ -72,7 +63,7 @@ run_registered_review() {
   local range="$1" scope="$2" prompt="$3" owner="$4" repository="$5" number="$6" base_sha="$7" head_sha="$8"
   local root="${BLUEFIN_REVIEW_HARNESS_ROOT:-/opt/bluefin}"
   PYTHONPATH="${root}:${root}/tui${PYTHONPATH:+:${PYTHONPATH}}" \
-    python3 - "$range" "$scope" "$prompt" "$owner" "$repository" "$number" "$base_sha" "$head_sha" <<'PY'
+    exec python3 - "$range" "$scope" "$prompt" "$owner" "$repository" "$number" "$base_sha" "$head_sha" <<'PY'
 import sys
 from harness.goose import GooseHarness
 from harness.registry import HarnessRegistry
@@ -209,6 +200,13 @@ a human makes every approval and merge decision."
 # Run the selected adapter and let its typed result own the terminal status.
 run_reviewed() {
   local status=0
+  local signal_status=0
+  forward_review_signal() {
+    request_review_cancel
+    signal_status="$1"
+  }
+  trap 'forward_review_signal 143' TERM
+  trap 'forward_review_signal 130' INT
   # Keep the selected adapter in the foreground process tree while allowing
   # the shell to forward TERM/INT and remain signal-responsive. The adapter
   # already streams each line to this process's stdout.
@@ -216,6 +214,9 @@ run_reviewed() {
   REVIEW_CHILD_PID=$!
   wait "$REVIEW_CHILD_PID" || status=$?
   REVIEW_CHILD_PID=""
+  trap - TERM
+  trap - INT
+  if ((signal_status != 0)); then status="$signal_status"; fi
   return "$status"
 }
 
@@ -486,12 +487,9 @@ pr_mode() {
   command -v jq >/dev/null || die "jq is required to review a pull request"
 
   CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bluefin-review.XXXXXX")"
-  # A stopped review must actually stop. The EXIT trap cleans up; the signal
-  # traps also leave, because a handler that only cleans up returns control to
-  # the script and the run continues after the maintainer asked for it to end.
+  # A stopped review must actually stop. The EXIT trap cleans up the snapshot;
+  # run_reviewed forwards lifecycle signals to the adapter for both entrypoints.
   trap 'rm -rf "$CACHE_DIR"' EXIT
-  trap 'request_review_cancel; rm -rf "$CACHE_DIR"; trap - EXIT; exit 143' TERM
-  trap 'request_review_cancel; rm -rf "$CACHE_DIR"; trap - EXIT; exit 130' INT
 
   local status=0
   run_goose_review "$repo" "$number" || status=$?

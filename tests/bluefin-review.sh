@@ -203,6 +203,65 @@ if ps -p "$goose_pid" -o comm= 2>/dev/null | grep -qx 'sleep'; then
   exit 1
 fi
 
+# The shipped local-range path must forward TERM to the adapter too. The
+# adapter owns the Goose process group and must terminate and wait for it.
+cat >"$scratch/bin/goose" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
+printf '%s %s\n' "$$" "$(ps -o pgid= -p $$ | tr -d ' ')" >"${GOOSE_PID_FILE:?}"
+exec sleep 1000
+EOF
+chmod +x "$scratch/bin/goose"
+PATH="$scratch/bin:$PATH" GOOSE_PID_FILE="$scratch/local-term-pid" \
+  "$review" main...HEAD >"$scratch/local-term-output" 2>&1 &
+local_term_launcher=$!
+for _ in {1..50}; do
+  [[ -s "$scratch/local-term-pid" ]] && break
+  sleep 0.1
+done
+[[ -s "$scratch/local-term-pid" ]]
+read -r local_term_goose local_term_pgid <"$scratch/local-term-pid"
+kill -TERM "$local_term_launcher"
+set +e
+wait "$local_term_launcher"
+local_term_exit=$?
+set -e
+((local_term_exit != 0))
+for _ in {1..20}; do
+  kill -0 -- "-$local_term_pgid" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 -- "-$local_term_pgid" 2>/dev/null; then
+  echo "local-range Goose process group survived TERM: $local_term_pgid" >&2
+  exit 1
+fi
+
+# INT exercises the same shipped local-range path and preserves its distinct
+# interrupt status while still requiring the adapter-owned group to be gone.
+PATH="$scratch/bin:$PATH" GOOSE_PID_FILE="$scratch/local-int-pid" \
+  env --default-signal=SIGINT setsid "$review" main...HEAD >"$scratch/local-int-output" 2>&1 &
+local_int_launcher=$!
+for _ in {1..50}; do
+  [[ -s "$scratch/local-int-pid" ]] && break
+  sleep 0.1
+done
+[[ -s "$scratch/local-int-pid" ]]
+read -r local_int_goose local_int_pgid <"$scratch/local-int-pid"
+kill -INT "$local_int_launcher"
+set +e
+wait "$local_int_launcher"
+local_int_exit=$?
+set -e
+((local_int_exit != 0))
+for _ in {1..20}; do
+  kill -0 -- "-$local_int_pgid" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 -- "-$local_int_pgid" 2>/dev/null; then
+  echo "local-range Goose process group survived INT: $local_int_pgid" >&2
+  exit 1
+fi
+
 # restore the exit-code stub for the assertions that follow
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
