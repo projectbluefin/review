@@ -87,6 +87,8 @@ async def main() -> int:
     # gh is read-only here: the pilot never lets a mutation reach a real
     # network, and any attempt to run one is recorded for the assertions.
     gh_log = workdir / "gh.log"
+    diff_events = workdir / "diff-events.log"
+    old_request_started = workdir / f"old-request-start-{workdir.name}"
     perm_file = workdir / "permissions.push"
     perm_file.write_text("true\n")
     gh_stub = write_stub(
@@ -99,8 +101,9 @@ async def main() -> int:
         f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
         'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
         'if [ "$1 $2" = "pr diff" ]; then\n'
-        '  if [ "${DIFF_MODE-}" = "slow-old" ]; then sleep 0.2; printf "%s" "OLD-DIFF"; exit 0; fi\n'
-        '  if [ "${DIFF_MODE-}" = "fast-new" ]; then printf "%s" "NEW-DIFF"; exit 0; fi\n'
+        f'  request_id="${{DIFF_REQUEST_ID-unknown}}"; mode="${{DIFF_MODE-}}"\n'
+        f'  if [ "$mode" = "slow-old" ]; then printf "request:%s:%s\\n" "$request_id" "$mode" >>"{diff_events}"; (sleep 0.2) & delay_pid=$!; : >"{old_request_started}"; wait "$delay_pid"; printf "response:%s:OLD-DIFF\\n" "$request_id" >>"{diff_events}"; printf "%s" "OLD-DIFF"; exit 0; fi\n'
+        f'  if [ "$mode" = "fast-new" ]; then printf "request:%s:%s\\n" "$request_id" "$mode" >>"{diff_events}"; printf "response:%s:NEW-DIFF\\n" "$request_id" >>"{diff_events}"; printf "%s" "NEW-DIFF"; exit 0; fi\n'
         '  if [ "${DIFF_MODE-}" = "oversized" ]; then head -c 400010 /dev/zero | tr "\\0" x; exit 0; fi\n'
         '  if [ "${DIFF_MODE-}" = "empty" ]; then exit 0; fi\n'
         '  if [ "${DIFF_MODE-}" = "error" ]; then printf "%s\\n" "terminal diff failure" >&2; exit 7; fi\n'
@@ -1071,19 +1074,69 @@ async def main() -> int:
             await pilot.press("[")
             await pilot.press("[")
             check(screen.page_index == 0, "first-page navigation must be a no-op")
+            selected_stop = screen.stop_record
+            old_request_id = f"old-{workdir.name}"
+            fast_request_id = f"fast-{workdir.name}"
+            os.environ["DIFF_REQUEST_ID"] = old_request_id
             os.environ["DIFF_MODE"] = "slow-old"
             screen.load_diff()
+            for _ in range(200):
+                if old_request_started.exists():
+                    break
+                await pilot.pause(0.01)
+            check(
+                old_request_started.exists(),
+                "the old diff request must acknowledge entering its delay",
+            )
+            os.environ["DIFF_REQUEST_ID"] = fast_request_id
             os.environ["DIFF_MODE"] = "fast-new"
             screen.load_diff()
             for _ in range(200):
-                if screen.rendered is not None and "NEW-DIFF" in screen.rendered.code:
+                events = diff_events.read_text().splitlines() if diff_events.exists() else []
+                if any(f"response:{fast_request_id}:" in event for event in events):
                     break
                 await pilot.pause(0.05)
+            events = diff_events.read_text().splitlines() if diff_events.exists() else []
+            check(
+                any(f"request:{old_request_id}:slow-old" in event for event in events)
+                and any(f"request:{fast_request_id}:fast-new" in event for event in events),
+                "the stale-diff test must record two distinct requests",
+            )
+            check(
+                any(f"response:{fast_request_id}:NEW-DIFF" in event for event in events),
+                "the new diff response must identify the new request",
+            )
+            for _ in range(200):
+                events = diff_events.read_text().splitlines() if diff_events.exists() else []
+                if any(f"response:{old_request_id}:OLD-DIFF" in event for event in events):
+                    break
+                await pilot.pause(0.01)
+            events = diff_events.read_text().splitlines() if diff_events.exists() else []
+            check(
+                any(f"response:{old_request_id}:OLD-DIFF" in event for event in events),
+                "the delayed old diff response must complete",
+            )
+            fast_response = f"response:{fast_request_id}:NEW-DIFF"
+            old_response = f"response:{old_request_id}:OLD-DIFF"
+            check(
+                fast_response in events
+                and old_response in events
+                and events.index(fast_response) < events.index(old_response),
+                "the old diff response must complete after the new response",
+            )
             check(
                 screen.rendered is not None
                 and "NEW-DIFF" in screen.rendered.code
                 and "OLD-DIFF" not in screen.rendered.code,
                 "a stale diff response must not overwrite the current selection",
+            )
+            check(
+                screen.page_index == 0 and screen.page_count == 1,
+                "a stale diff response must not overwrite page state",
+            )
+            check(
+                screen.stop_record is selected_stop,
+                "a stale diff response must not overwrite selection state",
             )
             os.environ["DIFF_MODE"] = "empty"
             screen.load_diff()
@@ -1119,6 +1172,7 @@ async def main() -> int:
             "the diff screen must actually fetch the diff",
         )
     os.environ.pop("DIFF_MODE", None)
+    os.environ.pop("DIFF_REQUEST_ID", None)
     gh_log.write_text("")
 
     # ── everything identifying a pull request is a hyperlink ─────────────
