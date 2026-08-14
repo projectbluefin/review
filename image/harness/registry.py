@@ -4,11 +4,15 @@ Adapters describe what they can do; orchestration selects no fallback when a
 requested harness is unavailable.
 """
 
+import json
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping, Protocol, Sequence
 from tui.review_evidence_manifest import ReviewRequest
 from tui.review_result import ReviewResult
+
+
+MAX_DRAFT_EVIDENCE_CHARS = 120_000
 
 
 class Availability(str, Enum):
@@ -34,8 +38,10 @@ class DraftRequest:
     def __post_init__(self) -> None:
         if self.verdict not in {"approve", "request-changes", "comment"}:
             raise ValueError("unsupported review verdict")
-        if self.evidence.state != "complete":
-            raise ValueError("drafting requires complete review evidence")
+        if self.evidence.state not in {"complete", "findings"}:
+            raise ValueError("drafting requires trusted review evidence")
+        if self.verdict == "approve" and not self.evidence.is_clean:
+            raise ValueError("approve requires clean review evidence")
         provenance = self.evidence.provenance
         expected = {
             "repository": f"{self.binding.owner}/{self.binding.repository}",
@@ -49,8 +55,15 @@ class DraftRequest:
             raise ValueError("live facts are unbounded or invalid")
         if any(not isinstance(key, str) or len(key) > 128 for key in self.live_facts):
             raise ValueError("live fact key is invalid")
-        if len(str(dict(self.live_facts))) > 16_384:
-            raise ValueError("live facts exceed bound")
+        try:
+            evidence = json.dumps(
+                {"result": self.evidence.to_dict(), "live": self.live_facts},
+                sort_keys=True, separators=(",", ":"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("draft evidence is not serializable") from exc
+        if len(evidence) > MAX_DRAFT_EVIDENCE_CHARS:
+            raise ValueError("draft evidence exceeds bound")
 
 
 @dataclass(frozen=True)

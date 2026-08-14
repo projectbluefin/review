@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from typing import Callable
 
 from tui.review_evidence_manifest import ReviewRequest
-from .registry import Availability, DraftRequest, DraftResult, DraftState, HarnessBranding, HarnessCapabilities
+from .registry import (Availability, DraftRequest, DraftResult, DraftState,
+                       HarnessBranding, HarnessCapabilities)
 
 try:
     from tui.review_result import ReviewResult, parse_review_result
@@ -37,10 +38,9 @@ class CodexHarness:
     SUPPORTED_EFFORTS = ("low", "medium", "high", "max")
     process_group_cancellation = True
 
-    @staticmethod
-    def validate_draft(request: DraftRequest) -> DraftResult:
+    def validate_draft(self, request: DraftRequest) -> DraftResult:
         return DraftResult(DraftState.COMPLETE, provenance={
-            "backend": "codex", "model": "gpt-5.6-luna", "effort": "low",
+            "backend": self.name, "model": self.model, "effort": self.effort,
             "repository": f"{request.binding.owner}/{request.binding.repository}",
             "pull_request": request.binding.pull_request_number,
             "base_sha": request.binding.base_sha, "head_sha": request.binding.head_sha,
@@ -61,7 +61,7 @@ class CodexHarness:
 
     def convert_draft(self, payload: str, request: DraftRequest, exit_code: int = 0) -> DraftResult:
         self.validate_draft(request)
-        raw = tuple(payload.splitlines()[:400])
+        raw = tuple(self._bounded_raw(payload)) if isinstance(payload, str) else ()
         if exit_code != 0 or not isinstance(payload, str) or not payload.strip() or len(payload) > 4096:
             return DraftResult(DraftState.FAILED, provenance={"backend": self.name, "model": self.model, "effort": self.effort}, raw_evidence=raw)
         return DraftResult(DraftState.COMPLETE, payload.strip(), {
@@ -70,6 +70,17 @@ class CodexHarness:
             "pull_request": request.binding.pull_request_number, "base_sha": request.binding.base_sha,
             "head_sha": request.binding.head_sha,
         }, raw)
+
+    @staticmethod
+    def _bounded_raw(payload: str) -> list[str]:
+        lines = []
+        chars = 0
+        for line in payload.splitlines():
+            if len(lines) == 400 or chars + len(line) > 120_000:
+                break
+            lines.append(line)
+            chars += len(line)
+        return lines
 
     def draft(self, request: DraftRequest) -> DraftResult:
         if self.availability is not Availability.READY:

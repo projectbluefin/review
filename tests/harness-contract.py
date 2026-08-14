@@ -394,6 +394,46 @@ class HarnessContract(unittest.TestCase):
             with self.assertRaises(ValueError):
                 DraftRequest(self.binding, "comment", bad, {})
 
+    def test_draft_request_accepts_findings_only_for_safe_verdicts(self):
+        finding = {"severity": "medium", "file": "image/harness/codex.py", "line": 1, "title": "validated finding"}
+        evidence = self._evidence(state="findings", findings=[finding], counts={"critical": 0, "high": 0, "medium": 1, "low": 0})
+        with self.assertRaises(ValueError):
+            DraftRequest(self.binding, "approve", evidence, {})
+        for verdict in ("request-changes", "comment"):
+            DraftRequest(self.binding, verdict, evidence, {})
+
+    def test_draft_request_rejects_every_failed_evidence_state(self):
+        for state in ("failed", "unparsable", "incomplete"):
+            with self.subTest(state=state), self.assertRaises(ValueError):
+                DraftRequest(self.binding, "comment", self._evidence(state=state), {})
+
+    def test_draft_request_bounds_nested_evidence_aggregate(self):
+        oversized = "x" * 200_000
+        for evidence in (self._evidence(findings=[{"title": oversized}]), self._evidence(verification=[{"detail": oversized}]), self._evidence(provenance={"backend": "codex", "model": "x", "repository": "project/review", "pull_request": 166, "base_sha": "a" * 40, "head_sha": "b" * 40, "note": oversized}), self._evidence(overlap={"details": oversized}), self._evidence(raw_evidence=[oversized])):
+            with self.assertRaises(ValueError):
+                DraftRequest(self.binding, "comment", evidence, {})
+        with self.assertRaises(ValueError):
+            DraftRequest(self.binding, "comment", self._evidence(), {"nested": {"value": oversized}})
+
+    def test_draft_request_rejects_each_exact_binding_mismatch(self):
+        for field, value in {"repository": "other/review", "pull_request": 167, "base_sha": "c" * 40, "head_sha": "d" * 40}.items():
+            provenance = self._evidence().provenance | {field: value}
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                DraftRequest(self.binding, "comment", self._evidence(provenance=provenance), {})
+
+    def test_failed_draft_raw_evidence_has_line_and_character_bounds(self):
+        request = DraftRequest(self.binding, "comment", self._evidence(), {})
+        result = CodexHarness().convert_draft("x" * 200_000, request, exit_code=1)
+        self.assertEqual(result.state, DraftState.FAILED)
+        self.assertLessEqual(len(result.raw_evidence), 400)
+        self.assertLessEqual(sum(map(len, result.raw_evidence)), 120_000)
+
+    def test_draft_provenance_uses_adapter_model_and_effort(self):
+        adapter = CodexHarness(model="gpt-custom", effort="high")
+        result = adapter.validate_draft(DraftRequest(self.binding, "comment", self._evidence(), {}))
+        self.assertEqual(result.provenance["model"], "gpt-custom")
+        self.assertEqual(result.provenance["effort"], "high")
+
     def test_codex_draft_command_is_bounded_read_only_and_no_review(self):
         request = DraftRequest(self.binding, "request-changes", self._evidence(), {"title": "A PR"})
         command = CodexHarness().draft_command(request)
