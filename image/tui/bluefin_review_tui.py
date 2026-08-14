@@ -48,6 +48,7 @@ from review_result import ReviewResult, adapt_current_engine
 import landing
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from harness.codex import CodexHarness
+from harness.goose import GooseHarness
 from harness.autopilot import (HarnessOption, Preference, can_remember,
                                choose_option, discover_all, load_preferences,
                                remember_success)
@@ -66,6 +67,7 @@ TRACE_PATH = os.path.join(
 )
 MUTATION_TIMEOUT = 60
 HIVE_TIMEOUT = 15
+MAX_REVIEW_BODY_CHARS = 4096
 # The label Hive's governor sweep scans for. It is not defined in most
 # repositories, and adding a label that does not exist fails.
 QUEUE_LABEL = "lgtm"
@@ -910,6 +912,7 @@ class ReviewBody(ModalScreen[str | None]):
         self.verdict = verdict
         self.draft_provenance: dict = {}
         self.body_file: str | None = None
+        self.previewed_body: str | None = None
 
     def compose(self) -> ComposeResult:
         optional = " (empty is allowed for an approval)" if self.verdict == "approve" else ""
@@ -931,6 +934,10 @@ class ReviewBody(ModalScreen[str | None]):
     def action_clear(self) -> None:
         self.query_one(TextArea).text = ""
 
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if event.text_area.id == "review-body-editor":
+            self._invalidate_preview()
+
     def action_generate(self) -> None:
         result = self.stop_record.review_result
         if result is None or result.state not in {"complete", "findings"}:
@@ -943,10 +950,13 @@ class ReviewBody(ModalScreen[str | None]):
                 str(self.stop_record.live["baseRefOid"]), str(self.stop_record.live["headRefOid"]),
                 actor="maintainer", tenant="review", generated_at="dashboard",
             )
-            adapter = CodexHarness(availability=CodexHarness.probe())
             registry = HarnessRegistry()
-            registry.register(adapter)
-            draft = registry.require_ready("codex").draft(
+            registry.register(GooseHarness())
+            registry.register(CodexHarness(availability=CodexHarness.probe()))
+            adapter = registry.require_ready(ACTIVE_BACKEND)
+            if not adapter.capabilities.body_drafting:
+                raise RuntimeError(f"{ACTIVE_BACKEND} unavailable: UNSUPPORTED_CAPABILITY")
+            draft = adapter.draft(
                 DraftRequest(request, self.verdict, result, live_review_context(self.stop_record.live))
             )
         except (KeyError, TypeError, ValueError, RuntimeError, OSError) as error:
@@ -964,8 +974,29 @@ class ReviewBody(ModalScreen[str | None]):
 
     def action_preview(self) -> None:
         body = self.query_one(TextArea).text or "Reviewed."
+        if not self._validate_body(body):
+            return
         path = self._prepare_body_file(body)
+        self.previewed_body = body
         self.app.push_screen(ReviewBodyPreview(body, self._command(path)))
+
+    def _validate_body(self, body: str) -> bool:
+        if len(body) <= MAX_REVIEW_BODY_CHARS:
+            return True
+        self.notify(
+            f"review body is too long ({len(body)}/{MAX_REVIEW_BODY_CHARS} characters); nothing was submitted",
+            severity="warning",
+        )
+        return False
+
+    def _invalidate_preview(self) -> None:
+        self.previewed_body = None
+        if self.body_file:
+            try:
+                os.unlink(self.body_file)
+            except FileNotFoundError:
+                pass
+            self.body_file = None
 
     def _prepare_body_file(self, body: str) -> str:
         import tempfile
@@ -985,12 +1016,17 @@ class ReviewBody(ModalScreen[str | None]):
         return handle.name
 
     def action_submit(self) -> None:
-        body = self.query_one(TextArea).text
-        if not body and self.verdict != "approve":
+        raw_body = self.query_one(TextArea).text
+        if not raw_body and self.verdict != "approve":
             self.notify(f"{self.verdict} needs a reason; nothing was submitted.", severity="warning")
             return
-        path = self._prepare_body_file(body)
-        self.dismiss((body, path))
+        body = raw_body or "Reviewed."
+        if not self._validate_body(body):
+            return
+        if self.previewed_body != body or not self.body_file:
+            self.notify("preview the exact review body before submitting", severity="warning")
+            return
+        self.dismiss((body, self.body_file))
 
     def cleanup(self) -> None:
         if self.body_file:
@@ -999,6 +1035,7 @@ class ReviewBody(ModalScreen[str | None]):
             except FileNotFoundError:
                 pass
             self.body_file = None
+        self.previewed_body = None
 
 
 class DiffScreen(ModalScreen[None]):
