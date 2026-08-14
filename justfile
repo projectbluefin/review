@@ -145,10 +145,15 @@ require_copilot_provider() {
 }
 require_goose_backend() {
   local requested="${1:-}"
-  [[ -z "$requested" || "$requested" == goose || "$requested" == pi ]] && return 0
-  echo "ERROR: TOOL=${requested} is not supported — review supports Goose and Pi." >&2
-  echo "  Unset TOOL, or pass TOOL=goose or TOOL=pi." >&2
+  [[ -z "$requested" || "$requested" == goose || "$requested" == pi || "$requested" == codex ]] && return 0
+  echo "ERROR: TOOL=${requested} is not supported — review supports Goose, Codex, and Pi." >&2
+  echo "  Unset TOOL, or pass TOOL=goose, TOOL=codex, or TOOL=pi." >&2
   return 1
+}
+codex_auth_configured() {
+  local codex_home="${CODEX_HOME:-${HOME}/.codex}"
+  local auth_file="${codex_home%/}/auth.json"
+  [[ -s "$auth_file" && -r "$auth_file" ]]
 }
 preflight_agent() {
   local backend="${1:-goose}"
@@ -157,6 +162,12 @@ preflight_agent() {
     [[ -n "${PI_API_KEY:-}" ]] || {
       echo "ERROR: Pi requires PI_API_KEY for the selected Anthropic provider." >&2
       echo "  Export PI_API_KEY before running TOOL=pi just review-container." >&2
+      return 1
+    }
+  elif [[ "$backend" == codex ]]; then
+    codex_auth_configured || {
+      echo "ERROR: Codex subscription login is unavailable for the selected backend." >&2
+      echo "  Run 'codex login' with file credential storage, then re-run TOOL=codex just review-container." >&2
       return 1
     }
   else
@@ -775,7 +786,7 @@ review-container profile="" effort="":
     resolve_model_profile "{{profile}}" "{{effort}}"
     if [[ "$BACKEND" == pi ]]; then
       export ANTHROPIC_API_KEY="$PI_API_KEY"
-    else
+    elif [[ "$BACKEND" == goose ]]; then
       resolve_goose_selection
     fi
     REVIEW_RECIPE=review-container
@@ -853,6 +864,13 @@ review-container profile="" effort="":
       CONTAINER_ARGS+=(--env ANTHROPIC_API_KEY)
       echo "✓ Pi credential passed to the agent (value not shown)."
     fi
+    CODEX_AUTH_STAGING_DIR=""
+    trap cleanup_codex_auth_file EXIT
+    if [[ "$BACKEND" == codex ]]; then
+      stage_codex_auth_file
+      CONTAINER_ARGS+=(--volume "$CODEX_AUTH_FILE:/home/dev/.codex/auth.json:rw,z")
+      echo "✓ Codex subscription login staged as one private file (contents not shown; host cache not mounted)."
+    fi
     resolve_gh_token
     if [[ -n "${GH_TOKEN_VALUE:-}" ]]; then
       export GH_TOKEN="$GH_TOKEN_VALUE"
@@ -872,6 +890,15 @@ review-container profile="" effort="":
       echo "  The entrypoint attaches to the 'contributor' tmux session for you."
       echo "  From a second terminal: podman exec -it ${CONTAINER_NAME} tmux attach -t contributor"
       echo "  Stop any time with Ctrl-C."
+    fi
+    if [[ "$BACKEND" == codex ]]; then
+      if "${CONTAINER_ARGS[@]}"; then
+        status=0
+      else
+        status=$?
+      fi
+      cleanup_codex_auth_file
+      exit "$status"
     fi
     exec "${CONTAINER_ARGS[@]}"
 

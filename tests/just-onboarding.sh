@@ -6,8 +6,8 @@
 # never starts a real container, and never
 # depends on what happens to be installed on the developer's machine.
 #
-# Host preflight remains Goose/Pi-specific. Codex discovery runs inside the
-# maintainer image, with only its subscription login cache handed through.
+# Host preflight is backend-specific. Codex contributor runs use only their
+# subscription login cache; Goose configuration and Copilot are not required.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -358,12 +358,12 @@ assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
 assert_contains "GOOSE_PROVIDER=openai is not supported" "$OUT"
 assert_contains "GOOSE_PROVIDER=github_copilot" "$OUT"
 
-# ══ 2. TOOL handling: Goose only ══════════════════════════════════════════
+# ══ 2. TOOL handling: selected backends ════════════════════════════════════
 begin "TOOL=claude is rejected with a Goose-only error"
 run_recipe review-container GH_READY=1 TOOL=claude
 assert_nonzero_status "$STATUS" "a non-Goose TOOL must be a hard error"
 assert_contains "TOOL=claude is not supported" "$OUT"
-assert_contains "review supports Goose and Pi" "$OUT"
+assert_contains "review supports Goose, Codex, and Pi" "$OUT"
 assert_not_contains "auto-detected" "$OUT"
 assert_not_contains "Multiple AI CLIs" "$OUT"
 
@@ -390,6 +390,28 @@ run_recipe review-container GH_READY=1 TOOL=pi
 assert_nonzero_status "$STATUS" "Pi without a credential must fail preflight"
 assert_contains "Pi requires PI_API_KEY" "$OUT"
 assert_file_not_contains "run --rm" "$runner_log"
+
+begin "TOOL=codex uses subscription auth without Goose or Copilot"
+reset_logs
+rm -f "$home/.config/goose/config.yaml"
+mkdir -p "$home/.codex"
+printf '{"tokens":{"access_token":"codex-test-secret"}}\n' >"$home/.codex/auth.json"
+chmod 0400 "$home/.codex/auth.json"
+run_recipe review-container GH_READY=1 TOOL=codex
+assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
+assert_not_contains "Goose has no usable provider configuration" "$OUT"
+assert_not_contains "Copilot" "$OUT"
+assert_file_contains "--env AGENT_BACKEND=codex" "$runner_log"
+codex_auth_mount="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "$credential_log")"
+assert_contains "${tmp_root}/" "$codex_auth_mount"
+[[ "$codex_auth_mount" != "$home/.codex/auth.json" ]] || fail "host Codex auth must not be mounted directly"
+assert_file_not_contains "codex-test-secret" "$runner_log"
+assert_file_not_contains "codex-test-secret" "$OUT"
+assert_file_not_exists "$codex_auth_mount"
+assert_file_contains "codex-test-secret" "$home/.codex/auth.json"
+rm -f "$home/.codex/auth.json"
+rmdir "$home/.codex"
+write_goose_config
 
 begin "selection: default Copilot model is noninteractive"
 reset_logs
