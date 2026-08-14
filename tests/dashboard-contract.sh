@@ -124,8 +124,8 @@ grep -q '"gh", "label", "create", QUEUE_LABEL' "$tui" ||
 # Two review-submission sites, and both gated: the queue approval that arms
 # the sweep, and the maintainer's own review — approve, request changes, or
 # comment — which is neither a merge nor an automation opt-in.
-[[ "$(grep -c '"pr", "review"' "$tui")" -eq 2 ]] ||
-  fail "expected two review sites: the queue approval and the maintainer review"
+[[ "$(grep -c '"pr", "review"' "$tui")" -eq 3 ]] ||
+  fail "expected the review command constructor plus queue and maintainer review sites"
 leave_review="$(sed -n '/def leave_review/,/def action_leave_review/p' "$tui")"
 grep -q 'self.mutate_all' <<<"$leave_review" ||
   fail "leaving a review must go through the typed-number gate"

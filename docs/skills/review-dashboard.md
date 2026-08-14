@@ -254,6 +254,21 @@ image's `org.opencontainers.image.revision` label). The agent reports
 - **Never bypass branch protection.** No `--admin`, no `--delete-branch`, no
   push.
 
+### Review bodies
+
+`L` keeps the existing verdict picker, then opens a multiline `TextArea` for
+approve, request-changes, or comment. `Ctrl-g` asks the active drafting
+capability for bounded prose from the stored completed `ReviewResult` and
+live PR facts; failed, incomplete, or untrusted evidence refuses generation,
+while manual text remains available. `Ctrl-e` returns focus to editing,
+`Ctrl-p` previews the exact Markdown and command, `Ctrl-Shift-k` clears the
+body, and `Ctrl-s` submits through the existing typed PR-number gate.
+
+The final Markdown is written verbatim to a bounded temporary body file for
+`gh pr review --body-file` only. The file is removed after success, failure,
+or cancellation; no draft action selects a verdict, discovers findings, or
+mutates GitHub.
+
 ## Common Rationalizations
 
 | Rationalization | Reality |

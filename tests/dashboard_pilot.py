@@ -525,10 +525,10 @@ async def main() -> int:
         await pilot.pause()
         check(app.screen is root_screen, "typed PR-number confirmation must remain functional")
 
-        app.push_screen(tui.ReviewBody("comment"))
+        app.push_screen(tui.ReviewBody(app.stops[0], "comment"))
         await pilot.pause()
         await pilot.press("q")
-        check(app.screen.query_one(tui.Input).value == "q", "q must type in the review body input")
+        check(app.screen.query_one(tui.TextArea).text == "q", "q must type in the review body editor")
         await pilot.press("escape")
         await pilot.pause()
         check(app.screen is root_screen, "Escape must close ReviewBody")
@@ -1181,7 +1181,7 @@ async def main() -> int:
                 f"a verdict must ask for a reason, got {type(app.screen).__name__}",
             )
             await pilot.press("n", "o", "p", "e")
-            await pilot.press("enter")
+            await pilot.press("ctrl+s")
             await pilot.pause()
             check(
                 isinstance(app.screen, tui.ConfirmMutation),
@@ -1210,6 +1210,73 @@ async def main() -> int:
                 "pr merge" not in gh_log.read_text(),
                 "leaving a review must never merge",
             )
+
+    # ── editable, generated review bodies ───────────────────────────────
+    exact_markdown = "## Résumé\n\n- `literal [text]`\n- Unicode: café ☕\n\n\nfinal"
+    draft_calls = []
+    original_draft = tui.CodexHarness.draft
+
+    def draft_body(self, request):
+        draft_calls.append(request)
+        return SimpleNamespace(state=tui.DraftState.COMPLETE, markdown="generated blocker", provenance={})
+
+    tui.CodexHarness.draft = draft_body
+    try:
+        for verdict, generated in (("approve", "accepted"), ("request-changes", "generated blocker"), ("comment", "observation")):
+            app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                for _ in range(200):
+                    if app.stops:
+                        break
+                    await pilot.pause(0.05)
+                stop = app.stops[0]
+                stop.live.update({"baseRefOid": "a" * 40, "headRefOid": "b" * 40})
+                stop.review_result = tui.ReviewResult(
+                    1, "complete" if verdict == "approve" else "findings",
+                    findings=() if verdict == "approve" else ({"severity": "high", "title": "blocker"},),
+                    provenance={"repository": "projectbluefin/bluefinctl", "pull_request": 31,
+                                "base_sha": "a" * 40, "head_sha": "b" * 40},
+                )
+                app.leave_review(stop)
+                await pilot.pause()
+                await pilot.press({"approve": "1", "request-changes": "2", "comment": "3"}[verdict])
+                await pilot.pause()
+                await pilot.press("ctrl+g")
+                await pilot.pause()
+                check(app.screen.query_one("#review-body-editor", tui.TextArea).text == "generated blocker",
+                      f"{verdict} generation must use the drafting capability")
+                await pilot.press("ctrl+e")
+                editor = app.screen.query_one("#review-body-editor", tui.TextArea)
+                editor.text = exact_markdown
+                await pilot.press("ctrl+p")
+                await pilot.pause()
+                check(isinstance(app.screen, tui.ReviewBodyPreview), "preview must show before mutation")
+                check(exact_markdown in app.screen.body, "preview must preserve exact Markdown")
+                await pilot.press("escape")
+                await pilot.pause()
+                check(isinstance(app.screen, tui.ReviewBody), "preview cancel must return to editor")
+                app.screen.action_clear()
+                check(app.screen.query_one("#review-body-editor", tui.TextArea).text == "",
+                      "clear must empty the editor")
+                app.screen.query_one("#review-body-editor", tui.TextArea).text = exact_markdown
+                await pilot.press("ctrl+s")
+                for _ in range(20):
+                    if isinstance(app.screen, tui.ConfirmMutation):
+                        break
+                    await pilot.pause(0.05)
+                check(isinstance(app.screen, tui.ConfirmMutation), "submit must use the existing gate")
+                command = app.screen.commands[0]
+                check(command[:3] == ["gh", "pr", "review"], "submit must use gh pr review")
+                body_path = Path(command[command.index("--body-file") + 1])
+                check(body_path.read_text(encoding="utf-8") == exact_markdown,
+                      "body file must preserve exact Markdown")
+                await pilot.press(*app.screen.expected)
+                await pilot.press("escape")
+                check(not body_path.exists(), "cancelled mutation must clean the temporary body")
+        check(len(draft_calls) == 3, "all three verdicts must call drafting")
+    finally:
+        tui.CodexHarness.draft = original_draft
 
     # A verdict that is not an approval has to say why.
     app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
