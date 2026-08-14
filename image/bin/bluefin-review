@@ -17,8 +17,9 @@ REVIEW_INCOMPLETE=65
 REVIEW_CHILD_PID=""
 
 request_review_cancel() {
-  if [[ -n "$REVIEW_CHILD_PID" ]]; then
-    kill -TERM "$REVIEW_CHILD_PID" 2>/dev/null || true
+  local child="$REVIEW_CHILD_PID"
+  if [[ -n "$child" ]] && jobs -pr 2>/dev/null | grep -Fxq "$child"; then
+    kill -TERM "$child" 2>/dev/null || true
   fi
 }
 
@@ -201,6 +202,9 @@ a human makes every approval and merge decision."
 run_reviewed() {
   local status=0
   local signal_status=0
+  local prior_term prior_int
+  prior_term="$(trap -p TERM)"
+  prior_int="$(trap -p INT)"
   forward_review_signal() {
     request_review_cancel
     signal_status="$1"
@@ -214,8 +218,8 @@ run_reviewed() {
   REVIEW_CHILD_PID=$!
   wait "$REVIEW_CHILD_PID" || status=$?
   REVIEW_CHILD_PID=""
-  trap - TERM
-  trap - INT
+  if [[ -n "$prior_term" ]]; then eval "$prior_term"; else trap - TERM; fi
+  if [[ -n "$prior_int" ]]; then eval "$prior_int"; else trap - INT; fi
   if ((signal_status != 0)); then status="$signal_status"; fi
   return "$status"
 }
@@ -228,6 +232,25 @@ run_reviewed() {
 # pointer carries the same doctrine.
 goose_review() {
   local scope=""
+  local prior_term prior_int prior_exit
+  prior_term="$(trap -p TERM)"
+  prior_int="$(trap -p INT)"
+  prior_exit="$(trap -p EXIT)"
+  cleanup_review_scope() {
+    if [[ -n "$scope" ]]; then
+      rm -rf "$scope"
+      scope=""
+    fi
+  }
+  finish_scope_signal() {
+    local signal_status="$1"
+    request_review_cancel
+    cleanup_review_scope
+    if [[ -n "$prior_term" ]]; then eval "$prior_term"; else trap - TERM; fi
+    if [[ -n "$prior_int" ]]; then eval "$prior_int"; else trap - INT; fi
+    if [[ -n "$prior_exit" ]]; then eval "$prior_exit"; else trap - EXIT; fi
+    exit "$signal_status"
+  }
   if [[ -d "${SCOPE_ROOT}/.agents" ]]; then
     scope="$(mktemp -d "${TMPDIR:-/tmp}/bluefin-review-scope.XXXXXX")"
     mkdir -p "${scope}/.agents/checks"
@@ -252,6 +275,9 @@ goose_review() {
       } >"${scope}/.agents/checks/maintainer-steering.md"
     fi
   fi
+  trap 'finish_scope_signal 143' TERM
+  trap 'finish_scope_signal 130' INT
+  trap cleanup_review_scope EXIT
 
   local prompt=""
   [[ -n "$scope" ]] || prompt="$(review_instructions)"
@@ -268,7 +294,10 @@ goose_review() {
   local status=0
   run_reviewed run_registered_review "${1:-}" "$scope" "$prompt" \
     "$owner" "$repository" "$number" "$base_sha" "$head_sha" || status=$?
-  if [[ -n "$scope" ]]; then rm -rf "$scope"; fi
+  cleanup_review_scope
+  if [[ -n "$prior_term" ]]; then eval "$prior_term"; else trap - TERM; fi
+  if [[ -n "$prior_int" ]]; then eval "$prior_int"; else trap - INT; fi
+  if [[ -n "$prior_exit" ]]; then eval "$prior_exit"; else trap - EXIT; fi
   return "$status"
 }
 

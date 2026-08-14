@@ -262,6 +262,124 @@ if kill -0 -- "-$local_int_pgid" 2>/dev/null; then
   exit 1
 fi
 
+# Completion-boundary signals must preserve the exact status without
+# cancelling a completed adapter or abandoning its temporary review scope.
+cat >"$scratch/bin/goose" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
+printf '%s\n' "$$" >"${GOOSE_PID_FILE:?}"
+printf '%s\n' "goose review: check 'main' completed: 0 finding(s)"
+printf '%s\n' 'goose review: orchestrator emitted 0 finding(s) from 1 check(s) (main: ran, 0 finding(s))'
+exit 0
+EOF
+chmod +x "$scratch/bin/goose"
+cat >"$scratch/debug-boundary.env" <<'EOF'
+kill() {
+  if [[ "${1-}" == "-TERM" && -n "${KILL_LOG-}" ]]; then
+    printf '%s\n' "${*:2}" >>"$KILL_LOG"
+  fi
+  builtin kill "$@"
+}
+export -f kill
+set -T
+boundary_debug() {
+  [[ -n "${BOUNDARY_TRACE-}" ]] && printf '%s\n' "${BASH_COMMAND-}" >>"$BOUNDARY_TRACE"
+  case "${BASH_COMMAND-}" in
+    *REVIEW_CHILD_PID*)
+      if [[ "${BOUNDARY_PHASE-}" == adapter ]]; then
+        : >"${BOUNDARY_MARKER:?}"
+        sleep 1
+      fi
+      ;;
+    *'rm -rf "$scope"'*)
+      if [[ "${BOUNDARY_PHASE-}" == scope ]]; then
+        : >"${BOUNDARY_MARKER:?}"
+        sleep 1
+      fi
+      ;;
+  esac
+}
+trap boundary_debug DEBUG
+EOF
+
+run_boundary_signal() {
+  local signal="$1" expected="$2" label="$3"
+  rm -f "$scratch/boundary-marker" "$scratch/boundary-kills" "$scratch/boundary-pid"
+  if [[ "$signal" == INT ]]; then
+    BASH_ENV="$scratch/debug-boundary.env" PATH="$scratch/bin:$PATH" \
+      GOOSE_PID_FILE="$scratch/boundary-pid" KILL_LOG="$scratch/boundary-kills" \
+      BOUNDARY_MARKER="$scratch/boundary-marker" BOUNDARY_PHASE=adapter BOUNDARY_TRACE="/tmp/issue-239-boundary-trace" \
+      env --default-signal=SIGINT setsid "$review" main...HEAD >"$scratch/boundary-$label-output" 2>&1 &
+  else
+    BASH_ENV="$scratch/debug-boundary.env" PATH="$scratch/bin:$PATH" \
+      GOOSE_PID_FILE="$scratch/boundary-pid" KILL_LOG="$scratch/boundary-kills" \
+      BOUNDARY_MARKER="$scratch/boundary-marker" BOUNDARY_PHASE=adapter BOUNDARY_TRACE="/tmp/issue-239-boundary-trace" "$review" main...HEAD \
+      >"$scratch/boundary-$label-output" 2>&1 &
+  fi
+  local launcher=$!
+  for _ in {1..50}; do
+    [[ -e "$scratch/boundary-marker" ]] && break
+    sleep 0.1
+  done
+  [[ -e "$scratch/boundary-marker" ]]
+  if [[ "$signal" == INT ]]; then
+    builtin kill -"$signal" -- "-$launcher"
+  else
+    builtin kill -"$signal" "$launcher"
+  fi
+  set +e
+  wait "$launcher"
+  local actual=$?
+  set -e
+  [[ "$actual" -eq "$expected" ]]
+  [[ ! -s "$scratch/boundary-kills" ]]
+}
+
+run_boundary_signal TERM 143 adapter-complete
+run_boundary_signal INT 130 adapter-complete-int
+
+for signal in TERM INT; do
+  expected=143
+  [[ "$signal" == INT ]] && expected=130
+  rm -rf "$scratch/overlay" "$scratch/boundary-marker" "$scratch/boundary-kills" "$scratch/boundary-pid"
+  mkdir -p "$scratch/tmp"
+  mkdir -p "$scratch/overlay/.agents/checks"
+  printf 'SCOPED REVIEW PROMPT\n' >"$scratch/overlay/.agents/REVIEW.md"
+  printf '%s\n' '---' 'name: bluefin-doctrine' '---' >"$scratch/overlay/.agents/checks/bluefin-doctrine.md"
+  if [[ "$signal" == INT ]]; then
+    BASH_ENV="$scratch/debug-boundary.env" BLUEFIN_REVIEW_SCOPE_ROOT="$scratch/overlay" \
+      TMPDIR="$scratch/tmp" PATH="$scratch/bin:$PATH" GOOSE_PID_FILE="$scratch/boundary-pid" \
+      KILL_LOG="$scratch/boundary-kills" BOUNDARY_MARKER="$scratch/boundary-marker" BOUNDARY_PHASE=scope BOUNDARY_TRACE="/tmp/issue-239-boundary-trace" \
+      env --default-signal=SIGINT setsid "$review" main...HEAD >"$scratch/scope-$signal-output" 2>&1 &
+  else
+    BASH_ENV="$scratch/debug-boundary.env" BLUEFIN_REVIEW_SCOPE_ROOT="$scratch/overlay" \
+      TMPDIR="$scratch/tmp" PATH="$scratch/bin:$PATH" GOOSE_PID_FILE="$scratch/boundary-pid" \
+      KILL_LOG="$scratch/boundary-kills" BOUNDARY_MARKER="$scratch/boundary-marker" BOUNDARY_PHASE=scope BOUNDARY_TRACE="/tmp/issue-239-boundary-trace" \
+      "$review" main...HEAD >"$scratch/scope-$signal-output" 2>&1 &
+  fi
+  launcher=$!
+  for _ in {1..50}; do
+    [[ -e "$scratch/boundary-marker" ]] && break
+    sleep 0.1
+  done
+  [[ -e "$scratch/boundary-marker" ]]
+  if [[ "$signal" == INT ]]; then
+    builtin kill -"$signal" -- "-$launcher"
+  else
+    builtin kill -"$signal" "$launcher"
+  fi
+  set +e
+  wait "$launcher"
+  actual=$?
+  set -e
+  [[ "$actual" -eq "$expected" ]]
+  [[ ! -s "$scratch/boundary-kills" ]]
+  if compgen -G "$scratch/tmp/bluefin-review-scope.*" >/dev/null; then
+    echo "scope survived completion-boundary $signal" >&2
+    exit 1
+  fi
+done
+
 # restore the exit-code stub for the assertions that follow
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
