@@ -178,6 +178,18 @@ background colour.
   `review_state`, `labels` and every duplicate's title arrive with the queue
   and the cluster listing. Colour, the merge-queue meter and the duplicate
   summaries all cost zero extra requests.
+- **Classify from evidence, never from a title.** `MECHANICAL` marks the one
+  low-judgment operation the dashboard can prove is safe: merging the base
+  into a green, mergeable branch that is merely behind. It requires the
+  configured Renovate author (`BLUEFIN_REVIEW_RENOVATE_BOTS`), Renovate's own
+  declared update type (`digest`, `pin`, `patch`, or `minor` — never `major`),
+  an open non-draft pull request, `MERGEABLE` + `BEHIND`, and every reported
+  check complete and green. `[U]` selects exactly those stops for the existing
+  gated `[u]`. **`MECHANICAL` describes updateability, not approval and not
+  merge safety.** The earlier `BATCHABLE` tag matched dependency-shaped titles,
+  which is duplicate evidence about the subject and says nothing about whether
+  the branch can be brought current; `dependency_subject()` survives for
+  duplicate detection only.
 - **Distinguish the merge paths.** Unselected, `a` approves and applies
   `lgtm`, an opt-in to Hive's sweep. On a selection, `a` dispatches one
   landing agent for the whole batch. `m` squashes now and is gated on

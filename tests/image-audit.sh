@@ -592,7 +592,7 @@ runtime_inventory() {
   ' bash "$2" "$3" "$4"
 }
 
-base_required="bash cat chmod cp curl git grep jq ls mkdir mv python3 rm sed sh sort tail tee touch tr uname wc ssh kubectl tic infocmp argo just nginx"
+base_required="bash cat chmod cp curl git grep jq ls mkdir mv python3 rm sed sh sort tail tee touch tr uname wc ssh kubectl tic infocmp argo just nginx find cmp diff"
 # Two different rules used to be spelled the same way here, which made the
 # audit fail for a change that was actually correct.
 #

@@ -1280,6 +1280,170 @@ async def main() -> int:
                 await pilot.pause()
     gh_log.write_text("")
 
+    # ── MECHANICAL is live evidence, not a dependency-shaped title ───────
+    # The old BATCHABLE tag matched titles, which is duplicate evidence: it
+    # said nothing about whether the branch could actually be brought current.
+    renovate_body = (
+        "This PR contains the following updates:\n\n"
+        "| Package | Update | Change |\n"
+        "|---|---|---|\n"
+        "| [dep](https://x) | digest | `aaa` -> `bbb` |\n\n"
+        "---\n### Configuration\n"
+    )
+    major_body = renovate_body.replace("| digest |", "| major |")
+    bot = sorted(tui.RENOVATE_BOTS)[0]
+    green = [{"conclusion": "SUCCESS"}, {"conclusion": "SKIPPED"}]
+
+    def live_shape(**overrides) -> dict:
+        shape = {
+            "author": {"login": bot},
+            "state": "OPEN",
+            "isDraft": False,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "BEHIND",
+            "body": renovate_body,
+            "statusCheckRollup": list(green),
+        }
+        shape.update(overrides)
+        return shape
+
+    check(
+        tui.renovate_update_types(renovate_body) == {"digest"},
+        "Renovate's own table must supply the update type",
+    )
+    check(
+        tui.mechanical_reason(bot, live_shape()) is not None,
+        "a fixture matching every required signal must be MECHANICAL",
+    )
+    # Removing or weakening any single required signal must disqualify it.
+    for description, overrides in (
+        ("a draft", {"isDraft": True}),
+        ("a conflict", {"mergeable": "CONFLICTING"}),
+        ("an already-current branch", {"mergeStateStatus": "CLEAN"}),
+        ("a blocked branch", {"mergeStateStatus": "BLOCKED"}),
+        ("a closed pull request", {"state": "CLOSED"}),
+        ("a failed check", {"statusCheckRollup": [{"conclusion": "FAILURE"}]}),
+        ("a pending check", {"statusCheckRollup": green + [{"state": "PENDING"}]}),
+        ("no checks at all", {"statusCheckRollup": []}),
+        ("a major update", {"body": major_body}),
+        ("no Renovate metadata", {"body": "hand-written description"}),
+    ):
+        check(
+            tui.mechanical_reason(bot, live_shape(**overrides)) is None,
+            f"{description} must never be MECHANICAL",
+        )
+    check(
+        tui.mechanical_reason("castrojo", live_shape()) is None,
+        "a non-Renovate author must never be MECHANICAL",
+    )
+    check(
+        tui.mechanical_reason(bot, {}) is None,
+        "MECHANICAL must require live evidence, never absence of it",
+    )
+    check(
+        tui.mechanical_reason(
+            "castrojo", live_shape(author={"login": "castrojo"})
+        )
+        is None,
+        "a title-only lookalike must never be MECHANICAL",
+    )
+    check(
+        tui.dependency_subject("chore(deps): update dependency ws to v8") is not None,
+        "title normalisation must survive for duplicate detection",
+    )
+
+    mech_row = app.row_markup(
+        tui.Stop("o/r", 101, "review", "chore(deps): bump", author=bot, live=live_shape())
+    )
+    plain_row = app.row_markup(
+        tui.Stop("o/r", 117, "review", "chore(deps): bump", author=bot)
+    )
+    check("(MECHANICAL)" in mech_row, "a mechanical stop must say so on its row")
+    check(
+        "(MECHANICAL)" not in plain_row,
+        "a stop without live evidence must not claim to be mechanical",
+    )
+    check(
+        "[b]U[/b]" in tui.KEYS_ACTING,
+        "the acting key line must document the mechanical selection key",
+    )
+
+    # [U] over a live queue: two qualifying Renovate branches and one that is
+    # conflicted, exactly the shapes #152 names.
+    mech_queue = workdir / "mechanical.json"
+    mech_queue.write_text(json.dumps({
+        "generated_at": "2026-08-08T00:00:00Z",
+        "items": [
+            {"repository": "o/r", "number": 101, "recommended_action": "review",
+             "title": "chore(deps): update dependency alpha", "author": bot},
+            {"repository": "o/r", "number": 142, "recommended_action": "review",
+             "title": "chore(deps): update dependency beta", "author": bot},
+            {"repository": "o/r", "number": 117, "recommended_action": "review",
+             "title": "chore(deps): update dependency gamma", "author": bot},
+            {"repository": "o/r", "number": 9, "recommended_action": "review",
+             "title": "chore(deps): update dependency delta by hand",
+             "author": "someone-else"},
+        ],
+    }))
+    ok_json = workdir / "mech-ok.json"
+    ok_json.write_text(json.dumps(live_shape()))
+    bad_json = workdir / "mech-bad.json"
+    bad_json.write_text(json.dumps(live_shape(mergeable="CONFLICTING")))
+    write_stub(
+        workdir / "gh",
+        f'printf "%s\\n" "$*" >>"{gh_log}"\n'
+        'if [ "$1 $2" = "api user" ]; then echo castrojo; exit 0; fi\n'
+        f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
+        'if [ "$1 $2" = "pr view" ]; then\n'
+        '  case "$3" in\n'
+        f'    101|142) cat "{ok_json}" ;;\n'
+        f'    117) cat "{bad_json}" ;;\n'
+        '    *) echo "{}" ;;\n'
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1 $2" = "pr list" ]; then echo "[]"; exit 0; fi\n'
+        "exit 0\n",
+    )
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=mech_queue.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 4:
+                break
+            await pilot.pause(0.05)
+        check(len(app.stops) == 4, "the default queue must stay unfiltered")
+        await pilot.press("U")
+        for _ in range(200):
+            if sum(1 for s in app.stops if s.selected) == 2:
+                break
+            await pilot.pause(0.05)
+        selected = {s.number for s in app.stops if s.selected}
+        check(
+            selected == {101, 142},
+            f"[U] must select only the mechanical branches, got {selected}",
+        )
+        check(
+            len(app.stops) == 4,
+            "[U] must select within the queue, never filter it away",
+        )
+        # The selection feeds the existing gated [u] action unchanged.
+        gh_log.write_text("")
+        await pilot.press("u")
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.ConfirmMutation),
+            "[u] on a mechanical selection must keep its confirmation gate",
+        )
+        if isinstance(app.screen, tui.ConfirmMutation):
+            check(
+                [c[:3] for c in app.screen.commands] == [["gh", "pr", "update-branch"]],
+                f"[u] must update one branch at a time, got {app.screen.commands}",
+            )
+            await pilot.press("escape")
+            await pilot.pause()
+    gh_log.write_text("")
+
     # ── duplicates come with enough summary to choose between them ───────
     # "dupe-of #26, #25, #24" says a decision is required and nothing about
     # how to make it; which one to keep is the whole question.

@@ -83,7 +83,36 @@ KEYS_READING = (
 )
 KEYS_ACTING = (
     " [b]L[/b] leave review [b]a[/b] approve+queue · land batch [b]m[/b] merge"
-    " [b]u[/b] update [b]x[/b] reject [b]M[/b] dupes"
+    " [b]u[/b] update [b]U[/b] select mechanical [b]x[/b] reject [b]M[/b] dupes"
+)
+
+# The bot whose pull requests can be classified as mechanical. The login is
+# configurable because the Renovate installation differs per deployment: this
+# organisation runs it as `app/mergeraptor`, and hard-coding one name is how a
+# correct classifier silently matches nothing somewhere else.
+RENOVATE_BOTS = frozenset(
+    login.strip().lower()
+    for login in os.environ.get(
+        "BLUEFIN_REVIEW_RENOVATE_BOTS",
+        "app/mergeraptor,app/renovate,renovate[bot],renovate-bot",
+    ).split(",")
+    if login.strip()
+)
+
+# The update types current policy already covers. A major update is a semantic
+# decision about the dependency, so it never qualifies for a mechanical branch
+# update no matter how green the branch is.
+MECHANICAL_UPDATE_TYPES = frozenset({"digest", "pin", "patch", "minor"})
+
+# A check that says anything else — running, queued, failed, absent — is not
+# evidence that the branch is currently green.
+MECHANICAL_CHECK_OK = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
+
+# The live evidence the mechanical classifier consumes. `body` is Renovate's
+# own update-type metadata; every other field is GitHub's own account of the
+# pull request's state.
+MECHANICAL_FIELDS = (
+    "author,state,isDraft,mergeable,mergeStateStatus,body,statusCheckRollup"
 )
 
 
@@ -202,6 +231,21 @@ def gh(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
     )
 
 
+def hive_token() -> str:
+    """The hub bearer token: GH_TOKEN when exported, else the host's own gh
+    login. The dashboard runs where the maintainer is already authed with
+    gh; requiring a second, separately exported token is how a connected
+    hub reads as unreachable. Read-only either way."""
+    token = os.environ.get("GH_TOKEN", "").strip()
+    if token:
+        return token
+    try:
+        result = gh("auth", "token", timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
 def hive_get(path: str) -> dict:
     """Read one hub endpoint. Read-only, and never fatal.
 
@@ -211,7 +255,7 @@ def hive_get(path: str) -> dict:
     claims, reorders, or declines any of them.
     """
     base = hive_api_base()
-    token = os.environ.get("GH_TOKEN", "")
+    token = hive_token()
     if not base or not token:
         return {}
     request = urllib.request.Request(
@@ -248,6 +292,71 @@ def dependency_subject(title: str) -> str | None:
         if found:
             return re.sub(r":[^:/]*$", "", found.group(1).strip())
     return None
+
+
+def renovate_update_types(body: str) -> set[str]:
+    """The update types Renovate declares in its own pull request body.
+
+    Renovate writes one row per updated package into a `| Package | Update |
+    Change |` table, and the Update cell carries the type it decided on.
+    Reading that cell is not an inference from the title: it is the bot's own
+    metadata about what it changed.
+    """
+    types: set[str] = set()
+    columns: list[str] = []
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line.startswith("|"):
+            columns = []
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        lowered = [cell.lower() for cell in cells]
+        if "update" in lowered and "package" in lowered:
+            columns = lowered
+            continue
+        if not columns or set(line) <= set("|-: "):
+            continue
+        index = columns.index("update")
+        if index < len(cells) and cells[index]:
+            types.add(cells[index].lower())
+    return types
+
+
+def mechanical_reason(author: str, live: dict) -> str | None:
+    """Why this branch is safe to *update*, or None when it is not.
+
+    MECHANICAL describes exactly one operation — merging the base branch into
+    a green, mergeable branch that is merely behind — and says nothing about
+    whether the dependency change itself should be approved or merged. Every
+    signal below is live GitHub evidence or Renovate's own metadata. A
+    dependency-shaped title proves nothing and is deliberately not consulted:
+    that heuristic is duplicate evidence, not a safety boundary.
+    """
+    if not live:
+        return None
+    login = (author or (live.get("author") or {}).get("login") or "").lower()
+    if login not in RENOVATE_BOTS:
+        return None
+    if (live.get("state") or "OPEN").upper() != "OPEN":
+        return None
+    if live.get("isDraft"):
+        return None
+    if (live.get("mergeable") or "").upper() != "MERGEABLE":
+        return None
+    if (live.get("mergeStateStatus") or "").upper() != "BEHIND":
+        return None
+    checks = live.get("statusCheckRollup") or []
+    if not checks:
+        return None
+    for check in checks:
+        outcome = str(check.get("conclusion") or check.get("state") or "").upper()
+        if outcome not in MECHANICAL_CHECK_OK:
+            return None
+    types = renovate_update_types(live.get("body") or "")
+    if not types or not types <= MECHANICAL_UPDATE_TYPES:
+        return None
+    kinds = "/".join(sorted(types))
+    return f"{kinds} update by {login}, every check green, mergeable but behind"
 
 
 def stop_style(action: str, mergeable: str, checks: str, review: str) -> str:
@@ -391,6 +500,11 @@ class Stop:
     @property
     def batchable(self) -> bool:
         return dependency_subject(self.title) is not None
+
+    @property
+    def mechanical(self) -> str | None:
+        """The branch-update reason, from live evidence only."""
+        return mechanical_reason(self.author, self.live)
 
 
 def live_review_context(live: dict) -> dict:
@@ -1236,6 +1350,7 @@ class ReviewDashboard(App):
         Binding("R", "refresh", "refresh"),
         Binding("f5", "refresh", "refresh", show=False),
         Binding("u", "update_branch", "update branch"),
+        Binding("U", "select_mechanical", "select mechanical"),
         Binding("M", "resolve_cluster", "resolve dupes", show=False),
         Binding("q", "quit", "quit"),
     ]
@@ -1495,7 +1610,9 @@ class ReviewDashboard(App):
         self.populate(stops)
 
     def row_markup(self, stop: Stop) -> str:
-        tag = " (BATCHABLE)" if stop.batchable else ""
+        # MECHANICAL replaces the old title-only BATCHABLE tag: it means this
+        # branch can be brought current, never that the change is approved.
+        tag = " (MECHANICAL)" if stop.mechanical else ""
         # A stop that would not merge says so on its own row, so a failure in
         # the middle of a batch survives the notification that reported it.
         failed = " ✗ DID NOT MERGE" if stop.failure else ""
@@ -1606,7 +1723,7 @@ class ReviewDashboard(App):
             "pr", "view", str(stop.number), "--repo", stop.repository,
             "--json",
             "author,state,baseRefOid,headRefOid,isDraft,mergeable,mergeStateStatus,"
-            "reviewDecision,additions,deletions,changedFiles,updatedAt,"
+            "reviewDecision,additions,deletions,changedFiles,updatedAt,body,"
             "closingIssuesReferences,statusCheckRollup,labels,reviews",
         )
         stop.live = json.loads(live.stdout) if live.returncode == 0 else {}
@@ -1753,6 +1870,15 @@ class ReviewDashboard(App):
             reviews_block = f"reviews  {summary}\n{detail}"
         else:
             reviews_block = "reviews  none yet"
+        # MECHANICAL is a statement about branch maintenance only, so the
+        # evidence line says what makes it updateable and nothing more.
+        reason = stop.mechanical
+        mechanical_block = (
+            f"\nupdate   [b]MECHANICAL[/b] — {escape(reason)}\n"
+            "         updateable only; not approved and not merge-safe"
+            if reason
+            else ""
+        )
         self.query_one("#details", Static).update(
             f"[b]{link(stop.key, pr_url(stop.repository, stop.number))}[/b]  "
             f"{escape(stop.title)}\n"
@@ -1768,7 +1894,7 @@ class ReviewDashboard(App):
             f"checks   {ok} ok, {bad} failed, {pending} pending\n"
             f"{reviews_block}\n"
             f"linked   {issues}\n"
-            f"labels   {labels}"
+            f"labels   {labels}{mechanical_block}"
         )
         self.render_context(stop)
 
@@ -2053,6 +2179,56 @@ class ReviewDashboard(App):
             )
 
         update_next()
+
+    def action_select_mechanical(self) -> None:
+        """Select exactly the stops whose branch is safe to bring current.
+
+        Finding the green-but-behind Renovate branches by hand is the toil
+        this removes. The candidate set is narrowed by author alone — the one
+        snapshot field that cannot be faked by a title — and every candidate
+        is then judged on freshly fetched live evidence, so the selection is
+        never wider than what GitHub currently reports.
+        """
+        candidates = [
+            stop for stop in self.stops
+            if (stop.author or "").lower() in RENOVATE_BOTS
+        ]
+        if not candidates:
+            self.notify("no Renovate pull requests in the current view.")
+            return
+        self.notify(f"checking {len(candidates)} Renovate pull request(s)…")
+        self.classify_mechanical(candidates)
+
+    @work(thread=True)
+    def classify_mechanical(self, candidates: list[Stop]) -> None:
+        for stop in candidates:
+            result = gh(
+                "pr", "view", str(stop.number), "--repo", stop.repository,
+                "--json", MECHANICAL_FIELDS,
+            )
+            if result.returncode == 0:
+                try:
+                    stop.live = {**stop.live, **json.loads(result.stdout)}
+                except json.JSONDecodeError:
+                    stop.live = {}
+            else:
+                stop.live = {}
+        self.call_from_thread(self.apply_mechanical_selection, candidates)
+
+    def apply_mechanical_selection(self, candidates: list[Stop]) -> None:
+        chosen = [stop for stop in candidates if stop.mechanical]
+        for stop in self.stops:
+            stop.selected = False
+        for stop in chosen:
+            stop.selected = True
+        self.refresh_rows()
+        if chosen:
+            self.notify(
+                f"selected {len(chosen)} mechanical branch update(s); "
+                "[u] updates them one at a time behind the gate."
+            )
+        else:
+            self.notify("no mechanical branch updates; selection cleared.")
 
     def action_leave_review(self) -> None:
         stop = self.current

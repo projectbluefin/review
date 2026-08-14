@@ -245,10 +245,12 @@ how many stops are hidden and why.
 ### The dashboard
 
 `just review-queue` opens the maintainer surface: a full-screen Textual app
-with a queue pane (Renovate-style dependency bumps are marked BATCHABLE), a
-live-evidence details pane, and a context pane carrying the duplicate
-verdicts. The status bar reports queue depth, snapshot freshness, and your
-GitHub identity; your own pull requests are filtered out.
+with a queue pane (Renovate branches that are green, mergeable and merely
+behind their base are marked MECHANICAL, and `U` selects exactly those for the
+gated `u` branch update — MECHANICAL means updateable, never approved or
+merge-safe), a live-evidence details pane, and a context pane carrying the
+duplicate verdicts. The status bar reports queue depth, snapshot freshness, and
+your GitHub identity; your own pull requests are filtered out.
 
 `r` is the one that matters: it opens a full-screen review that streams
 Goose's output live and then states its own outcome. `x` stops a running
