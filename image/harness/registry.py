@@ -4,10 +4,15 @@ Adapters describe what they can do; orchestration selects no fallback when a
 requested harness is unavailable.
 """
 
+import json
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping, Protocol, Sequence
 from tui.review_evidence_manifest import ReviewRequest
+from tui.review_result import ReviewResult
+
+
+MAX_DRAFT_EVIDENCE_CHARS = 120_000
 
 
 class Availability(str, Enum):
@@ -16,6 +21,61 @@ class Availability(str, Enum):
     UNAVAILABLE_AUTH = "UNAVAILABLE_AUTH"
     UNSUPPORTED_CAPABILITY = "UNSUPPORTED_CAPABILITY"
     FAILED_CONFORMANCE = "FAILED_CONFORMANCE"
+
+
+class DraftState(str, Enum):
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class DraftRequest:
+    binding: ReviewRequest
+    verdict: str
+    evidence: ReviewResult
+    live_facts: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if self.verdict not in {"approve", "request-changes", "comment"}:
+            raise ValueError("unsupported review verdict")
+        if self.evidence.state not in {"complete", "findings"}:
+            raise ValueError("drafting requires trusted review evidence")
+        if self.verdict == "approve" and not self.evidence.is_clean:
+            raise ValueError("approve requires clean review evidence")
+        provenance = self.evidence.provenance
+        expected = {
+            "repository": f"{self.binding.owner}/{self.binding.repository}",
+            "pull_request": self.binding.pull_request_number,
+            "base_sha": self.binding.base_sha,
+            "head_sha": self.binding.head_sha,
+        }
+        if any(provenance.get(key) != value for key, value in expected.items()):
+            raise ValueError("review evidence does not match exact binding")
+        if not isinstance(self.live_facts, Mapping) or len(self.live_facts) > 32:
+            raise ValueError("live facts are unbounded or invalid")
+        if any(not isinstance(key, str) or len(key) > 128 for key in self.live_facts):
+            raise ValueError("live fact key is invalid")
+        try:
+            evidence = json.dumps(
+                {"result": self.evidence.to_dict(), "live": self.live_facts},
+                sort_keys=True, separators=(",", ":"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("draft evidence is not serializable") from exc
+        if len(evidence) > MAX_DRAFT_EVIDENCE_CHARS:
+            raise ValueError("draft evidence exceeds bound")
+
+
+@dataclass(frozen=True)
+class DraftResult:
+    state: DraftState
+    markdown: str = ""
+    provenance: Mapping[str, Any] = field(default_factory=dict)
+    raw_evidence: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if len(self.markdown) > 4096 or len(self.raw_evidence) > 400:
+            raise ValueError("draft result exceeds bound")
 
 
 @dataclass(frozen=True)
@@ -30,6 +90,7 @@ class HarnessCapabilities:
     cancellation: bool = False
     result_conversion: bool = False
     provenance: bool = False
+    body_drafting: bool = False
 
 
 @dataclass(frozen=True)
@@ -55,6 +116,8 @@ class Harness(Protocol):
 
     def invoke(self, binding: ReviewRequest, *, prompt: str, model: str, effort: str,
                steer: str | None = None) -> Any: ...
+
+    def draft(self, request: DraftRequest) -> DraftResult: ...
 
 
 @dataclass
