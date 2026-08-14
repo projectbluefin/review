@@ -1,6 +1,6 @@
 ---
 name: factory-operations
-version: "1.2"
+version: "1.3"
 last_updated: 2026-08-14
 id: factory-operations
 one_line_purpose: Keep bounded factory work moving until it lands or is externally blocked.
@@ -46,6 +46,16 @@ state.
   work.
 - Put important transition receipts in the repository's durable issue or pull
   request system.
+- Before merge, classify the candidate against its owning issue as a full
+  outcome or partial slice: a full outcome uses a closing keyword in the pull
+  request and, after merge, verifies that the owning issue is actually
+  closed/completed in the durable repository tracker; a partial slice uses
+  non-closing `Progresses` or an equivalent and leaves unresolved intent open;
+  an external or human blocker remains open with concrete blocker evidence.
+  After every merge, blocker, or ownership transition, reconcile the current factory or
+  ledger projection against live issue and pull-request state before selecting
+  the next READY work; durable ledger/status must never contradict the
+  repository tracker.
 - When an authorized repository owner explicitly clears a lane and current
   remote PR, branch, and assignee evidence is clean, an unpushed planning
   reference is advisory rather than ACTIVE ownership; record the clearance and
