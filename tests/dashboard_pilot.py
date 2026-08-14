@@ -134,6 +134,27 @@ async def main() -> int:
 
     import bluefin_review_tui as tui
 
+    # A malformed ReviewBody result is not preview-authorized and must be a
+    # no-op, including no temporary file and no mutation.
+    callback = {}
+    dashboard = tui.ReviewDashboard.__new__(tui.ReviewDashboard)
+    dashboard.push_screen = lambda _screen, handler: callback.update(handler=handler)
+    dashboard.notify = lambda *args, **kwargs: None
+    mutations = []
+    dashboard.mutate_all = lambda *args, **kwargs: mutations.append(args)
+    review_stop = SimpleNamespace(number=31, repository="projectblue/bluefinctl")
+    with tempfile.TemporaryDirectory(prefix="dashboard-body-red-") as body_dir:
+        original_trace = tui.TRACE_PATH
+        tui.TRACE_PATH = str(Path(body_dir) / "trace.jsonl")
+        try:
+            dashboard.leave_review(review_stop)
+            callback["handler"]("approve")
+            callback["handler"]("unpreviewed body")
+            check(not mutations and not list(Path(body_dir).rglob("*")),
+                  "a bare ReviewBody result must not create a file or mutate")
+        finally:
+            tui.TRACE_PATH = original_trace
+
     check(
         not tui.QueueFilters(repository="acme/widgets").live,
         "--repo owner/repo must remain a static snapshot filter",
@@ -1304,6 +1325,7 @@ async def main() -> int:
         tui.CodexHarness.probe = original_probe
 
     # Missing Codex must degrade generation without touching manual prose.
+    unavailable_backend = tui.ACTIVE_BACKEND
     original_unavailable_draft = tui.CodexHarness.draft
 
     def unavailable_probe(cls):
@@ -1314,6 +1336,7 @@ async def main() -> int:
 
     tui.CodexHarness.probe = classmethod(unavailable_probe)
     tui.CodexHarness.draft = unavailable_draft
+    tui.ACTIVE_BACKEND = "codex"
     try:
         app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
         async with app.run_test() as pilot:
@@ -1345,6 +1368,8 @@ async def main() -> int:
     finally:
         tui.CodexHarness.probe = original_probe
         tui.CodexHarness.draft = original_unavailable_draft
+        check(tui.ACTIVE_BACKEND == unavailable_backend,
+              "unavailable Codex pilot must restore the prior backend")
 
     # Goose is the selected backend by default, but it does not draft bodies.
     # It must degrade without invoking Codex or changing manual prose.

@@ -1,6 +1,7 @@
 """Focused contracts for the adapter-first harness seam."""
 
 import json
+import os
 import subprocess
 import sys
 import unittest
@@ -363,6 +364,26 @@ class HarnessContract(unittest.TestCase):
         with self.assertRaises(RuntimeError) as error:
             GooseHarness().draft(request)
         self.assertIn("UNSUPPORTED_CAPABILITY", str(error.exception))
+
+    def test_codex_draft_strips_github_tokens_from_subprocess_environment(self):
+        request = DraftRequest(self.binding, "approve", self._evidence(), {"title": "A PR"})
+        captured = {}
+
+        class Process:
+            stdout = "Reviewed."
+            returncode = 0
+
+        def run(*args, **kwargs):
+            captured.update(kwargs)
+            return Process()
+
+        with patch.dict(os.environ, {"GH_TOKEN": "secret", "GITHUB_TOKEN": "secret"}), \
+             patch("harness.codex.subprocess.run", side_effect=run):
+            result = CodexHarness(availability=Availability.READY).draft(request)
+        self.assertEqual(result.state, DraftState.COMPLETE)
+        self.assertNotIn("GH_TOKEN", captured["env"])
+        self.assertNotIn("GITHUB_TOKEN", captured["env"])
+        self.assertEqual(captured["env"]["PATH"], os.environ["PATH"])
 
     def _evidence(self, **overrides):
         values = {

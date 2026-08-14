@@ -2443,10 +2443,9 @@ class ReviewDashboard(App):
                 return
 
             def with_body(value) -> None:
-                if isinstance(value, tuple):
-                    body, body_file = value
-                else:
-                    body, body_file = value, None
+                if not isinstance(value, tuple) or len(value) != 2:
+                    return
+                body, body_file = value
                 if body is None:
                     return
                 if not body and verdict != "approve":
@@ -2455,17 +2454,6 @@ class ReviewDashboard(App):
                         severity="warning",
                     )
                     return
-                if body_file is None:
-                    import tempfile
-                    os.makedirs(os.path.dirname(TRACE_PATH), exist_ok=True)
-                    handle = tempfile.NamedTemporaryFile(
-                        mode="w", encoding="utf-8", prefix=f"review-{stop.number}-",
-                        suffix=".md", dir=os.path.dirname(TRACE_PATH), delete=False,
-                    )
-                    with handle:
-                        handle.write(body or "Reviewed.")
-                    body_file = handle.name
-
                 def clean_body_file() -> None:
                     try:
                         os.unlink(body_file)

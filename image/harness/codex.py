@@ -85,8 +85,12 @@ class CodexHarness:
     def draft(self, request: DraftRequest) -> DraftResult:
         if self.availability is not Availability.READY:
             raise RuntimeError(f"{self.name} unavailable: {self.availability.value}")
+        environment = dict(os.environ)
+        environment.pop("GH_TOKEN", None)
+        environment.pop("GITHUB_TOKEN", None)
         process = subprocess.run(
             self.draft_command(request), capture_output=True, text=True, check=False,
+            env=environment,
         )
         return self.convert_draft(process.stdout, request, process.returncode)
 
