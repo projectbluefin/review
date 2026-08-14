@@ -52,7 +52,7 @@ state.
   closed/completed in the durable repository tracker; a partial slice uses
   non-closing `Progresses` or an equivalent and leaves unresolved intent open;
   an external or human blocker remains open with concrete blocker evidence.
-  After every merge or blocker transition, reconcile the current factory or
+  After every merge, blocker, or ownership transition, reconcile the current factory or
   ledger projection against live issue and pull-request state before selecting
   the next READY work; durable ledger/status must never contradict the
   repository tracker.
