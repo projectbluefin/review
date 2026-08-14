@@ -75,7 +75,9 @@ grep -q 'def drain_landings' "$tui" ||
 # required checks, no branch-protection bypass, per-PR JSONL status the
 # screen polls instead of scraped prose.
 landing_py="$repo_root/image/tui/landing.py"
-grep -q 'never pass' "$landing_py" && grep -q -- '--admin' "$landing_py" ||
+grep -q 'never pass' "$landing_py" ||
+  fail "the landing brief must state what the agent may not do"
+grep -q -- '--admin' "$landing_py" ||
   fail "the landing brief must forbid branch-protection bypass"
 grep -q 'Never merge a draft' "$landing_py" ||
   fail "the landing brief must forbid merging drafts"
