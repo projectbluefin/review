@@ -1,6 +1,6 @@
 ---
 name: factory-operations
-version: "1.1"
+version: "1.2"
 last_updated: 2026-08-14
 id: factory-operations
 one_line_purpose: Keep bounded factory work moving until it lands or is externally blocked.
@@ -28,6 +28,12 @@ state.
 
 - The default state is continue. Worker completion is an event, not supervisor
   completion.
+- An initial issue list is a minimum path unless explicitly exhaustive. After
+  a core-path or milestone merge, refresh the full repository issue, pull
+  request, ownership, and dependency graph; admit the highest-priority ready
+  work that does not conflict, and park only for a concrete dependency, human
+  design decision, unavailable acceptance environment, or active overlapping
+  owner.
 - Assign one sole writer to each branch or worktree and state its explicit
   write set. Waiting, CI, review, and remote work do not consume writable
   capacity.
