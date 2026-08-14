@@ -1,7 +1,7 @@
 ---
 name: hive-runtime
-version: "2.1"
-last_updated: 2026-08-07
+version: "2.2"
+last_updated: 2026-08-14
 id: hive-runtime
 one_line_purpose: Operate inside Hive's tmux, token, and cooldown constraints.
 entry_point: docs/skills/hive-runtime.md
@@ -99,6 +99,24 @@ credential handling ([`launcher.md`](launcher.md)).
    requires. Headless exists for an unattended Kubernetes contributor; do not
    set it here expecting the same attachable session.
 
+### Hive runtime contract
+
+At Hive `0b78dc0`, the public `/api/contribute` prefix exposes read-only
+status, queue, events, activity, fleet, limits, and triage projections. Prefix
+publicity does not make mutation handlers unauthenticated; those handlers
+still enforce their own write requirements. Review may display these
+authoritative projections, but Hive owns contributor admission and ordered
+individual assignment. Review must not reorder, retry, assign, or become a
+second scheduler.
+
+`ReadyQueue` is a display projection; assignment eligibility remains
+`selectTask` policy. This pin exposes no assignment grouping, batching,
+dependency, or relatedness signal. Do not infer one from triage or display
+metadata. `max_concurrent` counts tasks held by contributor identities, not
+maintainer review analyses or factory writers. Issue-to-PR linkage is a
+best-effort GitHub search projection cached for about 90 seconds, not durable
+truth.
+
 ### GitHub identity
 
 The contributor container passes one contributor GitHub token as inherited
@@ -154,3 +172,8 @@ Cite upstream by pinned permalink, never a branch path.
 - Task release on disconnect:
   [`v2/pkg/dashboard/contribute_ws.go#L1057-L1090` @ fc3d717](https://github.com/kubestellar/hive/blob/fc3d7179255d13a613632fd1e982691d2d8bc0ae/v2/pkg/dashboard/contribute_ws.go#L1057-L1090)
 - tmux terminal and mouse configuration: Context7 `/tmux/tmux`
+- Public contribute projections and assignment policy @ `0b78dc0`:
+  [`server.go`, `api_contribute.go`, `contribute_sse.go`, and
+  `contribute_ws.go`](https://github.com/kubestellar/hive/tree/0b78dc096d51ad7af7408fb644f40d269a7e4fc5/v2/pkg/dashboard)
+- PR-link projection @ `0b78dc0`:
+  [`contribute_prlink.go`](https://github.com/kubestellar/hive/blob/0b78dc096d51ad7af7408fb644f40d269a7e4fc5/v2/pkg/dashboard/contribute_prlink.go)

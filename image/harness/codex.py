@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from typing import Callable
 
 from tui.review_evidence_manifest import ReviewRequest
-from .registry import Availability, HarnessBranding, HarnessCapabilities
+from .registry import (Availability, DraftRequest, DraftResult, DraftState,
+                       HarnessBranding, HarnessCapabilities)
 
 try:
     from tui.review_result import ReviewResult, parse_review_result
@@ -31,11 +32,63 @@ class CodexHarness:
         binary_readiness=True, auth_preflight=True, invocation=True,
         exact_binding=True, model_effort=True, steering=True,
         streaming=True, cancellation=True, result_conversion=True,
-        provenance=True,
+        provenance=True, body_drafting=True,
     )
 
     SUPPORTED_EFFORTS = ("low", "medium", "high", "max")
     process_group_cancellation = True
+
+    def validate_draft(self, request: DraftRequest) -> DraftResult:
+        return DraftResult(DraftState.COMPLETE, provenance={
+            "backend": self.name, "model": self.model, "effort": self.effort,
+            "repository": f"{request.binding.owner}/{request.binding.repository}",
+            "pull_request": request.binding.pull_request_number,
+            "base_sha": request.binding.base_sha, "head_sha": request.binding.head_sha,
+        })
+
+    def draft_command(self, request: DraftRequest) -> list[str]:
+        self.validate_draft(request)
+        evidence = json.dumps({"result": request.evidence.to_dict(), "live": dict(request.live_facts)}, sort_keys=True, separators=(",", ":"))
+        prompt = (f"Draft one concise Markdown review body for verdict {request.verdict}. "
+                  f"Use only this bounded evidence: {evidence} "
+                  "Do not perform another code review. Do not discover or invent findings. "
+                  "Do not mutate GitHub, submit a review, or change repository state. "
+                  "Return only Markdown text, at most 4096 characters.")
+        return [self.executable, "exec", "--ignore-user-config", "--disable", "apps",
+                "--config", "mcp_servers={}", "--model", self.model,
+                "--config", f"model_reasoning_effort={self.effort}",
+                "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", prompt]
+
+    def convert_draft(self, payload: str, request: DraftRequest, exit_code: int = 0) -> DraftResult:
+        self.validate_draft(request)
+        raw = tuple(self._bounded_raw(payload)) if isinstance(payload, str) else ()
+        if exit_code != 0 or not isinstance(payload, str) or not payload.strip() or len(payload) > 4096:
+            return DraftResult(DraftState.FAILED, provenance={"backend": self.name, "model": self.model, "effort": self.effort}, raw_evidence=raw)
+        return DraftResult(DraftState.COMPLETE, payload.strip(), {
+            "backend": self.name, "model": self.model, "effort": self.effort,
+            "repository": f"{request.binding.owner}/{request.binding.repository}",
+            "pull_request": request.binding.pull_request_number, "base_sha": request.binding.base_sha,
+            "head_sha": request.binding.head_sha,
+        }, raw)
+
+    @staticmethod
+    def _bounded_raw(payload: str) -> list[str]:
+        lines = []
+        chars = 0
+        for line in payload.splitlines():
+            if len(lines) == 400 or chars + len(line) > 120_000:
+                break
+            lines.append(line)
+            chars += len(line)
+        return lines
+
+    def draft(self, request: DraftRequest) -> DraftResult:
+        if self.availability is not Availability.READY:
+            raise RuntimeError(f"{self.name} unavailable: {self.availability.value}")
+        process = subprocess.run(
+            self.draft_command(request), capture_output=True, text=True, check=False,
+        )
+        return self.convert_draft(process.stdout, request, process.returncode)
 
     @classmethod
     def probe(cls, executable: str = "codex") -> Availability:

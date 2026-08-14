@@ -36,7 +36,7 @@
         "verification"
       ],
       "description": "Defines repository-neutral continuation, capacity, ownership, and evidence rules for bounded factory work.",
-      "version": "1.0",
+      "version": "1.1",
       "last_updated": "2026-08-14",
       "doc_type": "policy"
     },
@@ -75,8 +75,8 @@
         "workspace"
       ],
       "description": "Explains Hive's tmux session, workspace directory, prompt and output contract, contributor credentials, token lifetime, cooldown, and exclusive task selection. Use when operating or debugging a session.",
-      "version": "2.1",
-      "last_updated": "2026-08-07",
+      "version": "2.2",
+      "last_updated": "2026-08-14",
       "doc_type": "reference"
     },
     {
