@@ -1702,19 +1702,39 @@ class ReviewDashboard(App):
             self.source_state = "malformed"
             self.source_message = bounded_detail(f"malformed GitHub response: {error}")
             return {"items": []}
-        items = []
-        for pull in pulls:
-            author = (pull.get("user") or pull.get("author") or {}).get("login", "")
-            items.append({
-                "repository": repository,
-                "number": pull.get("number"),
-                "recommended_action": "review",
-                "title": pull.get("title", ""),
-                "author": author,
-                "mergeable_state": str(pull.get("mergeable", "") or "").lower(),
-                "check_state": "unknown",
-                "review_state": str(pull.get("reviewDecision", "") or "").lower(),
-            })
+        try:
+            items = []
+            for index, pull in enumerate(pulls, 1):
+                number = pull.get("number")
+                if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+                    raise ValueError(f"pull {index} has invalid number")
+                if not isinstance(pull.get("title"), str):
+                    raise ValueError(f"pull {index} has invalid title")
+                if "user" in pull:
+                    author_source = pull["user"]
+                else:
+                    author_source = pull.get("author")
+                if author_source is not None and not isinstance(author_source, dict):
+                    raise ValueError(f"pull {index} has invalid author")
+                author = ""
+                if author_source is not None and "login" in author_source:
+                    if not isinstance(author_source["login"], str):
+                        raise ValueError(f"pull {index} has invalid login")
+                    author = author_source["login"]
+                items.append({
+                    "repository": repository,
+                    "number": number,
+                    "recommended_action": "review",
+                    "title": pull["title"],
+                    "author": author,
+                    "mergeable_state": str(pull.get("mergeable", "") or "").lower(),
+                    "check_state": "unknown",
+                    "review_state": str(pull.get("reviewDecision", "") or "").lower(),
+                })
+        except ValueError as error:
+            self.source_state = "malformed"
+            self.source_message = bounded_detail(f"malformed GitHub response: {error}")
+            return {"items": []}
         self.source_state = "empty" if not items else "ready"
         self.source_message = ""
         return {"generated_at": datetime.now(timezone.utc).isoformat(), "items": items}

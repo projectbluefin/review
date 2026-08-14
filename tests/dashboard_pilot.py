@@ -240,6 +240,34 @@ async def main() -> int:
         check(not malformed_element_app.stops and "malformed GitHub response" in malformed_element_app.source_message,
               "real app path must report malformed elements")
 
+    async def assert_malformed_pull(pull: dict, detail: str) -> None:
+        live_file.write_text(json.dumps([[pull]]))
+        app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
+        async with app.run_test() as pilot:
+            await wait_for_state(app, pilot, "malformed")
+            status = str(app.query_one("#status-bar").render())
+            check(app.source_state == "malformed" and not app.stops,
+                  f"invalid {detail} must produce no rows through the real app")
+            check(detail in app.source_message and detail in status,
+                  f"invalid {detail} must expose one actionable malformed detail")
+
+    await assert_malformed_pull(
+        {"number": 44, "title": "hostile author", "user": "not-an-object"},
+        "author",
+    )
+    await assert_malformed_pull(
+        {"title": "missing number", "user": None},
+        "number",
+    )
+    await assert_malformed_pull(
+        {"number": True, "title": "boolean number", "user": None},
+        "number",
+    )
+    await assert_malformed_pull(
+        {"number": 45, "title": "invalid login", "user": {"login": 7}},
+        "login",
+    )
+
     os.environ.pop("LIVE_PAGES", None)
     live_file.write_text(json.dumps([[{"number": 44, "title": "page one", "user": {"login": "other"}}], [{"number": 45, "title": "page two", "user": {"login": "other"}}]]))
     os.environ["LIVE_PAGES"] = "1"
@@ -247,8 +275,8 @@ async def main() -> int:
     check(len(paged["items"]) == 2, "live pagination must flatten every returned page")
     os.environ.pop("LIVE_PAGES", None)
     live_file.write_text(json.dumps([
-        [{"number": n, "title": f"PR {n}", "user": {"login": "other"}} for n in range(101)],
-        [{"number": n, "title": f"PR {n}", "user": {"login": "other"}} for n in range(101, 202)],
+        [{"number": n, "title": f"PR {n}", "user": {"login": "other"}} for n in range(1, 102)],
+        [{"number": n, "title": f"PR {n}", "user": {"login": "other"}} for n in range(102, 203)],
     ]))
     os.environ["LIVE_PAGES"] = "1"
     large_app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
