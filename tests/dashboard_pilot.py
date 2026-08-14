@@ -123,6 +123,22 @@ async def main() -> int:
 
     import bluefin_review_tui as tui
 
+    # Semantic navigation contract: bindings, help, and the palette must be
+    # projections of one registry rather than independent key lists.
+    registry = tui.command_registry()
+    ids = {command.id for command in registry}
+    check(
+        {"navigate_down", "navigate_up", "navigate_first", "navigate_last",
+         "navigate_page_down", "navigate_page_up", "pane_next", "pane_previous",
+         "activate", "back", "quit", "steer", "review", "copy_review_context",
+         "open_command_palette", "help"} <= ids,
+        "navigation and current review commands must be semantic registry entries",
+    )
+    check(
+        tui.ReviewDashboard.BINDINGS == tui.bindings_for(tui.ReviewDashboard),
+        "dashboard bindings must be generated from the semantic registry",
+    )
+
     # ── the default view hides nothing ───────────────────────────────────
     # The regression this pins: the dashboard defaulted to the 'review'
     # action, so a 121-pull-request queue rendered as five stops and the
@@ -168,6 +184,18 @@ async def main() -> int:
             app.filters.action == "" and len(app.stops) == 2,
             "[f] must cycle back to every action",
         )
+        await pilot.press("g")
+        check(app.query_one("#queue").index == 0, "g must select the first queue item")
+        await pilot.press("j")
+        check(app.query_one("#queue").index == 1, "j must move to the next queue item")
+        await pilot.press("k")
+        check(app.query_one("#queue").index == 0, "k must move to the previous queue item")
+        await pilot.press("G")
+        check(app.query_one("#queue").index == 1, "G must select the last queue item")
+        await pilot.press("ctrl+u")
+        check(app.query_one("#queue").index == 0, "Ctrl-u must page upward")
+        await pilot.press("ctrl+d")
+        check(app.query_one("#queue").index == 1, "Ctrl-d must page downward")
 
     # ── an explicit action filter still narrows ──────────────────────────
     app = tui.ReviewDashboard(
@@ -226,8 +254,8 @@ async def main() -> int:
             )
         binding_keys = {binding.key for binding in tui.ReviewDashboard.BINDINGS}
         check(
-            "l" not in binding_keys and "p" not in binding_keys,
-            f"label and priority bindings must be absent, got {sorted(binding_keys)}",
+            "l" in binding_keys and "p" not in binding_keys,
+            f"pane navigation must be present and priority must be absent, got {sorted(binding_keys)}",
         )
         review = [b for b in tui.ReviewDashboard.BINDINGS if b.action == "review"]
         check(len(review) == 1, f"exactly one binding must run a review, got {len(review)}")

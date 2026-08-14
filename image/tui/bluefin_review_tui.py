@@ -73,6 +73,65 @@ QUEUE_LABEL = "lgtm"
 QUEUE_LABEL_COLOUR = "238636"
 QUEUE_LABEL_DESCRIPTION = "This PR has been approved by a maintainer"
 
+# The semantic registry is the source for bindings, help, and the command
+# palette. IDs are stable so clickable surfaces can consume the same contract.
+@dataclass(frozen=True)
+class CommandSpec:
+    id: str
+    key: str
+    action: str
+    label: str
+    mutating: bool = False
+    suspended_in_editor: bool = True
+
+
+COMMANDS = (
+    CommandSpec("navigate_down", "j", "navigate_down", "next item"),
+    CommandSpec("navigate_up", "k", "navigate_up", "previous item"),
+    CommandSpec("navigate_first", "g", "navigate_first", "first item"),
+    CommandSpec("navigate_last", "G", "navigate_last", "last item"),
+    CommandSpec("navigate_page_down", "ctrl+d", "navigate_page_down", "page down"),
+    CommandSpec("navigate_page_up", "ctrl+u", "navigate_page_up", "page up"),
+    CommandSpec("pane_previous", "h", "pane_previous", "previous pane"),
+    CommandSpec("pane_next", "l", "pane_next", "next pane"),
+    CommandSpec("activate", "enter", "activate", "inspect highlighted item"),
+    CommandSpec("back", "escape", "back", "back"),
+    CommandSpec("quit", "ctrl+q", "quit", "quit"),
+    CommandSpec("steer", "slash", "steer", "steer review"),
+    CommandSpec("review", "r", "review", "start a review"),
+    CommandSpec("copy_review_context", "y", "handoff", "copy review context"),
+    CommandSpec("open_command_palette", "ctrl+p", "command_palette", "command palette"),
+    CommandSpec("open_command_palette_alias", ":", "command_palette", "command palette"),
+    CommandSpec("help", "?", "help", "key help"),
+    CommandSpec("leave_review", "L", "leave_review", "leave a review"),
+    CommandSpec("batch", "b", "batch", "batch select"),
+    CommandSpec("docs", "d", "docs", "update docs"),
+    CommandSpec("ghost_build", "", "ghost_build", "ghost build", mutating=True),
+    CommandSpec("open_browser", "o", "open_browser", "open"),
+    CommandSpec("view_diff", "v", "view_diff", "diff"),
+    CommandSpec("comment", "c", "comment", "comment", mutating=True),
+    CommandSpec("approve_or_land", "a", "merge", "approve+queue / land batch", mutating=True),
+    CommandSpec("agents", "A", "agents", "batch queue"),
+    CommandSpec("merge_now", "m", "merge_now", "merge now", mutating=True),
+    CommandSpec("reject", "x", "reject", "reject", mutating=True),
+    CommandSpec("update_branch", "u", "update_branch", "update branch", mutating=True),
+    CommandSpec("select_mechanical", "U", "select_mechanical", "select mechanical"),
+    CommandSpec("resolve_duplicates", "M", "resolve_cluster", "resolve dupes", mutating=True),
+    CommandSpec("filter", "f", "filter", "filter"),
+    CommandSpec("hive", "H", "hive", "ask hive"),
+    CommandSpec("refresh", "R", "refresh", "refresh"),
+)
+
+
+def command_registry() -> tuple[CommandSpec, ...]:
+    return COMMANDS
+
+
+def bindings_for(_owner) -> list[Binding]:
+    return [Binding(command.key, command.action, command.label)
+            for command in COMMANDS if command.key]
+
+
 # The key map, split by what a key costs you. Nothing on the first line
 # changes anything on GitHub; everything on the second goes through the
 # typed-number gate.
@@ -1330,30 +1389,7 @@ class ReviewDashboard(App):
     #takeoff-box { border: heavy cyan; background: $surface; width: 80%; height: auto; padding: 1 2; margin: 4 4; }
     """
 
-    BINDINGS = [
-        Binding("r", "review", "start a review"),
-        Binding("L", "leave_review", "leave a review"),
-        Binding("b", "batch", "batch select"),
-        Binding("d", "docs", "update docs"),
-        Binding("g", "ghost_build", "ghost build"),
-        Binding("o", "open_browser", "open"),
-        Binding("v", "view_diff", "diff"),
-        Binding("c", "comment", "comment"),
-        Binding("a", "merge", "approve+queue / land batch"),
-        Binding("A", "agents", "batch queue"),
-        Binding("m", "merge_now", "merge now"),
-        Binding("x", "reject", "reject"),
-        Binding("h", "handoff", "handoff"),
-        Binding("slash", "steer", "steer review"),
-        Binding("f", "filter", "filter"),
-        Binding("H", "hive", "ask hive"),
-        Binding("R", "refresh", "refresh"),
-        Binding("f5", "refresh", "refresh", show=False),
-        Binding("u", "update_branch", "update branch"),
-        Binding("U", "select_mechanical", "select mechanical"),
-        Binding("M", "resolve_cluster", "resolve dupes", show=False),
-        Binding("q", "quit", "quit"),
-    ]
+    BINDINGS = bindings_for("dashboard")
 
     def __init__(self, filters: QueueFilters | None = None) -> None:
         super().__init__()
@@ -2070,6 +2106,49 @@ class ReviewDashboard(App):
         self.show_evidence(stop)
 
     # ── actions ───────────────────────────────────────────────────────────
+
+    def _queue(self) -> ListView:
+        return self.query_one("#queue", ListView)
+
+    def action_navigate_down(self) -> None:
+        self._queue().action_cursor_down()
+
+    def action_navigate_up(self) -> None:
+        self._queue().action_cursor_up()
+
+    def action_navigate_first(self) -> None:
+        self._queue().index = 0
+
+    def action_navigate_last(self) -> None:
+        self._queue().index = max(0, len(self._queue().children) - 1)
+
+    def action_navigate_page_down(self) -> None:
+        queue = self._queue()
+        queue.index = min(len(queue.children) - 1, queue.index + max(1, queue.size.height - 1))
+
+    def action_navigate_page_up(self) -> None:
+        queue = self._queue()
+        queue.index = max(0, queue.index - max(1, queue.size.height - 1))
+
+    def action_pane_previous(self) -> None:
+        self.focus_previous()
+
+    def action_pane_next(self) -> None:
+        self.focus_next()
+
+    def action_activate(self) -> None:
+        if self.current:
+            self.action_view_diff()
+
+    def action_back(self) -> None:
+        if self.focused is self.query_one("#steer", Input):
+            self.query_one("#queue", ListView).focus()
+        elif self.screen_stack:
+            self.pop_screen()
+
+    def action_help(self) -> None:
+        entries = "  ".join(f"{c.key or '—'} {c.label}" for c in COMMANDS)
+        self.notify(entries, timeout=8)
 
     def action_batch(self) -> None:
         stop = self.current
