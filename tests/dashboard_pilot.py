@@ -98,7 +98,10 @@ async def main() -> int:
         '  printf "%s\\n" "diff --git a/x b/x" "--- a/x" "+++ b/x" "@@ -1 +1 @@" "-old" "+new"\n'
         "  exit 0\n"
         "fi\n"
-        'if [ "$1 $2" = "pr list" ]; then echo "[]"; exit 0; fi\n'
+        'if [ "$1 $2" = "pr list" ]; then\n'
+        '  if [ -n "${LIVE_QUEUE_FILE-}" ]; then cat "$LIVE_QUEUE_FILE"; else echo "[]"; fi\n'
+        '  exit 0\n'
+        'fi\n'
         "exit 0\n",
     )
     os.environ["PATH"] = f"{workdir}:{os.environ['PATH']}"
@@ -123,6 +126,33 @@ async def main() -> int:
     review_stub(0, "a finding")
 
     import bluefin_review_tui as tui
+
+    live_file = workdir / "live.json"
+    live_file.write_text(json.dumps([
+        {"number": 42, "title": "review me", "author": {"login": "other"},
+         "state": "OPEN", "isDraft": False, "labels": [],
+         "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+         "statusCheckRollup": []},
+        {"number": 43, "title": "my own live work", "author": {"login": "castrojo"},
+         "state": "OPEN", "isDraft": False, "labels": [],
+         "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+         "statusCheckRollup": []},
+    ]))
+    os.environ["LIVE_QUEUE_FILE"] = str(live_file)
+    live_app = tui.ReviewDashboard(tui.QueueFilters(repository="acme/widgets"))
+    live_snapshot = live_app.load_live_queue("acme/widgets")
+    live_app.self_login = "castrojo"
+    live_app.all_items = live_snapshot["items"]
+    live_app.snapshot_items = [item for item in live_app.all_items if item["author"] != live_app.self_login]
+    check(live_app.source_state == "ready", "live repository source should be ready")
+    check([item["repository"] + "#" + str(item["number"]) for item in live_app.snapshot_items] == ["acme/widgets#42"],
+          "live PRs normalize into repository-qualified Stops and exclude own work")
+    check(live_snapshot["items"][0]["recommended_action"] == "review",
+          "live PRs retain the existing review action semantics")
+    live_file.write_text("[]")
+    live_snapshot = live_app.load_live_queue("acme/widgets")
+    check(live_app.source_state == "empty" and not live_snapshot["items"],
+          "refresh should reread the active live source and expose empty distinctly")
 
     # Semantic navigation contract: bindings, help, and the palette must be
     # projections of one registry rather than independent key lists.

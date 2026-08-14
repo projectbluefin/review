@@ -561,6 +561,12 @@ assert_file_contains "--env GOOSE_CONTEXT_LIMIT=264000" "$runner_log"
 assert_file_contains "queue --repo bluefin" "$runner_log"
 assert_file_not_contains "queue kimi" "$runner_log"
 
+begin "review-queue: owner/repo is forwarded as the live repository"
+reset_logs
+RECIPE_ARGS=(acme/widgets)
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
+assert_file_contains "queue --repo acme/widgets" "$runner_log"
+
 begin "review-queue: an unknown profile is one actionable error, nothing launches"
 reset_logs
 RECIPE_ARGS=(gpt-9)

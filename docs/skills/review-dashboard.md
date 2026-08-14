@@ -19,6 +19,14 @@ metadata:
 
 # Review Dashboard
 
+`just review-queue` reads the generated Bluefin queue snapshot. `just
+review-queue owner/repo` reads that repository's open pull requests through
+the shipped GitHub CLI and normalizes them into the same repository-qualified
+queue rows. The authenticated maintainer's own pull requests remain hidden.
+The dashboard distinguishes ready, empty, missing, inaccessible, malformed,
+and failed sources; `R` rereads whichever source is active. The flag form
+`--repo` remains the existing snapshot filter.
+
 ## When to Use
 
 Load this before editing `image/tui/bluefin_review_tui.py`,

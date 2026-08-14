@@ -534,6 +534,10 @@ class QueueFilters:
     repository: str = ""
     url: str = QUEUE_URL
 
+    @property
+    def live(self) -> bool:
+        return bool(self.repository and "/" in self.repository)
+
     def wants(self, item: dict) -> bool:
         if self.action and item.get("recommended_action", "") != self.action:
             return False
@@ -1427,6 +1431,8 @@ class ReviewDashboard(App):
         # a batch confirmed while another runs waits behind it — a proper
         # queue, not a pile of concurrent agents mutating the same queue.
         self.landing_queue: list[landing.LandingTask] = []
+        self.source_state = "loading"
+        self.source_message = ""
 
     # ── layout ────────────────────────────────────────────────────────────
 
@@ -1613,8 +1619,19 @@ class ReviewDashboard(App):
     def load_queue(self) -> None:
         who = gh("api", "user", "--jq", ".login")
         self.self_login = who.stdout.strip() if who.returncode == 0 else ""
-        with urllib.request.urlopen(self.filters.url, timeout=60) as response:
-            snapshot = json.load(response)
+        if self.filters.live:
+            snapshot = self.load_live_queue(self.filters.repository)
+        else:
+            try:
+                with urllib.request.urlopen(self.filters.url, timeout=60) as response:
+                    snapshot = json.load(response)
+                self.source_state = "ready"
+                self.source_message = ""
+            except Exception as error:
+                self.source_state = "error"
+                self.source_message = f"static queue unavailable: {error}"
+                self.call_from_thread(self.apply_filters)
+                return
         self.generated_at = snapshot.get("generated_at", "")
         # Keep the whole snapshot: the action filter is a view over it, so
         # narrowing and widening never needs another fetch.
@@ -1629,6 +1646,53 @@ class ReviewDashboard(App):
             if not (self.self_login and item.get("author") == self.self_login)
         ]
         self.call_from_thread(self.apply_filters)
+
+    def load_live_queue(self, repository: str) -> dict:
+        if not re.fullmatch(r"[^/\s]+/[^/\s]+", repository):
+            self.source_state = "malformed"
+            self.source_message = f"invalid repository '{repository}'; use owner/repo"
+            return {"items": []}
+        result = gh(
+            "pr", "list", "--repo", repository, "--state", "open", "--limit",
+            PULL_FETCH_LIMIT, "--json",
+            "number,title,author,state,isDraft,labels,mergeable,mergeStateStatus,"
+            "reviewDecision,statusCheckRollup",
+        )
+        if result.returncode:
+            detail = (result.stderr or result.stdout).strip()
+            lowered = detail.lower()
+            if "not found" in lowered or "could not resolve" in lowered:
+                self.source_state = "missing"
+            elif "authentication" in lowered or "login" in lowered or "permission" in lowered:
+                self.source_state = "inaccessible"
+            else:
+                self.source_state = "error"
+            self.source_message = detail or "GitHub could not read this repository"
+            return {"items": []}
+        try:
+            pulls = json.loads(result.stdout)
+            if not isinstance(pulls, list):
+                raise ValueError("GitHub returned a non-list pull-request result")
+        except (json.JSONDecodeError, ValueError) as error:
+            self.source_state = "error"
+            self.source_message = f"malformed GitHub response: {error}"
+            return {"items": []}
+        items = []
+        for pull in pulls:
+            author = (pull.get("author") or {}).get("login", "")
+            items.append({
+                "repository": repository,
+                "number": pull.get("number"),
+                "recommended_action": "review",
+                "title": pull.get("title", ""),
+                "author": author,
+                "mergeable_state": str(pull.get("mergeable", "")).lower(),
+                "check_state": effective_check_state("unknown", pull),
+                "review_state": str(pull.get("reviewDecision", "")).lower(),
+            })
+        self.source_state = "empty" if not items else "ready"
+        self.source_message = ""
+        return {"generated_at": datetime.now(timezone.utc).isoformat(), "items": items}
 
     def apply_filters(self) -> None:
         stops = [
@@ -1730,7 +1794,8 @@ class ReviewDashboard(App):
         )
         self.query_one("#status-bar", Static).update(
             f" Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
-            f"| snapshot {freshness} | as {self.self_login or 'unknown'} "
+            f"| {('source ' + self.source_state + (' — ' + self.source_message if self.source_message else ''))} "
+            f"| {('snapshot ' + freshness) if not self.filters.live else 'repository ' + self.filters.repository} | as {self.self_login or 'unknown'} "
             f"| batch: {selected}{stuck}{agents} | Hive: {self.hive_state or 'asking…'}"
         )
 

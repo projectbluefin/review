@@ -911,7 +911,8 @@ review-stop name="review-container":
 #
 #   just review-queue                      # everything the queue marks 'review'
 #   just review-queue kimi high            # pick the model profile and effort
-#   just review-queue --repo bluefin       # one repository
+#   just review-queue owner/repo            # live open PRs for one repository
+#   just review-queue --repo bluefin       # static snapshot filter (legacy form)
 #   just review-queue opus5 --all          # profile, then dashboard flags
 #
 # One instance owns the 'review-queue' name; REVIEW_QUEUE_NAME overrides it
@@ -952,9 +953,14 @@ review-queue *queue_args:
     # shellcheck disable=SC2086
     set -- {{queue_args}}
     profile="" effort=""
-    if [[ $# -gt 0 && "$1" != -* ]]; then profile="$1"; shift; fi
-    if [[ $# -gt 0 && "$1" != -* ]]; then effort="$1"; shift; fi
+    if [[ $# -gt 0 && "$1" != -* && "$1" != */* ]]; then profile="$1"; shift; fi
+    if [[ $# -gt 0 && "$1" != -* && "$1" != */* ]]; then effort="$1"; shift; fi
     resolve_model_profile "$profile" "$effort"
+    # The unambiguous repository form follows the existing profile/effort
+    # pair. Keep all flag forms byte-for-byte available to the dashboard.
+    if [[ $# -gt 0 && "$1" != -* ]]; then
+      set -- --repo "$1" "${@:2}"
+    fi
     [[ "$REVIEW_BACKEND" == codex ]] || resolve_goose_selection
 
     CONTRIBUTOR_IMAGE="{{contributor_image}}"
