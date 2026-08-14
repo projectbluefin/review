@@ -59,9 +59,18 @@ pi)
   export PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0
   ;;
 codex)
-  command -v codex >/dev/null 2>&1 || { note 'ERROR: Codex backend selected but codex is not installed.'; exit 1; }
-  codex --version >/dev/null 2>&1 || { note 'ERROR: Codex backend selected but codex is not executable.'; exit 1; }
-  [ -r /home/dev/.codex/auth.json ] || { note 'ERROR: Codex backend selected but its subscription auth.json is missing.'; exit 1; }
+  command -v codex >/dev/null 2>&1 || {
+    note 'ERROR: Codex backend selected but codex is not installed.'
+    exit 1
+  }
+  codex --version >/dev/null 2>&1 || {
+    note 'ERROR: Codex backend selected but codex is not executable.'
+    exit 1
+  }
+  [ -r /home/dev/.codex/auth.json ] || {
+    note 'ERROR: Codex backend selected but its subscription auth.json is missing.'
+    exit 1
+  }
   ;;
 *)
   note "ERROR: unsupported Hive agent backend: ${selected_backend}."
