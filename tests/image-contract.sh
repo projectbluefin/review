@@ -171,7 +171,8 @@ require image/Containerfile \
   'tar -I '\''python3 -m gzip'\'' -xOf "$workdir/tmux.tar.gz" --occurrence=1 tmux > /usr/local/bin/tmux;' \
   'tar -I '\''python3 -m gzip'\'' -xOf "$workdir/codex.tar.gz" --occurrence=1' \
   'tar -I '\''python3 -m gzip'\'' -xOf "$workdir/codex-code-mode-host.tar.gz" --occurrence=1' \
-  'tar -I '\''python3 -m gzip'\'' -xOf "$workdir/goose.tar.gz" --occurrence=1 ./goose > /usr/local/bin/goose;' \
+  'python3 -m gzip -d < "$workdir/goose.tar.gz" > "$workdir/goose.tar";' \
+  'tar -xOf "$workdir/goose.tar" --occurrence=1 ./goose > /usr/local/bin/goose;' \
   'COPY image/tmux.conf /etc/tmux.conf' \
   'infocmp -x tmux-direct | grep -q' \
   'https://raw.githubusercontent.com/projectbluefin/common/${SKILLS_COMMIT}/docs/skills/index.json' \

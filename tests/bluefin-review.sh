@@ -3,13 +3,16 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 review="$repo_root/image/bin/bluefin-review"
+export BLUEFIN_REVIEW_HARNESS_ROOT="$repo_root/image"
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 mkdir -p "$scratch/bin"
 
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
 printf '%s\n' "$*" >"${GOOSE_ARGS:?}"
+printf '%s\n' 'adapter invoked' >"${GOOSE_ADAPTER_CALLED:-/dev/null}"
 exit 23
 EOF
 chmod +x "$scratch/bin/goose"
@@ -28,6 +31,7 @@ export BLUEFIN_REVIEW_REPOSITORY_ROOT="$scratch/absent"
 # accepted anything, so the bogus contract went unnoticed.
 set +e
 banner="$(PATH="$scratch/bin:$PATH" GOOSE_ARGS="$scratch/goose-args" \
+  GOOSE_ADAPTER_CALLED="$scratch/adapter-called" \
   "$review" main...HEAD)"
 status=$?
 set -e
@@ -35,6 +39,7 @@ set -e
 [[ "$banner" == "$expected_banner" ]]
 [[ "$status" -eq 23 ]]
 [[ "$(cat "$scratch/goose-args")" == "review main...HEAD" ]]
+[[ -f "$scratch/adapter-called" ]]
 
 # --- no arguments still reviews the working tree ------------------------------
 set +e
@@ -107,6 +112,7 @@ set -e
 # review is the worst outcome this tool can produce, so it gets its own status.
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
 cat >&2 <<'OUT'
 goose review: discovered 2 check(s):
 goose review: check 'bluefin-doctrine' failed: parse check JSON: The model returned an empty response.
@@ -125,18 +131,18 @@ set -e
 
 # 65, not 0: the caller must be able to tell this apart from a clean review.
 ((incomplete_status == 65))
-[[ "$incomplete_out" == *'REVIEW INCOMPLETE'* ]]
-[[ "$incomplete_out" == *'2 part(s)'* ]]
-[[ "$incomplete_out" == *'bluefin-doctrine'* ]]
-[[ "$incomplete_out" == *'not a clean bill of health'* ]]
+[[ "$incomplete_out" == *'INCOMPLETE'* ]]
+grep -q 'bluefin-doctrine' <<<"$incomplete_out"
+grep -q 'orchestrator emitted 0 finding' <<<"$incomplete_out"
 # It must never also claim to be a finished draft.
 [[ "$incomplete_out" != *'The Review Draft above is for you to judge'* ]]
 
 # A run where every check answered stays clean, and stays exit 0.
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
 echo "goose review: check 'bluefin-doctrine' completed: 0 finding(s)" >&2
-echo "goose review: orchestrator emitted 0 finding(s) from 1 check(s)" >&2
+echo "goose review: orchestrator emitted 0 finding(s) from 1 check(s) (main: ran, 0 finding(s))" >&2
 exit 0
 EOF
 chmod +x "$scratch/bin/goose"
@@ -150,9 +156,244 @@ set -e
 [[ "$clean_out" == *'The Review Draft above is for you to judge'* ]]
 [[ "$clean_out" != *'REVIEW INCOMPLETE'* ]]
 
+# A zero-exit malformed stream is still an adapter failure, not a clean draft.
+cat >"$scratch/bin/goose" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
+printf '%s\n' 'malformed Goose output'
+exit 0
+EOF
+chmod +x "$scratch/bin/goose"
+set +e
+malformed_status="$(PATH="$scratch/bin:$PATH" HIVE_WORKSPACE_DIR="$scratch/workspace" \
+  GH_CALLS="$scratch/gh-calls-malformed" "$review" pr projectbluefin/alpha 31 2>/dev/null)"
+malformed_exit=$?
+set -e
+((malformed_exit != 0))
+[[ "$malformed_status" == *'Review did not complete'* ]]
+[[ "$malformed_status" != *'The Review Draft above is for you to judge'* ]]
+
+# TERM requests adapter cancellation before the launcher cleans up. The
+# adapter-created process group must not leave its PATH-local Goose behind.
+cat >"$scratch/bin/goose" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
+printf '%s\n' "$$" >"${GOOSE_PID_FILE:?}"
+exec sleep 1000
+EOF
+chmod +x "$scratch/bin/goose"
+PATH="$scratch/bin:$PATH" HIVE_WORKSPACE_DIR="$scratch/workspace" \
+  GOOSE_PID_FILE="$scratch/goose-pid" GH_CALLS="$scratch/gh-calls-signal" \
+  "$review" pr projectbluefin/alpha 31 >"$scratch/signal-output" 2>&1 &
+launcher_pid=$!
+for _ in {1..50}; do
+  [[ -s "$scratch/goose-pid" ]] && break
+  sleep 0.1
+done
+[[ -s "$scratch/goose-pid" ]]
+goose_pid="$(<"$scratch/goose-pid")"
+kill -TERM "$launcher_pid"
+set +e
+wait "$launcher_pid"
+signal_exit=$?
+set -e
+((signal_exit != 0))
+if ps -p "$goose_pid" -o comm= 2>/dev/null | grep -qx 'sleep'; then
+  echo "Goose process survived launcher TERM: $goose_pid" >&2
+  exit 1
+fi
+
+# The shipped local-range path must forward TERM to the adapter too. The
+# adapter owns the Goose process group and must terminate and wait for it.
+cat >"$scratch/bin/goose" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
+printf '%s %s\n' "$$" "$(ps -o pgid= -p $$ | tr -d ' ')" >"${GOOSE_PID_FILE:?}"
+exec sleep 1000
+EOF
+chmod +x "$scratch/bin/goose"
+PATH="$scratch/bin:$PATH" GOOSE_PID_FILE="$scratch/local-term-pid" \
+  "$review" main...HEAD >"$scratch/local-term-output" 2>&1 &
+local_term_launcher=$!
+for _ in {1..50}; do
+  [[ -s "$scratch/local-term-pid" ]] && break
+  sleep 0.1
+done
+[[ -s "$scratch/local-term-pid" ]]
+read -r local_term_goose local_term_pgid <"$scratch/local-term-pid"
+kill -TERM "$local_term_launcher"
+set +e
+wait "$local_term_launcher"
+local_term_exit=$?
+set -e
+((local_term_exit != 0))
+for _ in {1..20}; do
+  kill -0 -- "-$local_term_pgid" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 -- "-$local_term_pgid" 2>/dev/null; then
+  echo "local-range Goose process group survived TERM: $local_term_pgid" >&2
+  exit 1
+fi
+
+# INT exercises the same shipped local-range path and preserves its distinct
+# interrupt status while still requiring the adapter-owned group to be gone.
+PATH="$scratch/bin:$PATH" GOOSE_PID_FILE="$scratch/local-int-pid" \
+  env --default-signal=SIGINT setsid "$review" main...HEAD >"$scratch/local-int-output" 2>&1 &
+local_int_launcher=$!
+for _ in {1..50}; do
+  [[ -s "$scratch/local-int-pid" ]] && break
+  sleep 0.1
+done
+[[ -s "$scratch/local-int-pid" ]]
+read -r local_int_goose local_int_pgid <"$scratch/local-int-pid"
+kill -INT "$local_int_launcher"
+set +e
+wait "$local_int_launcher"
+local_int_exit=$?
+set -e
+((local_int_exit != 0))
+for _ in {1..20}; do
+  kill -0 -- "-$local_int_pgid" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 -- "-$local_int_pgid" 2>/dev/null; then
+  echo "local-range Goose process group survived INT: $local_int_pgid" >&2
+  exit 1
+fi
+
+# Completion-boundary signals must preserve the exact status without
+# cancelling a completed adapter or abandoning its temporary review scope.
+cat >"$scratch/bin/goose" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
+printf '%s\n' "$$" >"${GOOSE_PID_FILE:?}"
+printf '%s\n' "goose review: check 'main' completed: 0 finding(s)"
+printf '%s\n' 'goose review: orchestrator emitted 0 finding(s) from 1 check(s) (main: ran, 0 finding(s))'
+printf '%s\n' complete >"${GOOSE_COMPLETION_SENTINEL}.tmp"
+mv "${GOOSE_COMPLETION_SENTINEL}.tmp" "$GOOSE_COMPLETION_SENTINEL"
+exit 0
+EOF
+chmod +x "$scratch/bin/goose"
+cat >"$scratch/debug-boundary.env" <<'EOF'
+kill() {
+  if [[ "${1-}" == "-TERM" && -n "${KILL_LOG-}" ]]; then
+    printf '%s\n' "${*:2}" >>"$KILL_LOG"
+  fi
+  builtin kill "$@"
+}
+export -f kill
+set -T
+boundary_debug() {
+  case "${BASH_COMMAND-}" in
+    'wait "$REVIEW_CHILD_PID"')
+      [[ -n "${BOUNDARY_TRACE-}" ]] && printf '%s\n' "${BASH_COMMAND-}" >>"$BOUNDARY_TRACE"
+      ;;
+    'REVIEW_CHILD_PID=""')
+      [[ -n "${BOUNDARY_TRACE-}" ]] && printf '%s\n' "${BASH_COMMAND-}" >>"$BOUNDARY_TRACE"
+      if [[ "${BOUNDARY_PHASE-}" == adapter && -e "${GOOSE_COMPLETION_SENTINEL-}" ]]; then
+        : >"${BOUNDARY_MARKER:?}"
+        sleep 1
+      fi
+      ;;
+    *'rm -rf "$scope"'*)
+      if [[ "${BOUNDARY_PHASE-}" == scope ]]; then
+        : >"${BOUNDARY_MARKER:?}"
+        trap - DEBUG
+        sleep 1
+      fi
+      ;;
+  esac
+  return 0
+}
+trap boundary_debug DEBUG
+EOF
+
+run_boundary_signal() {
+  local signal="$1" expected="$2" label="$3"
+  local trace="$scratch/boundary-$label-trace"
+  rm -f "$scratch/boundary-marker" "$scratch/boundary-kills" "$scratch/boundary-pid" "$scratch/boundary-$label-sentinel" "$trace"
+  if [[ "$signal" == INT ]]; then
+    BASH_ENV="$scratch/debug-boundary.env" PATH="$scratch/bin:$PATH" \
+      GOOSE_PID_FILE="$scratch/boundary-pid" KILL_LOG="$scratch/boundary-kills" \
+      GOOSE_COMPLETION_SENTINEL="$scratch/boundary-$label-sentinel" BOUNDARY_MARKER="$scratch/boundary-marker" BOUNDARY_PHASE=adapter BOUNDARY_TRACE="$trace" \
+      env --default-signal=SIGINT setsid "$review" main...HEAD >"$scratch/boundary-$label-output" 2>&1 &
+  else
+    BASH_ENV="$scratch/debug-boundary.env" PATH="$scratch/bin:$PATH" \
+      GOOSE_PID_FILE="$scratch/boundary-pid" KILL_LOG="$scratch/boundary-kills" \
+      GOOSE_COMPLETION_SENTINEL="$scratch/boundary-$label-sentinel" BOUNDARY_MARKER="$scratch/boundary-marker" BOUNDARY_PHASE=adapter BOUNDARY_TRACE="$trace" "$review" main...HEAD \
+      >"$scratch/boundary-$label-output" 2>&1 &
+  fi
+  local launcher=$!
+  for _ in {1..50}; do
+    [[ -e "$scratch/boundary-marker" ]] && break
+    sleep 0.1
+  done
+  [[ -e "$scratch/boundary-marker" ]]
+  if [[ "$signal" == INT ]]; then
+    builtin kill -"$signal" -- "-$launcher"
+  else
+    builtin kill -"$signal" "$launcher"
+  fi
+  set +e
+  wait "$launcher"
+  local actual=$?
+  set -e
+  [[ "$actual" -eq "$expected" ]]
+  [[ "$(tail -n 2 "$trace" | head -n 1)" == "wait \"\$REVIEW_CHILD_PID\"" ]]
+  [[ "$(tail -n 1 "$trace")" == 'REVIEW_CHILD_PID=""' ]]
+  [[ ! -s "$scratch/boundary-kills" ]]
+}
+
+run_boundary_signal TERM 143 adapter-complete
+run_boundary_signal INT 130 adapter-complete-int
+
+for signal in TERM INT; do
+  expected=143
+  [[ "$signal" == INT ]] && expected=130
+  rm -rf "$scratch/overlay" "$scratch/boundary-marker" "$scratch/boundary-kills" "$scratch/boundary-pid"
+  mkdir -p "$scratch/tmp"
+  mkdir -p "$scratch/overlay/.agents/checks"
+  printf 'SCOPED REVIEW PROMPT\n' >"$scratch/overlay/.agents/REVIEW.md"
+  printf '%s\n' '---' 'name: bluefin-doctrine' '---' >"$scratch/overlay/.agents/checks/bluefin-doctrine.md"
+  if [[ "$signal" == INT ]]; then
+    BASH_ENV="$scratch/debug-boundary.env" BLUEFIN_REVIEW_SCOPE_ROOT="$scratch/overlay" \
+      TMPDIR="$scratch/tmp" PATH="$scratch/bin:$PATH" GOOSE_PID_FILE="$scratch/boundary-pid" \
+      GOOSE_COMPLETION_SENTINEL="$scratch/scope-$signal-sentinel" KILL_LOG="$scratch/boundary-kills" BOUNDARY_MARKER="$scratch/boundary-marker" BOUNDARY_PHASE=scope BOUNDARY_TRACE="$scratch/scope-$signal-trace" \
+      env --default-signal=SIGINT setsid "$review" main...HEAD >"$scratch/scope-$signal-output" 2>&1 &
+  else
+    BASH_ENV="$scratch/debug-boundary.env" BLUEFIN_REVIEW_SCOPE_ROOT="$scratch/overlay" \
+      TMPDIR="$scratch/tmp" PATH="$scratch/bin:$PATH" GOOSE_PID_FILE="$scratch/boundary-pid" \
+      GOOSE_COMPLETION_SENTINEL="$scratch/scope-$signal-sentinel" KILL_LOG="$scratch/boundary-kills" BOUNDARY_MARKER="$scratch/boundary-marker" BOUNDARY_PHASE=scope BOUNDARY_TRACE="$scratch/scope-$signal-trace" \
+      "$review" main...HEAD >"$scratch/scope-$signal-output" 2>&1 &
+  fi
+  launcher=$!
+  for _ in {1..50}; do
+    [[ -e "$scratch/boundary-marker" ]] && break
+    sleep 0.1
+  done
+  [[ -e "$scratch/boundary-marker" ]]
+  if [[ "$signal" == INT ]]; then
+    builtin kill -"$signal" -- "-$launcher"
+  else
+    builtin kill -"$signal" "$launcher"
+  fi
+  set +e
+  wait "$launcher"
+  actual=$?
+  set -e
+  [[ "$actual" -eq "$expected" ]]
+  [[ ! -s "$scratch/boundary-kills" ]]
+  if compgen -G "$scratch/tmp/bluefin-review-scope.*" >/dev/null; then
+    echo "scope survived completion-boundary $signal" >&2
+    exit 1
+  fi
+done
+
 # restore the exit-code stub for the assertions that follow
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
 printf '%s\n' "$*" >"${GOOSE_ARGS:?}"
 exit 23
 EOF
@@ -175,7 +416,10 @@ EOF
 
 cat >"$scratch/bin/goose-capture" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
 printf '%s\0' "$@" >"${GOOSE_ARGV:?}"
+printf '%s\n' "goose review: check 'main' completed: 0 finding(s)"
+printf '%s\n' 'goose review: orchestrator emitted 0 finding(s) from 1 check(s) (main: ran, 0 finding(s))'
 EOF
 chmod +x "$scratch/bin/goose-capture"
 cp "$scratch/bin/goose-capture" "$scratch/bin/goose"
@@ -355,6 +599,7 @@ cp "$repo_root/image/review-scope/checks/bluefin-doctrine.md" \
 
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
 printf '%s\0' "$@" >"${GOOSE_ARGV:?}"
 scope=""
 while (($#)); do
@@ -377,6 +622,8 @@ if [[ -n "$scope" ]]; then
   done < <(find "$scope/.agents/checks" -type f -name '*.md' -printf '%P\n')
   cat "$scope/.agents/checks/cluster-resolution.md" >"${SCOPE_CLUSTER:?}" 2>/dev/null || : >"${SCOPE_CLUSTER:?}"
 fi
+printf '%s\n' "goose review: check 'main' completed: 0 finding(s)"
+printf '%s\n' 'goose review: orchestrator emitted 0 finding(s) from 1 check(s) (main: ran, 0 finding(s))'
 EOF
 chmod +x "$scratch/bin/goose"
 
@@ -419,6 +666,7 @@ grep -q 'name: cluster-resolution' "$scratch/scope-cluster2"
 # additional check in the scratch scope, never as a replacement for doctrine.
 cat >"$scratch/bin/goose" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$*" == "info --check" ]]; then printf '%s\n' 'provider ready'; exit 0; fi
 scope=""
 while (($#)); do
   case "$1" in
@@ -430,6 +678,8 @@ if [[ -n "$scope" ]]; then
   find "$scope" -type f | sed "s|^$scope/||" | sort >"${SCOPE_LISTING:?}"
   cat "$scope/.agents/checks/maintainer-steering.md" >"${SCOPE_STEER:?}" 2>/dev/null || : >"${SCOPE_STEER:?}"
 fi
+printf '%s\n' "goose review: check 'main' completed: 0 finding(s)"
+printf '%s\n' 'goose review: orchestrator emitted 0 finding(s) from 1 check(s) (main: ran, 0 finding(s))'
 EOF
 chmod +x "$scratch/bin/goose"
 

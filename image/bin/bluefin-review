@@ -13,14 +13,15 @@
 # change through exactly one code path.
 set -euo pipefail
 
-# 'goose review' exits 0 even when a check never returned a verdict: the model
-# answers with prose or an empty response, the orchestrator prints
-# "check '<name>' failed: parse check JSON: ..." and then reports the run's
-# finding count as though that check had simply found nothing. Reading
-# "0 finding(s)" off such a run and calling it clean is the worst outcome this
-# tool can produce, so an incomplete review gets its own exit status.
 REVIEW_INCOMPLETE=65
-CHECK_FAILURE_PATTERN='^goose review: .+ failed: '
+REVIEW_CHILD_PID=""
+
+request_review_cancel() {
+  local child="$REVIEW_CHILD_PID"
+  if [[ -n "$child" ]] && jobs -pr 2>/dev/null | grep -Fxq "$child"; then
+    kill -TERM "$child" 2>/dev/null || true
+  fi
+}
 
 WORKSPACE="${HIVE_WORKSPACE_DIR:-${HOME}/workspace}"
 
@@ -58,6 +59,33 @@ SCOPE_ROOT="${BLUEFIN_REVIEW_SCOPE_ROOT:-/opt/bluefin/review-scope}"
 # a pull request falls outside the page, so the limit can never be mistaken for
 # a clean result.
 PULL_FETCH_LIMIT="${BLUEFIN_REVIEW_PULL_LIMIT:-200}"
+
+run_registered_review() {
+  local range="$1" scope="$2" prompt="$3" owner="$4" repository="$5" number="$6" base_sha="$7" head_sha="$8"
+  local root="${BLUEFIN_REVIEW_HARNESS_ROOT:-/opt/bluefin}"
+  PYTHONPATH="${root}:${root}/tui${PYTHONPATH:+:${PYTHONPATH}}" \
+    exec python3 - "$range" "$scope" "$prompt" "$owner" "$repository" "$number" "$base_sha" "$head_sha" <<'PY'
+import sys
+from harness.goose import GooseHarness
+from harness.registry import HarnessRegistry
+from tui.review_evidence_manifest import ReviewRequest
+
+range_name, scope, prompt, owner, repository, number, base_sha, head_sha = sys.argv[1:]
+binding = ReviewRequest(owner, repository, int(number), base_sha, head_sha,
+                        "maintainer", "review", generated_at="bluefin-review")
+adapter = GooseHarness(availability=GooseHarness.probe())
+registry = HarnessRegistry()
+registry.register(adapter)
+selected = registry.require_ready("goose")
+result = selected.stream(
+    binding, prompt=prompt, steer=None,
+    extra_args=tuple(["--check-scope", scope] if scope else [])
+    + ((range_name,) if range_name else ()),
+    on_line=lambda line: print(line, flush=True),
+)
+raise SystemExit(selected.terminal_status(result))
+PY
+}
 
 repository_context_instructions() {
   local root="${BLUEFIN_REVIEW_REPOSITORY_ROOT:-$PWD}"
@@ -170,35 +198,30 @@ say so plainly rather than guessing. This still produces a Review Draft only:
 a human makes every approval and merge decision."
 }
 
-# Run Goose and hold its output to account. 'goose review' reports a per-check
-# failure on its own progress stream and then exits 0 regardless, so the run is
-# scanned for checks that produced no verdict before its status is believed.
+# Run the selected adapter and let its typed result own the terminal status.
 run_reviewed() {
-  local log status=0 incomplete=0
-  log="$(mktemp "${TMPDIR:-/tmp}/bluefin-review-log.XXXXXX")"
-  # Merged, because the verdict and the progress reporting have to be read
-  # together — and tee'd, because the reviewer still watches it stream.
-  "$@" 2>&1 | tee "$log" || status=$?
-  incomplete="$(grep -cE "$CHECK_FAILURE_PATTERN" "$log" 2>/dev/null)" || incomplete=0
-  if ((incomplete > 0)); then
-    report_incomplete_review "$log" "$incomplete"
-    if ((status == 0)); then status="$REVIEW_INCOMPLETE"; fi
-  fi
-  rm -f "$log"
+  local status=0
+  local signal_status=0
+  local prior_term prior_int
+  prior_term="$(trap -p TERM)"
+  prior_int="$(trap -p INT)"
+  forward_review_signal() {
+    request_review_cancel
+    signal_status="$1"
+  }
+  trap 'forward_review_signal 143' TERM
+  trap 'forward_review_signal 130' INT
+  # Keep the selected adapter in the foreground process tree while allowing
+  # the shell to forward TERM/INT and remain signal-responsive. The adapter
+  # already streams each line to this process's stdout.
+  "$@" &
+  REVIEW_CHILD_PID=$!
+  wait "$REVIEW_CHILD_PID" || status=$?
+  REVIEW_CHILD_PID=""
+  if [[ -n "$prior_term" ]]; then eval "$prior_term"; else trap - TERM; fi
+  if [[ -n "$prior_int" ]]; then eval "$prior_int"; else trap - INT; fi
+  if ((signal_status != 0)); then status="$signal_status"; fi
   return "$status"
-}
-
-# Name the parts of the review that never answered. A reviewer who is told
-# "0 findings" by a run where two checks died has been handed a false clean.
-report_incomplete_review() {
-  local log="$1" failures="$2"
-  printf '\n'
-  rule
-  printf ' REVIEW INCOMPLETE — %s part(s) of this review returned no verdict:\n' "$failures"
-  grep -E "$CHECK_FAILURE_PATTERN" "$log" | sed -E 's/^goose review: /   - /' | cut -c1-160
-  printf '\n This run'"'"'s finding count is not a clean bill of health: a check\n'
-  printf ' that failed to answer cannot have found nothing. Re-run the review.\n'
-  rule
 }
 
 # Every review goes through here so both entry points carry the same context.
@@ -208,8 +231,26 @@ report_incomplete_review() {
 # when a duplicate cluster exists. Without the overlay, the --instructions
 # pointer carries the same doctrine.
 goose_review() {
-  local -a argv=(goose review)
   local scope=""
+  local prior_term prior_int prior_exit
+  prior_term="$(trap -p TERM)"
+  prior_int="$(trap -p INT)"
+  prior_exit="$(trap -p EXIT)"
+  cleanup_review_scope() {
+    if [[ -n "${scope:-}" ]]; then
+      rm -rf "$scope"
+      scope=""
+    fi
+  }
+  finish_scope_signal() {
+    local signal_status="$1"
+    request_review_cancel
+    cleanup_review_scope
+    if [[ -n "$prior_term" ]]; then eval "$prior_term"; else trap - TERM; fi
+    if [[ -n "$prior_int" ]]; then eval "$prior_int"; else trap - INT; fi
+    if [[ -n "$prior_exit" ]]; then eval "$prior_exit"; else trap - EXIT; fi
+    exit "$signal_status"
+  }
   if [[ -d "${SCOPE_ROOT}/.agents" ]]; then
     scope="$(mktemp -d "${TMPDIR:-/tmp}/bluefin-review-scope.XXXXXX")"
     mkdir -p "${scope}/.agents/checks"
@@ -233,16 +274,30 @@ goose_review() {
         printf '\n'
       } >"${scope}/.agents/checks/maintainer-steering.md"
     fi
-    argv+=(--check-scope "$scope")
-  else
-    local instructions
-    instructions="$(review_instructions)"
-    if [[ -n "$instructions" ]]; then argv+=(--instructions "$instructions"); fi
   fi
+  trap 'finish_scope_signal 143' TERM
+  trap 'finish_scope_signal 130' INT
+  trap cleanup_review_scope EXIT
 
+  local prompt=""
+  [[ -n "$scope" ]] || prompt="$(review_instructions)"
+  local owner="${BLUEFIN_REVIEW_OWNER:-local}"
+  local repository="${BLUEFIN_REVIEW_REPOSITORY:-review}"
+  local number="${BLUEFIN_REVIEW_PULL_REQUEST:-1}"
+  local head_sha base_sha
+  head_sha="$(git rev-parse HEAD 2>/dev/null || true)"
+  base_sha="$head_sha"
+  if [[ ! "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    head_sha=0000000000000000000000000000000000000000
+    base_sha="$head_sha"
+  fi
   local status=0
-  run_reviewed "${argv[@]}" "$@" || status=$?
-  if [[ -n "$scope" ]]; then rm -rf "$scope"; fi
+  run_reviewed run_registered_review "${1:-}" "$scope" "$prompt" \
+    "$owner" "$repository" "$number" "$base_sha" "$head_sha" || status=$?
+  cleanup_review_scope
+  if [[ -n "$prior_term" ]]; then eval "$prior_term"; else trap - TERM; fi
+  if [[ -n "$prior_int" ]]; then eval "$prior_int"; else trap - INT; fi
+  if [[ -n "$prior_exit" ]]; then eval "$prior_exit"; else trap - EXIT; fi
   return "$status"
 }
 
@@ -398,7 +453,7 @@ run_goose_review() {
     }
   fi
 
-  (
+  {
     cd "$dir" || exit 1
     git fetch --quiet origin || true
     gh pr checkout "$number" --repo "$repo" || {
@@ -442,8 +497,10 @@ run_goose_review() {
     fi
 
     banner
-    BLUEFIN_REVIEW_RELATED="$local_related" goose_review "origin/${base}...HEAD"
-  )
+    BLUEFIN_REVIEW_OWNER="${repo%%/*}" BLUEFIN_REVIEW_REPOSITORY="${repo##*/}" \
+      BLUEFIN_REVIEW_PULL_REQUEST="$number" BLUEFIN_REVIEW_RELATED="$local_related" \
+      goose_review "origin/${base}...HEAD"
+  }
 }
 
 # --- entry -------------------------------------------------------------------
@@ -459,12 +516,9 @@ pr_mode() {
   command -v jq >/dev/null || die "jq is required to review a pull request"
 
   CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bluefin-review.XXXXXX")"
-  # A stopped review must actually stop. The EXIT trap cleans up; the signal
-  # traps also leave, because a handler that only cleans up returns control to
-  # the script and the run continues after the maintainer asked for it to end.
+  # A stopped review must actually stop. The EXIT trap cleans up the snapshot;
+  # run_reviewed forwards lifecycle signals to the adapter for both entrypoints.
   trap 'rm -rf "$CACHE_DIR"' EXIT
-  trap 'rm -rf "$CACHE_DIR"; trap - EXIT; exit 143' TERM
-  trap 'rm -rf "$CACHE_DIR"; trap - EXIT; exit 130' INT
 
   local status=0
   run_goose_review "$repo" "$number" || status=$?

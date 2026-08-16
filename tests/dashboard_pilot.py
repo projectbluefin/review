@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -86,24 +87,52 @@ async def main() -> int:
     # gh is read-only here: the pilot never lets a mutation reach a real
     # network, and any attempt to run one is recorded for the assertions.
     gh_log = workdir / "gh.log"
+    curl_log = workdir / "curl.log"
+    diff_events = workdir / "diff-events.log"
+    old_request_started = workdir / f"old-request-start-{workdir.name}"
     perm_file = workdir / "permissions.push"
     perm_file.write_text("true\n")
     gh_stub = write_stub(
         workdir / "gh",
         f'printf "%s\\n" "$*" >>"{gh_log}"\n'
-        'if [ "$1 $2" = "api user" ]; then echo castrojo; exit 0; fi\n'
+        'if [ "$1 $2" = "api user" ]; then\n'
+        '  if [ -n "${GH_USER_FAIL-}" ]; then echo "authentication required" >&2; exit 1; fi\n'
+        '  echo castrojo; exit 0;\n'
+        'fi\n'
         f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
         'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
         'if [ "$1 $2" = "pr diff" ]; then\n'
+        f'  request_id="${{DIFF_REQUEST_ID-unknown}}"; mode="${{DIFF_MODE-}}"\n'
+        f'  if [ "$mode" = "slow-old" ]; then printf "request:%s:%s\\n" "$request_id" "$mode" >>"{diff_events}"; (sleep 0.2) & delay_pid=$!; : >"{old_request_started}"; wait "$delay_pid"; printf "response:%s:OLD-DIFF\\n" "$request_id" >>"{diff_events}"; printf "%s" "OLD-DIFF"; exit 0; fi\n'
+        f'  if [ "$mode" = "fast-new" ]; then printf "request:%s:%s\\n" "$request_id" "$mode" >>"{diff_events}"; printf "response:%s:NEW-DIFF\\n" "$request_id" >>"{diff_events}"; printf "%s" "NEW-DIFF"; exit 0; fi\n'
+        '  if [ "${DIFF_MODE-}" = "oversized" ]; then head -c 400010 /dev/zero | tr "\\0" x; exit 0; fi\n'
+        '  if [ "${DIFF_MODE-}" = "empty" ]; then exit 0; fi\n'
+        '  if [ "${DIFF_MODE-}" = "error" ]; then printf "%s\\n" "terminal diff failure" >&2; exit 7; fi\n'
         '  printf "%s\\n" "diff --git a/x b/x" "--- a/x" "+++ b/x" "@@ -1 +1 @@" "-old" "+new"\n'
         "  exit 0\n"
         "fi\n"
-        'if [ "$1 $2" = "pr list" ]; then echo "[]"; exit 0; fi\n'
+        'if [ "$1" = "api" ] && [ "$2" = "--paginate" ]; then\n'
+        '  if [ -n "${LIVE_GH_ERROR-}" ]; then printf "%s\\n" "$LIVE_GH_ERROR" >&2; exit 1; fi\n'
+        '  if [ -n "${LIVE_PAGES-}" ]; then cat "$LIVE_QUEUE_FILE"; else printf "[%s]" "$(cat "$LIVE_QUEUE_FILE")"; fi; exit 0\n'
+        'fi\n'
+        'if [ "$1 $2" = "pr list" ]; then\n'
+        '  echo "[]"\n'
+        '  exit 0\n'
+        'fi\n'
         "exit 0\n",
     )
     os.environ["PATH"] = f"{workdir}:{os.environ['PATH']}"
     os.environ["XDG_STATE_HOME"] = str(workdir / "state")
     os.environ["BLUEFIN_REVIEW_QUEUE_URL"] = queue_file.as_uri()
+    os.environ["HIVE_HUB"] = "wss://hive.example.test/contribute"
+    os.environ["GH_TOKEN"] = "dashboard-pilot-token"
+    write_stub(
+        workdir / "curl",
+        f'printf "%s\\n" "$*" >>"{curl_log}"\n'
+        'if [ -n "${CURL_FAIL-}" ]; then '
+        'printf "Hive queue failed %s\\n" "$(printf "e%.0s" {1..300})" >&2; exit 1; fi\n'
+        'printf "%s\\n" \'{"status":"queued"}\'\n',
+    )
 
     review_log = workdir / "review.log"
     steer_log = workdir / "steer.log"
@@ -123,6 +152,259 @@ async def main() -> int:
     review_stub(0, "a finding")
 
     import bluefin_review_tui as tui
+
+    # Queueing belongs to Hive: its authenticated endpoint records the human
+    # actor, enforces merger standing and self-merge protection, then creates
+    # the exact-head approval as the Hive App. A human-authored `gh pr review`
+    # can never satisfy that governor contract (#247).
+    original_hive_hub = os.environ.get("HIVE_HUB")
+    os.environ["HIVE_HUB"] = "wss://hive.example.test/contribute"
+    try:
+        dashboard = tui.ReviewDashboard.__new__(tui.ReviewDashboard)
+        dashboard.self_login = "castrojo"
+        captured_queue = []
+        dashboard.mutate_all = lambda *args, **kwargs: captured_queue.append(args)
+        queue_stop = SimpleNamespace(
+            number=31,
+            repository="projectbluefin/bluefinctl",
+            live={"isDraft": False},
+        )
+        dashboard._queue_automerge(queue_stop)
+        queue_commands = captured_queue[0][1] if captured_queue else []
+        check(
+            len(queue_commands) == 1
+            and queue_commands[0][:2] == ["sh", "-c"]
+            and queue_commands[0][-1]
+            == "https://hive.example.test/api/prs/projectbluefin/bluefinctl/31/queue-automerge",
+            f"queueing must call Hive's App-authored queue endpoint once, got {queue_commands}",
+        )
+        check(
+            not any(command[:3] == ["gh", "pr", "review"] for command in queue_commands),
+            f"queueing must not create a human-authored approval, got {queue_commands}",
+        )
+        check(
+            "dashboard-pilot-token" not in shlex.join(queue_commands[0]),
+            "the confirmation and trace command must not contain the GitHub token",
+        )
+    finally:
+        if original_hive_hub is None:
+            os.environ.pop("HIVE_HUB", None)
+        else:
+            os.environ["HIVE_HUB"] = original_hive_hub
+
+    # A malformed ReviewBody result is not preview-authorized and must be a
+    # no-op, including no temporary file and no mutation.
+    callback = {}
+    dashboard = tui.ReviewDashboard.__new__(tui.ReviewDashboard)
+    dashboard.push_screen = lambda _screen, handler: callback.update(handler=handler)
+    dashboard.notify = lambda *args, **kwargs: None
+    mutations = []
+    dashboard.mutate_all = lambda *args, **kwargs: mutations.append(args)
+    review_stop = SimpleNamespace(number=31, repository="projectblue/bluefinctl")
+    with tempfile.TemporaryDirectory(prefix="dashboard-body-red-") as body_dir:
+        original_trace = tui.TRACE_PATH
+        tui.TRACE_PATH = str(Path(body_dir) / "trace.jsonl")
+        try:
+            dashboard.leave_review(review_stop)
+            callback["handler"]("approve")
+            callback["handler"]("unpreviewed body")
+            callback["handler"]((123, "not-a-body-file"))
+            check(not mutations and not list(Path(body_dir).rglob("*")),
+                  "malformed ReviewBody results must not create a file or mutate")
+        finally:
+            tui.TRACE_PATH = original_trace
+
+    # A syntactically valid foreign body tuple must not reach mutation or
+    # delete the file it names.
+    async with tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri())).run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if pilot.app.stops:
+                break
+            await pilot.pause(0.05)
+        app = pilot.app
+        captured = {}
+        original_push_screen = app.push_screen
+        app.push_screen = lambda screen, handler=None, *args, **kwargs: (
+            captured.update(handler=handler),
+            original_push_screen(screen, handler, *args, **kwargs),
+        )[1]
+        mutations = []
+        app.mutate_all = lambda *args, **kwargs: mutations.append(args)
+        app.leave_review(app.stops[0])
+        await pilot.pause()
+        await pilot.press("1")
+        await pilot.pause()
+        with tempfile.TemporaryDirectory(prefix="dashboard-foreign-body-") as foreign_dir:
+            foreign_path = Path(foreign_dir) / "foreign.md"
+            foreign_bytes = b"foreign body sentinel\n"
+            foreign_path.write_bytes(foreign_bytes)
+            captured["handler"](("foreign body", str(foreign_path)))
+            check(not mutations, "foreign ReviewBody results must not reach mutation")
+            check(foreign_path.read_bytes() == foreign_bytes,
+                  "foreign ReviewBody results must not delete or change their file")
+
+    check(
+        not tui.QueueFilters(repository="acme/widgets").live,
+        "--repo owner/repo must remain a static snapshot filter",
+    )
+    check(
+        tui.QueueFilters(live_repository="acme/widgets").live,
+        "the distinct live repository filter must select the live source",
+    )
+    check(
+        tui.PULL_FETCH_LIMIT == os.environ.get("BLUEFIN_REVIEW_PULL_LIMIT", "200"),
+        "snapshot pull fetch limit must remain configurable",
+    )
+
+    live_file = workdir / "live.json"
+    live_file.write_text(json.dumps([
+        {"number": 42, "title": "review me", "author": {"login": "other"},
+         "state": "OPEN", "isDraft": False, "labels": [],
+         "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+         "statusCheckRollup": []},
+        {"number": 43, "title": "my own live work", "author": {"login": "castrojo"},
+         "state": "OPEN", "isDraft": False, "labels": [],
+         "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+         "statusCheckRollup": []},
+    ]))
+    os.environ["LIVE_QUEUE_FILE"] = str(live_file)
+    live_app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
+
+    async def wait_for_live_rows(app, pilot, state: str, count: int) -> None:
+        for _ in range(100):
+            if app.source_state == state and len(app.stops) == count:
+                return
+            await pilot.pause(0.05)
+
+    async with live_app.run_test() as pilot:
+        await wait_for_live_rows(live_app, pilot, "ready", 1)
+        check(live_app.source_state == "ready", "live repository source should be ready")
+        check([stop.key for stop in live_app.stops] == ["acme/widgets#42"],
+              "the real app path excludes the authenticated maintainer's own work")
+        check(live_app.stops[0].action == "review",
+              "live PRs retain the existing review action semantics")
+        live_file.write_text("[]")
+        await pilot.press("R")
+        for _ in range(100):
+            if live_app.source_state == "empty":
+                break
+            await pilot.pause(0.05)
+        check(live_app.source_state == "empty" and not live_app.stops,
+              "refresh should reread the active live source and expose empty distinctly")
+
+    # RED regressions for the independent review: identity failure must hold
+    # the live queue, pagination must flatten every page, and malformed
+    # elements must become a source error rather than raising.
+    os.environ["GH_USER_FAIL"] = "1"
+    auth_app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
+    async with auth_app.run_test() as pilot:
+        for _ in range(100):
+            if auth_app.source_state == "auth-failed":
+                break
+            await pilot.pause(0.05)
+        check(auth_app.source_state == "auth-failed" and not auth_app.stops,
+              "live queue must hold rows when viewer identity is unavailable")
+    os.environ.pop("GH_USER_FAIL", None)
+    async def wait_for_state(app, pilot, state: str) -> None:
+        for _ in range(100):
+            if app.source_state == state:
+                return
+            await pilot.pause(0.05)
+
+    async def assert_live_state(error: str, state: str, detail: str) -> None:
+        os.environ["LIVE_GH_ERROR"] = error
+        app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
+        async with app.run_test() as pilot:
+            await wait_for_state(app, pilot, state)
+            status = str(app.query_one("#status-bar").render())
+            check(app.source_state == state and not app.stops,
+                  f"real app path must hold rows for {state} source state")
+            check(detail in app.source_message and detail in status,
+                  f"real app path must expose actionable {state} detail")
+            check("\\n" not in app.source_message and "\\x1b" not in app.source_message
+                  and len(app.source_message) <= 240,
+                  f"{state} detail must be bounded and sanitized")
+        os.environ.pop("LIVE_GH_ERROR", None)
+
+    await assert_live_state("HTTP 403: Resource not accessible", "inaccessible", "Resource not accessible")
+    await assert_live_state("HTTP 404: Not Found", "missing", "Not Found")
+    await assert_live_state("network timeout", "error", "network timeout")
+    await assert_live_state("authentication required", "inaccessible", "authentication required")
+
+    malformed_repo = tui.ReviewDashboard(tui.QueueFilters(live_repository="not-a-repo"))
+    async with malformed_repo.run_test() as pilot:
+        await wait_for_state(malformed_repo, pilot, "malformed")
+        status = str(malformed_repo.query_one("#status-bar").render())
+        check(not malformed_repo.stops and "use owner/repo" in status,
+              "real app path must report malformed repositories")
+
+    os.environ["LIVE_PAGES"] = "1"
+    live_file.write_text("{}")
+    malformed_page_app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
+    async with malformed_page_app.run_test() as pilot:
+        await wait_for_state(malformed_page_app, pilot, "malformed")
+        check(not malformed_page_app.stops and "malformed GitHub response" in malformed_page_app.source_message,
+              "real app path must report malformed JSON/pages")
+
+    live_file.write_text(json.dumps([[{"number": 44}], ["not an object"]]))
+    malformed_element_app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
+    async with malformed_element_app.run_test() as pilot:
+        await wait_for_state(malformed_element_app, pilot, "malformed")
+        check(not malformed_element_app.stops and "malformed GitHub response" in malformed_element_app.source_message,
+              "real app path must report malformed elements")
+
+    async def assert_malformed_pull(pull: dict, detail: str) -> None:
+        live_file.write_text(json.dumps([[pull]]))
+        app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
+        async with app.run_test() as pilot:
+            await wait_for_state(app, pilot, "malformed")
+            status = str(app.query_one("#status-bar").render())
+            check(app.source_state == "malformed" and not app.stops,
+                  f"invalid {detail} must produce no rows through the real app")
+            check(detail in app.source_message and detail in status,
+                  f"invalid {detail} must expose one actionable malformed detail")
+
+    await assert_malformed_pull(
+        {"number": 44, "title": "hostile author", "user": "not-an-object"},
+        "author",
+    )
+    await assert_malformed_pull(
+        {"title": "missing number", "user": None},
+        "number",
+    )
+    await assert_malformed_pull(
+        {"number": True, "title": "boolean number", "user": None},
+        "number",
+    )
+    await assert_malformed_pull(
+        {"number": 45, "title": "invalid login", "user": {"login": 7}},
+        "login",
+    )
+
+    os.environ.pop("LIVE_PAGES", None)
+    live_file.write_text(json.dumps([[{"number": 44, "title": "page one", "user": {"login": "other"}}], [{"number": 45, "title": "page two", "user": {"login": "other"}}]]))
+    os.environ["LIVE_PAGES"] = "1"
+    paged = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets")).load_live_queue("acme/widgets")
+    check(len(paged["items"]) == 2, "live pagination must flatten every returned page")
+    os.environ.pop("LIVE_PAGES", None)
+    live_file.write_text(json.dumps([
+        [{"number": n, "title": f"PR {n}", "user": {"login": "other"}} for n in range(1, 102)],
+        [{"number": n, "title": f"PR {n}", "user": {"login": "other"}} for n in range(102, 203)],
+    ]))
+    os.environ["LIVE_PAGES"] = "1"
+    large_app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
+    check(
+        large_app.cluster(tui.Stop("acme/widgets", 1, "review", "PR 1", "other"))
+        == ([], []),
+        "paginated live fixtures must remain valid for async overlap evidence",
+    )
+    async with large_app.run_test() as pilot:
+        await wait_for_live_rows(large_app, pilot, "ready", 202)
+        check(len(large_app.stops) == 202,
+              "live queue must flatten multiple pages beyond 200 pull requests")
+    os.environ.pop("LIVE_PAGES", None)
+    live_file.write_text(json.dumps([]))
 
     # Semantic navigation contract: bindings, help, and the palette must be
     # projections of one registry rather than independent key lists.
@@ -358,10 +640,10 @@ async def main() -> int:
         await pilot.pause()
         check(app.screen is root_screen, "typed PR-number confirmation must remain functional")
 
-        app.push_screen(tui.ReviewBody("comment"))
+        app.push_screen(tui.ReviewBody(app.stops[0], "comment"))
         await pilot.pause()
         await pilot.press("q")
-        check(app.screen.query_one(tui.Input).value == "q", "q must type in the review body input")
+        check(app.screen.query_one(tui.TextArea).text == "q", "q must type in the review body editor")
         await pilot.press("escape")
         await pilot.pause()
         check(app.screen is root_screen, "Escape must close ReviewBody")
@@ -821,12 +1103,117 @@ async def main() -> int:
                 screen.query("#diff-scroll"),
                 "the diff must live in a scrollable container",
             )
-            # Truncation, when it happens, must say so.
-            screen.render_diff("x" * (tui.DiffScreen.MAX_CHARS + 10))
+            # Every fetch state must travel through load_diff(), including the
+            # oversized stdout and terminal error paths production uses.
+            os.environ["DIFF_MODE"] = "oversized"
+            screen.load_diff()
+            for _ in range(400):
+                if screen.page_count == 2:
+                    break
+                await pilot.pause(0.05)
+            check(
+                screen.page_count == 2 and screen.page_index == 0,
+                "an oversized diff must expose bounded pages",
+            )
+            await pilot.press("]")
             await pilot.pause()
             check(
-                "truncated at" in getattr(screen.rendered, "code", ""),
-                "a cut diff must say it was cut, and how big it really is",
+                screen.page_index == 1
+                and screen.rendered is not None
+                and "x" * 10 in screen.rendered.code[-20:],
+                "the complete oversized diff must be reachable on its final page",
+            )
+            await pilot.press("]")
+            check(screen.page_index == 1, "last-page navigation must be a no-op")
+            await pilot.press("[")
+            await pilot.press("[")
+            check(screen.page_index == 0, "first-page navigation must be a no-op")
+            selected_stop = screen.stop_record
+            old_request_id = f"old-{workdir.name}"
+            fast_request_id = f"fast-{workdir.name}"
+            os.environ["DIFF_REQUEST_ID"] = old_request_id
+            os.environ["DIFF_MODE"] = "slow-old"
+            screen.load_diff()
+            for _ in range(200):
+                if old_request_started.exists():
+                    break
+                await pilot.pause(0.01)
+            check(
+                old_request_started.exists(),
+                "the old diff request must acknowledge entering its delay",
+            )
+            os.environ["DIFF_REQUEST_ID"] = fast_request_id
+            os.environ["DIFF_MODE"] = "fast-new"
+            screen.load_diff()
+            for _ in range(200):
+                events = diff_events.read_text().splitlines() if diff_events.exists() else []
+                if any(f"response:{fast_request_id}:" in event for event in events):
+                    break
+                await pilot.pause(0.05)
+            events = diff_events.read_text().splitlines() if diff_events.exists() else []
+            check(
+                any(f"request:{old_request_id}:slow-old" in event for event in events)
+                and any(f"request:{fast_request_id}:fast-new" in event for event in events),
+                "the stale-diff test must record two distinct requests",
+            )
+            check(
+                any(f"response:{fast_request_id}:NEW-DIFF" in event for event in events),
+                "the new diff response must identify the new request",
+            )
+            for _ in range(200):
+                events = diff_events.read_text().splitlines() if diff_events.exists() else []
+                if any(f"response:{old_request_id}:OLD-DIFF" in event for event in events):
+                    break
+                await pilot.pause(0.01)
+            events = diff_events.read_text().splitlines() if diff_events.exists() else []
+            check(
+                any(f"response:{old_request_id}:OLD-DIFF" in event for event in events),
+                "the delayed old diff response must complete",
+            )
+            fast_response = f"response:{fast_request_id}:NEW-DIFF"
+            old_response = f"response:{old_request_id}:OLD-DIFF"
+            check(
+                fast_response in events
+                and old_response in events
+                and events.index(fast_response) < events.index(old_response),
+                "the old diff response must complete after the new response",
+            )
+            check(
+                screen.rendered is not None
+                and "NEW-DIFF" in screen.rendered.code
+                and "OLD-DIFF" not in screen.rendered.code,
+                "a stale diff response must not overwrite the current selection",
+            )
+            check(
+                screen.page_index == 0 and screen.page_count == 1,
+                "a stale diff response must not overwrite page state",
+            )
+            check(
+                screen.stop_record is selected_stop,
+                "a stale diff response must not overwrite selection state",
+            )
+            os.environ["DIFF_MODE"] = "empty"
+            screen.load_diff()
+            for _ in range(200):
+                if screen.state == "success" and not screen.pages:
+                    break
+                await pilot.pause(0.05)
+            check(
+                screen.state == "success"
+                and "(empty diff)" in str(screen.query_one("#diff-body", tui.Static).render()),
+                "an empty diff must be a successful empty state",
+            )
+            os.environ["DIFF_MODE"] = "error"
+            screen.load_diff()
+            for _ in range(200):
+                if screen.state == "error":
+                    break
+                await pilot.pause(0.05)
+            await pilot.pause()
+            check(
+                screen.state == "error"
+                and "terminal diff failure" in str(screen.query_one("#diff-body", tui.Static).render()),
+                "a diff fetch error must be distinct from a loaded diff",
             )
             await pilot.press("escape")
             await pilot.pause()
@@ -838,6 +1225,8 @@ async def main() -> int:
             "pr diff" in gh_log.read_text(),
             "the diff screen must actually fetch the diff",
         )
+    os.environ.pop("DIFF_MODE", None)
+    os.environ.pop("DIFF_REQUEST_ID", None)
     gh_log.write_text("")
 
     # ── everything identifying a pull request is a hyperlink ─────────────
@@ -1014,7 +1403,13 @@ async def main() -> int:
                 f"a verdict must ask for a reason, got {type(app.screen).__name__}",
             )
             await pilot.press("n", "o", "p", "e")
-            await pilot.press("enter")
+            await pilot.press("ctrl+p")
+            await pilot.pause()
+            check(isinstance(app.screen, tui.ReviewBodyPreview),
+                  "a review body must be previewed before submission")
+            await pilot.press("escape")
+            await pilot.pause()
+            await pilot.press("ctrl+s")
             await pilot.pause()
             check(
                 isinstance(app.screen, tui.ConfirmMutation),
@@ -1043,6 +1438,209 @@ async def main() -> int:
                 "pr merge" not in gh_log.read_text(),
                 "leaving a review must never merge",
             )
+
+    # ── editable, generated review bodies ───────────────────────────────
+    exact_markdown = "## Résumé\n\n- `literal [text]`\n- Unicode: café ☕\n\n\nfinal"
+    draft_calls = []
+    original_backend = tui.ACTIVE_BACKEND
+    original_draft = tui.CodexHarness.draft
+    original_probe = tui.CodexHarness.probe
+
+    def draft_body(self, request):
+        draft_calls.append(request)
+        return SimpleNamespace(state=tui.DraftState.COMPLETE, markdown="generated blocker", provenance={})
+
+    tui.CodexHarness.draft = draft_body
+    tui.CodexHarness.probe = classmethod(lambda cls: tui.Availability.READY)
+    tui.ACTIVE_BACKEND = "codex"
+    try:
+        for verdict, generated in (("approve", "accepted"), ("request-changes", "generated blocker"), ("comment", "observation")):
+            app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                for _ in range(200):
+                    if app.stops:
+                        break
+                    await pilot.pause(0.05)
+                stop = app.stops[0]
+                stop.live.update({"baseRefOid": "a" * 40, "headRefOid": "b" * 40})
+                stop.review_result = tui.ReviewResult(
+                    1, "complete" if verdict == "approve" else "findings",
+                    findings=() if verdict == "approve" else ({"severity": "high", "title": "blocker"},),
+                    provenance={"repository": "projectbluefin/bluefinctl", "pull_request": 31,
+                                "base_sha": "a" * 40, "head_sha": "b" * 40},
+                )
+                app.leave_review(stop)
+                await pilot.pause()
+                await pilot.press({"approve": "1", "request-changes": "2", "comment": "3"}[verdict])
+                await pilot.pause()
+                await pilot.press("ctrl+g")
+                await pilot.pause()
+                check(app.screen.query_one("#review-body-editor", tui.TextArea).text == "generated blocker",
+                      f"{verdict} generation must use the drafting capability")
+                await pilot.press("ctrl+e")
+                editor = app.screen.query_one("#review-body-editor", tui.TextArea)
+                editor.text = exact_markdown
+                await pilot.press("ctrl+p")
+                await pilot.pause()
+                check(isinstance(app.screen, tui.ReviewBodyPreview), "preview must show before mutation")
+                check(exact_markdown in app.screen.body, "preview must preserve exact Markdown")
+                await pilot.press("escape")
+                await pilot.pause()
+                check(isinstance(app.screen, tui.ReviewBody), "preview cancel must return to editor")
+                app.screen.action_clear()
+                check(app.screen.query_one("#review-body-editor", tui.TextArea).text == "",
+                      "clear must empty the editor")
+                app.screen.query_one("#review-body-editor", tui.TextArea).text = exact_markdown
+                await pilot.press("ctrl+s")
+                await pilot.pause()
+                check(isinstance(app.screen, tui.ReviewBody),
+                      "editing after preview must refuse submission")
+                check(any("preview" in notification.message.lower()
+                          for notification in app._notifications),
+                      "editing after preview must explain that re-preview is required")
+                await pilot.press("ctrl+p")
+                await pilot.pause()
+                check(isinstance(app.screen, tui.ReviewBodyPreview),
+                      "the changed body must be previewed again")
+                await pilot.press("escape")
+                await pilot.pause()
+                await pilot.press("ctrl+s")
+                for _ in range(20):
+                    if isinstance(app.screen, tui.ConfirmMutation):
+                        break
+                    await pilot.pause(0.05)
+                check(isinstance(app.screen, tui.ConfirmMutation), "submit must use the existing gate")
+                command = app.screen.commands[0]
+                check(command[:3] == ["gh", "pr", "review"], "submit must use gh pr review")
+                body_path = Path(command[command.index("--body-file") + 1])
+                check(body_path.read_text(encoding="utf-8") == exact_markdown,
+                      "body file must preserve exact Markdown")
+                await pilot.press(*app.screen.expected)
+                await pilot.press("escape")
+                check(not body_path.exists(), "cancelled mutation must clean the temporary body")
+        check(len(draft_calls) == 3, "all three verdicts must call drafting")
+    finally:
+        tui.ACTIVE_BACKEND = original_backend
+        tui.CodexHarness.draft = original_draft
+        tui.CodexHarness.probe = original_probe
+
+    # Missing Codex must degrade generation without touching manual prose.
+    unavailable_backend = tui.ACTIVE_BACKEND
+    original_unavailable_draft = tui.CodexHarness.draft
+    unavailable_probe_calls = []
+
+    def unavailable_probe(cls):
+        unavailable_probe_calls.append(True)
+        return tui.Availability.UNAVAILABLE_BINARY
+
+    def unavailable_draft(self, request):
+        raise FileNotFoundError("codex")
+
+    tui.CodexHarness.probe = classmethod(unavailable_probe)
+    tui.CodexHarness.draft = unavailable_draft
+    tui.ACTIVE_BACKEND = "codex"
+    try:
+        check(tui.ACTIVE_BACKEND == "codex",
+              "unavailable Codex pilot must explicitly select Codex")
+        app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for _ in range(200):
+                if app.stops:
+                    break
+                await pilot.pause(0.05)
+            stop = app.stops[0]
+            stop.live.update({"baseRefOid": "a" * 40, "headRefOid": "b" * 40})
+            stop.review_result = tui.ReviewResult(
+                1, "findings", findings=({"severity": "high", "title": "blocker"},),
+                provenance={"repository": "projectbluefin/bluefinctl", "pull_request": 31,
+                            "base_sha": "a" * 40, "head_sha": "b" * 40},
+            )
+            app.leave_review(stop)
+            await pilot.pause()
+            await pilot.press("2")
+            await pilot.pause()
+            editor = app.screen.query_one("#review-body-editor", tui.TextArea)
+            editor.text = "manual maintainer body"
+            app.screen.action_generate()
+            await pilot.pause()
+            check(editor.text == "manual maintainer body",
+                  "unavailable Codex must preserve the manual review body")
+            check(unavailable_probe_calls,
+                  "unavailable Codex must be reached during generation")
+            check(any("unavailable" in notification.message.lower()
+                      for notification in app._notifications),
+                  "unavailable Codex must show a degraded generation message")
+    finally:
+        tui.CodexHarness.probe = original_probe
+        tui.CodexHarness.draft = original_unavailable_draft
+        tui.ACTIVE_BACKEND = unavailable_backend
+        check(tui.ACTIVE_BACKEND == unavailable_backend,
+              "unavailable Codex pilot must restore the prior backend")
+
+    # Goose is the selected backend by default, but it does not draft bodies.
+    # It must degrade without invoking Codex or changing manual prose.
+    original_backend = tui.ACTIVE_BACKEND
+    original_draft = tui.CodexHarness.draft
+    original_probe = tui.CodexHarness.probe
+    codex_calls = []
+
+    def unexpected_codex(self, request):
+        codex_calls.append(request)
+        raise AssertionError("Goose body drafting must not invoke Codex")
+
+    tui.ACTIVE_BACKEND = "goose"
+    tui.CodexHarness.draft = unexpected_codex
+    tui.CodexHarness.probe = classmethod(lambda cls: tui.Availability.READY)
+    try:
+        app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for _ in range(200):
+                if app.stops:
+                    break
+                await pilot.pause(0.05)
+            stop = app.stops[0]
+            stop.live.update({"baseRefOid": "a" * 40, "headRefOid": "b" * 40})
+            stop.review_result = tui.ReviewResult(
+                1, "findings", findings=({"severity": "high", "title": "blocker"},),
+                provenance={"repository": "projectbluefin/bluefinctl", "pull_request": 31,
+                            "base_sha": "a" * 40, "head_sha": "b" * 40},
+            )
+            app.leave_review(stop)
+            await pilot.pause()
+            await pilot.press("2")
+            await pilot.pause()
+            editor = app.screen.query_one("#review-body-editor", tui.TextArea)
+            editor.text = "manual Goose body"
+            app.screen.action_generate()
+            await pilot.pause()
+            check(editor.text == "manual Goose body",
+                  "unsupported Goose drafting must preserve the manual review body")
+            check(any("unsupported" in notification.message.lower()
+                      for notification in app._notifications),
+                  "unsupported Goose drafting must show a degraded message")
+            check(not codex_calls, "Goose drafting must never invoke Codex")
+            editor.text = "x" * 4096
+            app.screen.action_preview()
+            await pilot.pause()
+            check(isinstance(app.screen, tui.ReviewBodyPreview),
+                  "a 4096-character body must be accepted")
+            await pilot.press("escape")
+            await pilot.pause()
+            editor = app.screen.query_one("#review-body-editor", tui.TextArea)
+            editor.text = "x" * 4097
+            app.screen.action_preview()
+            await pilot.pause()
+            check(isinstance(app.screen, tui.ReviewBody),
+                  "an oversized body must remain editable")
+            check(app.screen.body_file is None,
+                  "an oversized body must not create a temporary file")
+    finally:
+        tui.ACTIVE_BACKEND = original_backend
+        tui.CodexHarness.probe = original_probe
+        tui.CodexHarness.draft = original_draft
 
     # A verdict that is not an approval has to say why.
     app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
@@ -1087,10 +1685,10 @@ async def main() -> int:
         "a blocked merge must be offered the sweep instead",
     )
     check(
-        "browser" in [c for c, _ in tui.MergeRecovery.offers(
+        "handoff" in [c for c, _ in tui.MergeRecovery.offers(
             tui.Stop("o/r", 1, "merge", "t", live={"mergeStateStatus": "DIRTY"}), ""
         )],
-        "a conflicted merge must be handed to a human",
+        "a conflicted merge must offer explicit exceptional handoff",
     )
     check(
         [c for c, _ in tui.MergeRecovery.offers(
@@ -1107,9 +1705,12 @@ async def main() -> int:
         'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
         'if [ "$1 $2" = "pr list" ]; then echo "[]"; exit 0; fi\n'
         'if [ "$1 $2" = "pr merge" ]; then\n'
-        '  echo "Pull request is not mergeable: the base branch is out of date" >&2\n'
+        '  printf "Pull request is not mergeable: the base branch is out of date %s\\n" "$(printf "e%.0s" {1..300})" >&2\n'
         "  exit 1\n"
         "fi\n"
+        'if [ "$1 $2" = "pr review" ]; then printf "approval failed %s\\n" "$(printf "e%.0s" {1..300})" >&2; exit 1; fi\n'
+        'if [ "$1 $2" = "pr edit" ]; then printf "queue label failed %s\\n" "$(printf "e%.0s" {1..300})" >&2; exit 1; fi\n'
+        'if [ "$1 $2" = "pr update-branch" ]; then printf "update failed %s\\n" "$(printf "e%.0s" {1..300})" >&2; exit 1; fi\n'
         "exit 0\n",
     )
     app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
@@ -1169,6 +1770,23 @@ async def main() -> int:
                 ),
                 "the status line must count what did not merge",
             )
+            recovery_text = "\n".join(
+                str(widget.render())
+                for widget in list(app.screen.query(tui.Label))
+                + list(app.screen.query(tui.Static))
+            )
+            check(
+                "gh pr merge" in recovery_text
+                and "Pull request is not mergeable" in recovery_text
+                and len(app.stops[0].failure) > 200
+                and app.stops[0].failure_command == shlex.join(
+                    ["gh", "pr", "merge", str(app.stops[0].number),
+                     "--repo", app.stops[0].repository, "--squash"]
+                )
+                and "checks" in recovery_text
+                and "branch" in recovery_text,
+                "merge recovery must keep complete error and exact argv with checks and branch evidence",
+            )
             # Choosing "update the branch" retries with the update in front.
             await pilot.press("1")
             for _ in range(300):
@@ -1200,6 +1818,65 @@ async def main() -> int:
             gh_log.read_text().count("pr merge") >= 1,
             "a batch merge must attempt the pull requests it was given",
         )
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        stop = app.stops[0]
+        stop.live = {
+            "isDraft": False,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "statusCheckRollup": [{"conclusion": "SUCCESS"}],
+        }
+        app.self_login = "castrojo"
+        os.environ["CURL_FAIL"] = "1"
+        app._queue_automerge(stop)
+        await pilot.pause()
+        check(isinstance(app.screen, tui.ConfirmMutation), "approve/queue must use the mutation gate")
+        if isinstance(app.screen, tui.ConfirmMutation):
+            gate = app.screen
+            await pilot.press(*gate.expected)
+            await pilot.press("enter")
+            for _ in range(300):
+                if len(stop.failure) > 200:
+                    break
+                await pilot.pause(0.05)
+            details = str(app.query_one("#details", tui.Static).render())
+            check(
+                len(stop.failure) > 200
+                and stop.failure_command.endswith(
+                    "https://hive.example.test/api/prs/projectbluefin/bluefinctl/31/queue-automerge"
+                )
+                and "LAST MUTATION FAILURE" in details
+                and stop.failure in details,
+                "failed approve/queue must durably show complete stderr and quoted argv",
+            )
+            os.environ.pop("CURL_FAIL", None)
+            stop.failure = ""
+            app.mutate_all(
+                stop,
+                [["gh", "pr", "update-branch", str(stop.number), "--repo", stop.repository]],
+            )
+            await pilot.pause()
+            if isinstance(app.screen, tui.ConfirmMutation):
+                gate = app.screen
+                await pilot.press(*gate.expected)
+                await pilot.press("enter")
+            for _ in range(300):
+                if len(stop.failure) > 200:
+                    break
+                await pilot.pause(0.05)
+            details = str(app.query_one("#details", tui.Static).render())
+            check(
+                len(stop.failure) > 200
+                and stop.failure_command.startswith("gh pr update-branch ")
+                and stop.failure in details,
+                "failed update must retain complete stderr in the durable detail state",
+            )
     write_stub(
         workdir / "gh",
         f'printf "%s\\n" "$*" >>"{gh_log}"\n'
@@ -1215,10 +1892,7 @@ async def main() -> int:
     )
     gh_log.write_text("")
 
-    # ── queueing must not half-apply when the label is missing (#141) ────
-    # Reported from the field: the approval landed, `gh pr edit --add-label
-    # lgtm` failed with "'lgtm' not found", and the pull request was left
-    # formally approved for an auto-merge that could never be picked up.
+    # ── Hive owns the App approval and queue label atomically (#247) ──────
     app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -1229,8 +1903,8 @@ async def main() -> int:
         app.self_login = "castrojo"
         stop = app.stops[0]
         stop.live = {"isDraft": False}
-        app.queue_label_exists[stop.repository] = False
         gh_log.write_text("")
+        curl_log.write_text("")
         app.action_merge()
         await pilot.pause()
         check(
@@ -1238,44 +1912,26 @@ async def main() -> int:
             "queueing must still gate when the label is missing",
         )
         if isinstance(app.screen, tui.ConfirmMutation):
-            verbs = [tuple(c[:3]) for c in app.screen.commands]
             check(
-                verbs
-                == [
-                    ("gh", "label", "create"),
-                    ("gh", "pr", "review"),
-                    ("gh", "pr", "edit"),
-                ],
-                f"a missing label must be created before the approval, got {verbs}",
-            )
-            check(
-                tui.QUEUE_LABEL_COLOUR == "238636",
-                "the created label must match the one the factory already uses",
+                len(app.screen.commands) == 1
+                and app.screen.commands[0][:2] == ["sh", "-c"]
+                and app.screen.commands[0][-1].endswith(
+                    "/api/prs/projectbluefin/bluefinctl/31/queue-automerge"
+                ),
+                f"queueing must show one Hive request, got {app.screen.commands}",
             )
             await pilot.press(*app.screen.expected)
             await pilot.press("enter")
             for _ in range(200):
-                if "pr edit" in gh_log.read_text():
+                if "queue-automerge" in curl_log.read_text():
                     break
                 await pilot.pause(0.05)
-            ran = gh_log.read_text()
             check(
-                ran.index("label create") < ran.index("pr review"),
-                "the label must exist before the approval is submitted",
+                "queue-automerge" in curl_log.read_text()
+                and "pr review" not in gh_log.read_text()
+                and "pr edit" not in gh_log.read_text(),
+                "Hive must queue without a human review or direct label mutation",
             )
-        # With the label present, nothing extra is run.
-        app.queue_label_exists[stop.repository] = True
-        gh_log.write_text("")
-        app.action_merge()
-        await pilot.pause()
-        if isinstance(app.screen, tui.ConfirmMutation):
-            check(
-                [tuple(c[:3]) for c in app.screen.commands]
-                == [("gh", "pr", "review"), ("gh", "pr", "edit")],
-                "an existing label must not be created again",
-            )
-            await pilot.press("escape")
-            await pilot.pause()
     gh_log.write_text("")
 
     # ── two key lines, colour by state, refresh, and update-branch ───────
@@ -1793,9 +2449,8 @@ async def main() -> int:
         command = args[0] if args else kwargs.get("args")
         if (
             isinstance(command, (list, tuple))
-            and len(command) > 2
-            and command[1] == "pr"
-            and command[2] in {"review", "edit"}
+            and command[:2] == ["sh", "-c"]
+            and str(command[-1]).endswith("/queue-automerge")
         ):
             time.sleep(2)
             return subprocess.CompletedProcess(command, 0, "", "")
@@ -1831,7 +2486,7 @@ async def main() -> int:
             gaps = [b - a for a, b in zip(ticks, ticks[1:])]
             check(
                 bool(gaps) and max(gaps) < 1,
-                "a slow gh mutation must run off the UI thread, "
+                "a slow queue mutation must run off the UI thread, "
                 f"but the event loop stalled {max(gaps) if gaps else 0:.2f}s",
             )
     finally:
@@ -1941,8 +2596,9 @@ async def main() -> int:
         if isinstance(app.screen, tui.ConfirmMutation):
             check(
                 app.screen.expected == "31"
-                and [command[:3] for command in app.screen.commands]
-                == [["gh", "pr", "review"], ["gh", "pr", "edit"]],
+                and len(app.screen.commands) == 1
+                and app.screen.commands[0][:2] == ["sh", "-c"]
+                and app.screen.commands[0][-1].endswith("/queue-automerge"),
                 f"the card must preserve the queue action, got {app.screen.commands}",
             )
             await pilot.press("escape")

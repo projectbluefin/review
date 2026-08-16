@@ -1,7 +1,7 @@
 ---
 name: review-dashboard
-version: "1.3"
-last_updated: 2026-08-14
+version: "1.4"
+last_updated: 2026-08-16
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
 entry_point: docs/skills/review-dashboard.md
@@ -18,6 +18,14 @@ metadata:
 ---
 
 # Review Dashboard
+
+`just review-queue` reads the generated Bluefin queue snapshot. `just
+review-queue owner/repo` reads that repository's open pull requests through
+the shipped GitHub CLI and normalizes them into the same repository-qualified
+queue rows. The authenticated maintainer's own pull requests remain hidden.
+The dashboard distinguishes ready, empty, missing, inaccessible, malformed,
+and failed sources; `R` rereads whichever source is active. The flag form
+`--repo` remains the existing snapshot filter.
 
 ## When to Use
 
@@ -83,8 +91,8 @@ adapters. `ReviewStateView` owns the lifecycle states `READY`, `RUNNING`,
 
 ## Core Process
 
-1. **Every mutation goes through `mutate_all()`.** It shows the exact `gh`
-   commands and runs nothing until the maintainer types the pull request
+1. **Every mutation goes through `mutate_all()`.** It shows the exact command
+   or Hive request and runs nothing until the maintainer types the pull request
    number. The read-only `gh()` helper must never carry a mutating verb.
 2. **One decision is one gate.** An action needing several `gh` calls passes
    them all to a single `mutate_all()` so the whole sequence is confirmed
@@ -169,7 +177,9 @@ def paint_context(self, text: str) -> None:
 
 **Diffs get Pygments through Rich**: `Syntax(text, "diff", theme="ansi_dark")`.
 `ansi_dark` resolves to the terminal's own palette instead of assuming a
-background colour.
+background colour. `DiffScreen` keeps GitHub's complete response in bounded
+pages; `[` and `]` navigate them, while loading, success, and fetch error are
+distinct states. `[o]` is only an optional browser escape hatch.
 
 ## Design Rules
 
@@ -177,6 +187,10 @@ background colour.
   `recommended_action` rendered a 121-stop queue as five and hid every
   merge-ready pull request. When a view is filtered, the status line says how
   many stops are hidden.
+- **Keep mutation failures inspectable.** The selected stop and recovery screen
+  retain the exact command, GitHub error, checks, and branch state after the
+  notification disappears. Update, retry, queue, and skip are explicit; a
+  true conflict offers exceptional manual handoff without a bypass.
 - **Colour is never the only carrier of a fact.** Rows colour by state *and*
   carry `⚑ CONFLICTS`, `✓ CI GREEN`, `✗ CI FAILED`, `… CI PENDING`, or
   `? CI UNKNOWN`, as applicable.
@@ -199,8 +213,9 @@ background colour.
   which is duplicate evidence about the subject and says nothing about whether
   the branch can be brought current; `dependency_subject()` survives for
   duplicate detection only.
-- **Distinguish the merge paths.** Unselected, `a` approves and applies
-  `lgtm`, an opt-in to Hive's sweep. On a selection, `a` dispatches one
+- **Distinguish the merge paths.** Unselected, `a` asks Hive to create the
+  App-authored exact-head approval and apply `lgtm`, an opt-in to its sweep.
+  On a selection, `a` dispatches one
   landing agent for the whole batch. `m` squashes now and is gated on
   GitHub's `push` permission, read per repository. `L` leaves a review and
   merges nothing. A review that can only be given by also queueing or
@@ -245,6 +260,21 @@ image's `org.opencontainers.image.revision` label). The agent reports
   the reviewer to raw evidence and never display a clean conclusion.
 - **Never bypass branch protection.** No `--admin`, no `--delete-branch`, no
   push.
+
+### Review bodies
+
+`L` keeps the existing verdict picker, then opens a multiline `TextArea` for
+approve, request-changes, or comment. `Ctrl-g` asks the active drafting
+capability for bounded prose from the stored completed `ReviewResult` and
+live PR facts; failed, incomplete, or untrusted evidence refuses generation,
+while manual text remains available. `Ctrl-e` returns focus to editing,
+`Ctrl-p` previews the exact Markdown and command, `Ctrl-Shift-k` clears the
+body, and `Ctrl-s` submits through the existing typed PR-number gate.
+
+The final Markdown is written verbatim to a bounded temporary body file for
+`gh pr review --body-file` only. The file is removed after success, failure,
+or cancellation; no draft action selects a verdict, discovers findings, or
+mutates GitHub.
 
 ## Common Rationalizations
 

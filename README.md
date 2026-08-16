@@ -270,10 +270,10 @@ regression `tests/dashboard_pilot.py` drives the real app to prove.
 | `L` | leave a review on GitHub: approve, request changes, or comment (also from the review screen) |
 | `d` | docs-update agent task (tracked as #134) |
 | `g` | Ghost Cluster build dispatch (tracked as #133) |
-| `o` | open in browser |
-| `v` | view the diff — full screen, coloured, scrollable |
+| `o` | optional browser escape hatch |
+| `v` | view the complete diff — full screen, coloured, paginated, with loading/error state |
 | `c` | comment |
-| `a` | approve and queue: approval + `lgtm`, opting in to Hive auto-merge; for the batch selection if one exists |
+| `a` | approve and queue through Hive: its App records the exact-head approval and applies `lgtm`; for the batch selection if one exists |
 | `m` | merge now: squash immediately, no `lgtm`, maintainers only — the batch selection if one exists |
 | `x` | reject: comment, then close |
 | `h` | handoff: copy the pull request's context to your clipboard (OSC 52) |
@@ -286,9 +286,9 @@ regression `tests/dashboard_pilot.py` drives the real app to prove.
 | `q` | quit |
 
 The dashboard is the only surface that can change anything: every mutation
-prints the exact `gh` command and runs only after you type
+prints the exact command or Hive request and runs only after you type
 the pull request number, a maintainer can merge directly with `m` or hand the
-pull request to Hive's governor sweep with `a` (approval + `lgtm`), drafts are
+pull request to Hive's governor sweep with `a`, drafts are
 refused, and every
 action
 is appended as a JSON trace to `~/.local/state/bluefin-review/trace.jsonl`
@@ -376,8 +376,9 @@ a choice instead:
 ```
 
 What is offered depends on why GitHub said no — behind the base gets the
-update, blocked on review gets the sweep, a conflict gets handed to a human in
-the browser — and retry and keep-it-queued are always there. Updating the
+update, blocked on review gets the sweep, and a true conflict gets an explicit
+exceptional manual handoff with no bypass — while retry and keep-it-queued are
+always there. Updating the
 branch runs `gh pr update-branch` and the merge behind one gate, so it is one
 decision like every other sequence.
 
@@ -429,24 +430,24 @@ pull request you are looking at, the context pane says so:
 That is the one thing worth interrupting a review for — the diff on screen is
 about to be stale. Otherwise it tells you nobody is on it.
 
-Consulting Hive is strictly read-only and never fatal: an unreachable or
-unauthenticated hub is reported as unreachable, not raised, and the queue
-still works. Hive remains the sole authority for selecting and assigning
-contributor tasks; nothing here claims, reorders, or declines one.
+Hive status and worker lookup are read-only and never fatal. Queueing with `a`
+is the one Hive mutation: it stays behind the typed-number gate and fails
+closed when the authenticated hub is unavailable. Hive remains the sole
+authority for selecting and assigning contributor tasks; nothing here claims,
+reorders, or declines one.
 
-Every state-changing key prints the exact commands and runs them only after you
+Every state-changing key prints the exact operations and runs them only after you
 type the pull request number; empty aborts, and there is no y/yes shortcut. One
-decision is one gate: an action that takes several `gh` calls — queueing
-(approval + `lgtm`), rejecting (comment + close), resolving a cluster — shows
-every command it will run in that one gate and then runs the whole sequence in
-the background. You are never asked to confirm the same decision twice, and a
-failed step stops the rest instead of asking again.
-Queueing a merge with `a` is the factory's automated merge path: it posts the
-exact approval Hive's governor sweep re-verifies (`Approved by @<you> for Hive
-auto-merge on green CI.`) and adds the `lgtm` label the sweep scans for. The
-sweep — not this tool — performs the squash merge, and it independently
-enforces the self-merge ban, requires mergeable plus all checks green, and
-ignores drafts.
+decision is one gate: an action that takes several `gh` calls — rejecting
+(comment + close), resolving a cluster — shows every command it will run in
+that one gate and then runs the whole sequence in the background. You are never
+asked to confirm the same decision twice, and a failed step stops the rest
+instead of asking again.
+Queueing a merge with `a` is the factory's automated merge path: Review calls
+Hive's authenticated queue endpoint once. Hive verifies merger standing and
+the self-merge ban, then its GitHub App posts the exact-head approval and adds
+the `lgtm` label. The sweep — not this tool — performs the squash merge, and it
+independently requires mergeable plus all checks green and ignores drafts.
 
 `lgtm` is an **opt-in to that automation, not a toll on merging**. When you
 have read the diff and simply want the change in, `m` merges it now: the same

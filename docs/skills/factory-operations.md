@@ -1,6 +1,6 @@
 ---
 name: factory-operations
-version: "1.1"
+version: "1.3"
 last_updated: 2026-08-14
 id: factory-operations
 one_line_purpose: Keep bounded factory work moving until it lands or is externally blocked.
@@ -28,6 +28,12 @@ state.
 
 - The default state is continue. Worker completion is an event, not supervisor
   completion.
+- An initial issue list is a minimum path unless explicitly exhaustive. After
+  a core-path or milestone merge, refresh the full repository issue, pull
+  request, ownership, and dependency graph; admit the highest-priority ready
+  work that does not conflict, and park only for a concrete dependency, human
+  design decision, unavailable acceptance environment, or active overlapping
+  owner.
 - Assign one sole writer to each branch or worktree and state its explicit
   write set. Waiting, CI, review, and remote work do not consume writable
   capacity.
@@ -40,6 +46,16 @@ state.
   work.
 - Put important transition receipts in the repository's durable issue or pull
   request system.
+- Before merge, classify the candidate against its owning issue as a full
+  outcome or partial slice: a full outcome uses a closing keyword in the pull
+  request and, after merge, verifies that the owning issue is actually
+  closed/completed in the durable repository tracker; a partial slice uses
+  non-closing `Progresses` or an equivalent and leaves unresolved intent open;
+  an external or human blocker remains open with concrete blocker evidence.
+  After every merge, blocker, or ownership transition, reconcile the current factory or
+  ledger projection against live issue and pull-request state before selecting
+  the next READY work; durable ledger/status must never contradict the
+  repository tracker.
 - When an authorized repository owner explicitly clears a lane and current
   remote PR, branch, and assignee evidence is clean, an unpushed planning
   reference is advisory rather than ACTIVE ownership; record the clearance and

@@ -1,8 +1,10 @@
 """Focused contracts for the adapter-first harness seam."""
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -74,6 +76,142 @@ class HarnessContract(unittest.TestCase):
         self.assertEqual(adapter.effort, "low")
         self.assertTrue(adapter.capabilities.exact_binding)
         self.assertTrue(adapter.capabilities.provenance)
+
+    def test_goose_registry_owns_invocation_and_result_conversion(self):
+        adapter = GooseHarness(availability=Availability.READY)
+        command = adapter.command(self.binding, prompt="inspect", model="gpt-5.6-luna", effort="high")
+        self.assertEqual(command[:2], ["goose", "review"])
+        self.assertIn("project/review#166", command[-1])
+        self.assertIn("base=" + "a" * 40, command[-1])
+        self.assertIn("head=" + "b" * 40, command[-1])
+        result = adapter.convert(
+            "goose review: check 'main' completed: 0 finding(s)\n"
+            "goose review: orchestrator emitted 0 finding(s) from 1 check(s) (main: ran, 0 finding(s))",
+            self.binding,
+            0,
+            model="gpt-5.6-luna",
+            effort="high",
+        )
+        self.assertEqual(result.state, "complete")
+        self.assertEqual(result.provenance["head_sha"], "b" * 40)
+        self.assertEqual(result.provenance["backend"], "goose")
+
+    def test_goose_failures_are_explicit_and_fail_closed(self):
+        for state in (Availability.UNAVAILABLE_BINARY, Availability.UNAVAILABLE_AUTH,
+                      Availability.FAILED_CONFORMANCE):
+            with self.subTest(state=state), self.assertRaises(RuntimeError):
+                GooseHarness(availability=state).invoke(self.binding, prompt="inspect")
+        adapter = GooseHarness(availability=Availability.READY)
+        self.assertEqual(adapter.convert("not a Goose result", self.binding, 0).state, "unparsable")
+        self.assertEqual(adapter.convert("", self.binding, 23).state, "failed")
+        self.assertEqual(adapter.convert("", self.binding, 65).state, "incomplete")
+
+    def test_goose_terminal_status_is_owned_by_typed_result(self):
+        adapter = GooseHarness(availability=Availability.READY)
+        for payload, expected in (
+            ("malformed Goose output", 1),
+            ("goose review: check 'main' failed: no verdict\n"
+             "goose review: orchestrator emitted 0 finding(s) from 1 check(s) "
+             "(main: ran, 0 finding(s))", 65),
+        ):
+            with self.subTest(payload=payload):
+                result = adapter.convert(payload, self.binding, 0)
+                self.assertNotEqual(result.state, "complete")
+                self.assertEqual(adapter.terminal_status(result), expected)
+
+    def test_goose_probe_uses_documented_non_secret_readiness_check(self):
+        with self.subTest("binary missing"):
+            self.assertEqual(
+                GooseHarness.probe("/does/not/exist/goose"),
+                Availability.UNAVAILABLE_BINARY,
+            )
+
+        with self.subTest("provider unavailable"):
+            with tempfile.TemporaryDirectory() as directory:
+                executable = Path(directory) / "goose"
+                executable.write_text(
+                    "#!/usr/bin/env bash\n"
+                    "[[ \"$*\" == \"info --check\" ]] || exit 9\n"
+                    "printf '%s\\n' 'provider unavailable' >&2\n"
+                    "exit 1\n"
+                )
+                executable.chmod(0o755)
+                self.assertEqual(
+                    GooseHarness.probe(str(executable)),
+                    Availability.UNAVAILABLE_AUTH,
+                )
+
+        with self.subTest("ready"):
+            with tempfile.TemporaryDirectory() as directory:
+                executable = Path(directory) / "goose"
+                executable.write_text(
+                    "#!/usr/bin/env bash\n"
+                    "[[ \"$*\" == \"info --check\" ]] || exit 9\n"
+                    "printf '%s\\n' 'provider ready'\n"
+                )
+                executable.chmod(0o755)
+                self.assertEqual(
+                    GooseHarness.probe(str(executable)), Availability.READY
+                )
+
+        with self.subTest("zero exit without Goose response"):
+            with tempfile.TemporaryDirectory() as directory:
+                executable = Path(directory) / "goose"
+                executable.write_text("#!/usr/bin/env bash\nexit 0\n")
+                executable.chmod(0o755)
+                self.assertEqual(
+                    GooseHarness.probe(str(executable)), Availability.UNAVAILABLE_AUTH
+                )
+
+    def test_goose_stream_reaches_real_process_and_returns_bound_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "goose"
+            arguments = Path(directory) / "arguments"
+            executable.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ \"$*\" == \"info --check\" ]]; then exit 0; fi\n"
+                "printf '%s\\n' \"$*\" > \"$GOOSE_ARGUMENTS\"\n"
+                "printf '%s\\n' 'stream-one'\n"
+                "printf '%s\\n' \"goose review: check 'main' completed: 0 finding(s)\"\n"
+                "printf '%s\\n' \"goose review: orchestrator emitted 0 finding(s) from 1 check(s) (main: ran, 0 finding(s))\"\n"
+            )
+            executable.chmod(0o755)
+            lines = []
+            adapter = GooseHarness(
+                executable=str(executable), availability=Availability.READY
+            )
+            with patch.dict(os.environ, {"GOOSE_ARGUMENTS": str(arguments)}):
+                result = adapter.stream(
+                    self.binding, prompt="inspect", on_line=lines.append,
+                    extra_args=("--check-scope", "/tmp/exact-scope", "main...HEAD"),
+                )
+            self.assertEqual(lines[0], "stream-one")
+            self.assertIn("--check-scope /tmp/exact-scope main...HEAD", arguments.read_text())
+            self.assertEqual(result.state, "complete")
+            self.assertEqual(result.provenance["head_sha"], "b" * 40)
+
+    def test_goose_cancel_terminates_the_process_group(self):
+        class Process:
+            pid = 1234
+            returncode = None
+            wait_called = False
+
+            def wait(self):
+                self.wait_called = True
+
+        process = Process()
+        with patch("harness.goose.os.killpg") as killpg:
+            GooseHarness.cancel(process)
+        killpg.assert_called_once()
+        self.assertTrue(process.wait_called)
+
+    def test_goose_result_redacts_secret_evidence(self):
+        with patch.dict(os.environ, {"GOOSE_API_KEY": "goose-secret"}):
+            result = GooseHarness(availability=Availability.READY).convert(
+                "Authorization: Bearer goose-secret", self.binding
+            )
+        self.assertNotIn("goose-secret", "\n".join(result.raw_evidence))
+        self.assertIn("[REDACTED]", "\n".join(result.raw_evidence))
 
     def test_binding_is_exact_context_shape(self):
         self.assertEqual(f"{self.binding.owner}/{self.binding.repository}", "project/review")
@@ -363,6 +501,26 @@ class HarnessContract(unittest.TestCase):
         with self.assertRaises(RuntimeError) as error:
             GooseHarness().draft(request)
         self.assertIn("UNSUPPORTED_CAPABILITY", str(error.exception))
+
+    def test_codex_draft_strips_github_tokens_from_subprocess_environment(self):
+        request = DraftRequest(self.binding, "approve", self._evidence(), {"title": "A PR"})
+        captured = {}
+
+        class Process:
+            stdout = "Reviewed."
+            returncode = 0
+
+        def run(*args, **kwargs):
+            captured.update(kwargs)
+            return Process()
+
+        with patch.dict(os.environ, {"GH_TOKEN": "secret", "GITHUB_TOKEN": "secret"}), \
+             patch("harness.codex.subprocess.run", side_effect=run):
+            result = CodexHarness(availability=Availability.READY).draft(request)
+        self.assertEqual(result.state, DraftState.COMPLETE)
+        self.assertNotIn("GH_TOKEN", captured["env"])
+        self.assertNotIn("GITHUB_TOKEN", captured["env"])
+        self.assertEqual(captured["env"]["PATH"], os.environ["PATH"])
 
     def _evidence(self, **overrides):
         values = {

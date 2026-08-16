@@ -1,7 +1,7 @@
 ---
 name: static-pr-queue
-version: "1.9"
-last_updated: 2026-08-10
+version: "1.10"
+last_updated: 2026-08-16
 id: static-pr-queue
 one_line_purpose: Publish a safe, static queue of public pull requests.
 entry_point: docs/skills/static-pr-queue.md
@@ -81,10 +81,11 @@ evidence.
 A consumer's mutations stay gated and narrow. `ready-for-human-merge` is a
 recommendation to a person; the dashboard's keys execute that person's
 decision — never the queue's — through confirmed call sites: the exact
-commands are printed and the maintainer types the pull request number. There
+operation is printed and the maintainer types the pull request number. There
 are three distinct paths, and conflating them is the error to avoid: `a`
-approves and applies `lgtm`, an opt-in to Hive's governor sweep, which
-enforces the self-merge ban and requires green CI; `m` squashes directly and
+asks Hive's authenticated endpoint to create the App-authored exact-head
+approval and apply `lgtm`; the governor sweep enforces the self-merge ban and
+requires green CI. `m` squashes directly and
 is gated on GitHub's `push` permission read per repository; `L` leaves an
 ordinary review and merges nothing. The review engine has no mutation path at
 all, and `tests/bluefin-review.sh` fails if one appears there.

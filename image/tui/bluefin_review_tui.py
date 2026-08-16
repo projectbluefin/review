@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -42,36 +43,35 @@ from textual.widgets import (
     Button,
     Static,
     Select,
+    TextArea,
 )
 from review_result import ReviewResult, adapt_current_engine
 import landing
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from harness.codex import CodexHarness
+from harness.goose import GooseHarness
 from harness.autopilot import (HarnessOption, Preference, can_remember,
                                choose_option, discover_all, load_preferences,
                                remember_success)
 from review_evidence_manifest import ReviewRequest
-from harness.registry import Availability
+from harness.registry import Availability, DraftRequest, DraftState, HarnessRegistry
 
 QUEUE_URL = os.environ.get(
     "BLUEFIN_REVIEW_QUEUE_URL",
     "https://projectbluefin.github.io/review/queue.json",
 )
+PULL_FETCH_LIMIT = os.environ.get("BLUEFIN_REVIEW_PULL_LIMIT", "200")
 TRACE_PATH = os.path.join(
     os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
     "bluefin-review",
     "trace.jsonl",
 )
-PULL_FETCH_LIMIT = os.environ.get("BLUEFIN_REVIEW_PULL_LIMIT", "200")
 MUTATION_TIMEOUT = 60
 HIVE_TIMEOUT = 15
+MAX_REVIEW_BODY_CHARS = 4096
 # The label Hive's governor sweep scans for. It is not defined in most
-# repositories, and adding a label that does not exist fails.
+# repositories; Hive's queue endpoint owns creating and applying it.
 QUEUE_LABEL = "lgtm"
-# Match the label the factory repositories that already have it use, rather
-# than minting a second look for the same thing.
-QUEUE_LABEL_COLOUR = "238636"
-QUEUE_LABEL_DESCRIPTION = "This PR has been approved by a maintainer"
 
 # The semantic registry is the source for bindings, help, and the command
 # palette. IDs are stable so clickable surfaces can consume the same contract.
@@ -295,6 +295,11 @@ def gh(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["gh", *args], capture_output=True, text=True, timeout=timeout
     )
+
+
+def bounded_detail(detail: str) -> str:
+    detail = re.sub(r"[\x00-\x1f\x7f]+", " ", str(detail))
+    return " ".join(detail.split())[:240]
 
 
 def hive_token() -> str:
@@ -532,7 +537,12 @@ class QueueFilters:
 
     action: str = ""
     repository: str = ""
+    live_repository: str = ""
     url: str = QUEUE_URL
+
+    @property
+    def live(self) -> bool:
+        return bool(self.live_repository)
 
     def wants(self, item: dict) -> bool:
         if self.action and item.get("recommended_action", "") != self.action:
@@ -556,8 +566,13 @@ class Stop:
     review_state: str = ""
     selected: bool = False
     failure: str = ""
+    failure_command: str = ""
+    failure_argv: list[str] = field(default_factory=list)
+    failure_checks: str = ""
+    failure_branch: str = ""
     live: dict = field(default_factory=dict)
     overlap: dict = field(default_factory=dict)
+    review_result: ReviewResult | None = None
 
     @property
     def key(self) -> str:
@@ -746,15 +761,15 @@ class LandingScreen(Screen):
 
 
 class ConfirmMutation(ModalScreen[bool]):
-    """The single mutation gate: show the exact commands, require the typed
+    """The single mutation gate: show the exact operations, require the typed
     pull request number. Empty, wrong, or Esc aborts; there is no y/yes and
     no timeout.
 
-    One decision gates one sequence. Queueing a pull request is an approval
-    plus the lgtm label the sweep scans for, and reject is a comment plus a
-    close: splitting either into two gates asks a maintainer to confirm the
-    same decision twice, which trains them to type the number without reading
-    it. Every command that will run is shown here, before the one gate.
+    One decision gates one sequence. Queueing is one authenticated Hive request,
+    and reject is a comment plus a close: splitting either into two gates asks
+    a maintainer to confirm the same decision twice, which trains them to type
+    the number without reading it. Every command that will run is shown here,
+    before the one gate.
     """
 
     BINDINGS = back_bindings("dismiss(False)")
@@ -817,7 +832,7 @@ class MergeRecovery(ModalScreen[str | None]):
         if state == "BLOCKED" or "REVIEW" in text or "REQUIRED" in text:
             choices.append(("queue", "approve and queue it for the sweep instead"))
         if state == "DIRTY" or "CONFLICT" in text:
-            choices.append(("browser", "open it — the conflict needs a human"))
+            choices.append(("handoff", "exceptional manual handoff — conflict; no bypass"))
         choices.append(("retry", "try the merge again"))
         choices.append(("skip", "leave it queued and move on"))
         return choices
@@ -825,7 +840,17 @@ class MergeRecovery(ModalScreen[str | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm-box"):
             yield Label(f"{self.stop_record.key} did not merge:")
-            yield Static(escape(self.message[:300]), classes="confirm-command")
+            yield Static(
+                "\n".join(
+                    (
+                        f"command  {self.stop_record.failure_command or 'gh pr merge'}",
+                        f"error    {self.message}",
+                        f"checks   {self.stop_record.failure_checks or 'unknown'}",
+                        f"branch   {self.stop_record.failure_branch or 'unknown'}",
+                    )
+                ),
+                classes="confirm-command",
+            )
             yield Label("")
             for index, (_, description) in enumerate(self.choices, start=1):
                 yield Label(f"  [{index}] {description}")
@@ -863,27 +888,165 @@ class ReviewVerdict(ModalScreen[str | None]):
                 self.dismiss(self.CHOICES[index][0])
 
 
-class ReviewBody(ModalScreen[str | None]):
-    """The review body. Required for anything but a bare approval."""
-
+class ReviewBodyPreview(ModalScreen[None]):
     BINDINGS = back_bindings("dismiss(None)")
 
-    def __init__(self, verdict: str) -> None:
+    def __init__(self, body: str, command: list[str]) -> None:
         super().__init__()
+        self.body = body
+        self.command = command
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-box"):
+            yield Label("exact GitHub Markdown:")
+            yield Static(self.body, markup=False, id="review-body-preview")
+            yield Label("exact command:")
+            yield Static(" ".join(self.command), id="review-command-preview")
+            yield Label("[esc] back to editor")
+
+
+class ReviewBody(ModalScreen[str | None]):
+    """Editable review body; generation is an optional maintainer action."""
+
+    BINDINGS = [
+        Binding("ctrl+g", "generate", "generate"),
+        Binding("ctrl+e", "edit", "edit"),
+        Binding("ctrl+p", "preview", "preview"),
+        Binding("ctrl+shift+k", "clear", "clear", priority=True),
+        Binding("ctrl+s", "submit", "submit"),
+        *back_bindings("cancel"),
+    ]
+
+    def __init__(self, stop: Stop, verdict: str) -> None:
+        super().__init__()
+        self.stop_record = stop
         self.verdict = verdict
+        self.draft_provenance: dict = {}
+        self.body_file: str | None = None
+        self.previewed_body: str | None = None
 
     def compose(self) -> ComposeResult:
         optional = " (empty is allowed for an approval)" if self.verdict == "approve" else ""
         with Vertical(id="confirm-box"):
             yield Label(f"{self.verdict} — say why{optional}:")
-            yield Input(id="review-body-input")
+            yield TextArea(id="review-body-editor")
+            yield Label("[ctrl-g] generate · [ctrl-e] edit · [ctrl-p] preview · [ctrl-shift-k] clear · [ctrl-s] submit")
 
     def on_mount(self) -> None:
-        self.query_one(Input).focus()
+        self.query_one(TextArea).focus()
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        event.stop()
-        self.dismiss(event.value)
+    def action_edit(self) -> None:
+        self.query_one(TextArea).focus()
+
+    def action_cancel(self) -> None:
+        self.cleanup()
+        self.dismiss(None)
+
+    def action_clear(self) -> None:
+        self.query_one(TextArea).text = ""
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if event.text_area.id == "review-body-editor":
+            self._invalidate_preview()
+
+    def action_generate(self) -> None:
+        result = self.stop_record.review_result
+        if result is None or result.state not in {"complete", "findings"}:
+            self.notify("trustworthy completed review evidence is unavailable", severity="warning")
+            return
+        try:
+            owner, repository = self.stop_record.repository.split("/", 1)
+            request = ReviewRequest(
+                owner, repository, self.stop_record.number,
+                str(self.stop_record.live["baseRefOid"]), str(self.stop_record.live["headRefOid"]),
+                actor="maintainer", tenant="review", generated_at="dashboard",
+            )
+            registry = HarnessRegistry()
+            registry.register(GooseHarness())
+            registry.register(CodexHarness(availability=CodexHarness.probe()))
+            adapter = registry.require_ready(ACTIVE_BACKEND)
+            if not adapter.capabilities.body_drafting:
+                raise RuntimeError(f"{ACTIVE_BACKEND} unavailable: UNSUPPORTED_CAPABILITY")
+            draft = adapter.draft(
+                DraftRequest(request, self.verdict, result, live_review_context(self.stop_record.live))
+            )
+        except (KeyError, TypeError, ValueError, RuntimeError, OSError) as error:
+            self.notify(f"draft unavailable: {error}", severity="warning")
+            return
+        if draft.state is not DraftState.COMPLETE or not draft.markdown:
+            self.notify("draft unavailable: evidence did not produce review prose", severity="warning")
+            return
+        self.draft_provenance = dict(getattr(draft, "provenance", {}))
+        self.query_one(TextArea).text = draft.markdown
+
+    def _command(self, body_file: str) -> list[str]:
+        return ["gh", "pr", "review", str(self.stop_record.number), "--repo",
+                self.stop_record.repository, f"--{self.verdict}", "--body-file", body_file]
+
+    def action_preview(self) -> None:
+        body = self.query_one(TextArea).text or "Reviewed."
+        if not self._validate_body(body):
+            return
+        path = self._prepare_body_file(body)
+        self.previewed_body = body
+        self.app.push_screen(ReviewBodyPreview(body, self._command(path)))
+
+    def _validate_body(self, body: str) -> bool:
+        if len(body) <= MAX_REVIEW_BODY_CHARS:
+            return True
+        self.notify(
+            f"review body is too long ({len(body)}/{MAX_REVIEW_BODY_CHARS} characters); nothing was submitted",
+            severity="warning",
+        )
+        return False
+
+    def _invalidate_preview(self) -> None:
+        self.previewed_body = None
+        if self.body_file:
+            try:
+                os.unlink(self.body_file)
+            except FileNotFoundError:
+                pass
+            self.body_file = None
+
+    def _prepare_body_file(self, body: str) -> str:
+        import tempfile
+        if self.body_file:
+            try:
+                os.unlink(self.body_file)
+            except FileNotFoundError:
+                pass
+        os.makedirs(os.path.dirname(TRACE_PATH), exist_ok=True)
+        handle = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", prefix=f"review-{self.stop_record.number}-",
+            suffix=".md", dir=os.path.dirname(TRACE_PATH), delete=False,
+        )
+        with handle:
+            handle.write(body or "Reviewed.")
+        self.body_file = handle.name
+        return handle.name
+
+    def action_submit(self) -> None:
+        raw_body = self.query_one(TextArea).text
+        if not raw_body and self.verdict != "approve":
+            self.notify(f"{self.verdict} needs a reason; nothing was submitted.", severity="warning")
+            return
+        body = raw_body or "Reviewed."
+        if not self._validate_body(body):
+            return
+        if self.previewed_body != body or not self.body_file:
+            self.notify("preview the exact review body before submitting", severity="warning")
+            return
+        self.dismiss((body, self.body_file))
+
+    def cleanup(self) -> None:
+        if self.body_file:
+            try:
+                os.unlink(self.body_file)
+            except FileNotFoundError:
+                pass
+            self.body_file = None
+        self.previewed_body = None
 
 
 class DiffScreen(ModalScreen[None]):
@@ -897,7 +1060,10 @@ class DiffScreen(ModalScreen[None]):
     diff lexer, and every byte GitHub returned.
     """
 
-    BINDINGS = back_bindings("dismiss")
+    BINDINGS = back_bindings("dismiss") + [
+        Binding("]", "next_page", "next diff page"),
+        Binding("[", "previous_page", "previous diff page"),
+    ]
 
     # Rich renders the whole diff before Textual paints it, so an enormous
     # one is a visible stall. Cut with the size named, never silently.
@@ -909,6 +1075,14 @@ class DiffScreen(ModalScreen[None]):
         # What is on screen right now, so the rendering can be inspected
         # without reaching through Textual's internal wrapping.
         self.rendered: Syntax | None = None
+        self.pages: list[str] = []
+        self.page_index = 0
+        self.state = "loading"
+        self.request_generation = 0
+
+    @property
+    def page_count(self) -> int:
+        return len(self.pages)
 
     def compose(self) -> ComposeResult:
         stop = self.stop_record
@@ -929,32 +1103,74 @@ class DiffScreen(ModalScreen[None]):
     def on_mount(self) -> None:
         self.load_diff()
 
-    @work(thread=True)
     def load_diff(self) -> None:
+        self.request_generation += 1
+        generation = self.request_generation
+        self.fetch_diff(generation)
+
+    @work(thread=True)
+    def fetch_diff(self, generation: int) -> None:
         stop = self.stop_record
         result = gh("pr", "diff", str(stop.number), "--repo", stop.repository)
-        text = result.stdout if result.returncode == 0 else result.stderr
-        self.app.call_from_thread(self.render_diff, text)
+        if result.returncode == 0:
+            self.app.call_from_thread(self.render_diff_result, generation, result.stdout)
+        else:
+            self.app.call_from_thread(
+                self.render_diff_error_result,
+                generation,
+                result.stderr.strip() or f"exit {result.returncode}",
+            )
+
+    def render_diff_result(self, generation: int, text: str) -> None:
+        if generation != self.request_generation:
+            return
+        self.render_diff(text)
+
+    def render_diff_error_result(self, generation: int, message: str) -> None:
+        if generation != self.request_generation:
+            return
+        self.render_diff_error(message)
 
     def render_diff(self, text: str) -> None:
         body = self.query_one("#diff-body", Static)
         if not text.strip():
+            self.state = "success"
+            self.pages = []
+            self.rendered = None
             body.update("(empty diff)")
             return
-        note = ""
-        if len(text) > self.MAX_CHARS:
-            note = (
-                f"\n… truncated at {self.MAX_CHARS:,} of {len(text):,} characters; "
-                "open it in the browser with [o] to read the rest.\n"
-            )
-            text = text[: self.MAX_CHARS]
+        self.state = "success"
+        self.pages = [text[index:index + self.MAX_CHARS] for index in range(0, len(text), self.MAX_CHARS)]
+        self.page_index = 0
+        self.render_page()
+
+    def render_page(self) -> None:
+        body = self.query_one("#diff-body", Static)
+        text = self.pages[self.page_index]
+        page_note = f"page {self.page_index + 1}/{len(self.pages)} · [ and ] navigate · [o] optional browser escape\n\n"
         # 'ansi_dark' resolves to the terminal's own palette, so the diff
         # stays legible in whatever theme the maintainer actually uses
         # instead of assuming a dark background.
         self.rendered = Syntax(
-            text + note, "diff", theme="ansi_dark", word_wrap=False
+            page_note + text, "diff", theme="ansi_dark", word_wrap=False
         )
         body.update(self.rendered)
+
+    def render_diff_error(self, message: str) -> None:
+        self.state = "error"
+        self.pages = []
+        self.rendered = None
+        self.query_one("#diff-body", Static).update(f"ERROR loading diff: {escape(message)}")
+
+    def action_next_page(self) -> None:
+        if self.page_index + 1 < len(self.pages):
+            self.page_index += 1
+            self.render_page()
+
+    def action_previous_page(self) -> None:
+        if self.page_index:
+            self.page_index -= 1
+            self.render_page()
 
 
 class HarnessTakeoff(ModalScreen[str | None]):
@@ -1223,6 +1439,7 @@ class ReviewScreen(Screen):
         else:
             outcome = "failed"
             state = f"FAILED (exit {code}) — the review did not run. Nothing was submitted."
+        stop.review_result = result
 
         status = self.query_one("#review-status", Static)
         status.remove_class("running")
@@ -1413,10 +1630,6 @@ class ReviewDashboard(App):
         # old permanent "Hive: not consulted" amounted to.
         self.hive_state = ""
         self.hive_workers: list[dict] = []
-        # Repository -> whether the sweep's `lgtm` label exists there. It does
-        # not exist in most repositories, and `gh pr edit --add-label` fails
-        # on a label that was never defined.
-        self.queue_label_exists: dict[str, bool] = {}
         # Keys to re-select after a refresh: a refresh that silently empties
         # the batch you spent a minute building is worse than no refresh.
         self.reselect: set[str] = set()
@@ -1427,6 +1640,8 @@ class ReviewDashboard(App):
         # a batch confirmed while another runs waits behind it — a proper
         # queue, not a pile of concurrent agents mutating the same queue.
         self.landing_queue: list[landing.LandingTask] = []
+        self.source_state = "loading"
+        self.source_message = ""
 
     # ── layout ────────────────────────────────────────────────────────────
 
@@ -1611,10 +1826,32 @@ class ReviewDashboard(App):
 
     @work(thread=True, exclusive=True)
     def load_queue(self) -> None:
-        who = gh("api", "user", "--jq", ".login")
-        self.self_login = who.stdout.strip() if who.returncode == 0 else ""
-        with urllib.request.urlopen(self.filters.url, timeout=60) as response:
-            snapshot = json.load(response)
+        try:
+            who = gh("api", "user", "--jq", ".login")
+            identity_detail = (who.stderr or who.stdout).strip()
+        except (OSError, subprocess.TimeoutExpired) as error:
+            who = None
+            identity_detail = str(error)
+        self.self_login = who.stdout.strip() if who and who.returncode == 0 else ""
+        if self.filters.live:
+            if not self.self_login:
+                self.source_state = "auth-failed"
+                self.source_message = bounded_detail(identity_detail or "GitHub identity is unavailable; sign in and retry")
+                self.all_items = self.snapshot_items = []
+                self.call_from_thread(self.apply_filters)
+                return
+            snapshot = self.load_live_queue(self.filters.live_repository)
+        else:
+            try:
+                with urllib.request.urlopen(self.filters.url, timeout=60) as response:
+                    snapshot = json.load(response)
+                self.source_state = "ready"
+                self.source_message = ""
+            except Exception as error:
+                self.source_state = "error"
+                self.source_message = f"static queue unavailable: {error}"
+                self.call_from_thread(self.apply_filters)
+                return
         self.generated_at = snapshot.get("generated_at", "")
         # Keep the whole snapshot: the action filter is a view over it, so
         # narrowing and widening never needs another fetch.
@@ -1629,6 +1866,81 @@ class ReviewDashboard(App):
             if not (self.self_login and item.get("author") == self.self_login)
         ]
         self.call_from_thread(self.apply_filters)
+
+    def load_live_queue(self, repository: str) -> dict:
+        if not re.fullmatch(r"[^/\s]+/[^/\s]+", repository):
+            self.source_state = "malformed"
+            self.source_message = bounded_detail(f"invalid repository '{repository}'; use owner/repo")
+            return {"items": []}
+        try:
+            result = gh(
+                "api", "--paginate", "--slurp", "--method", "GET",
+                f"repos/{repository}/pulls?state=open&per_page=100",
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            self.source_state = "error"
+            self.source_message = bounded_detail(f"GitHub could not read this repository: {error}")
+            return {"items": []}
+        if result.returncode:
+            detail = bounded_detail((result.stderr or result.stdout).strip())
+            lowered = detail.lower()
+            if ("authentication" in lowered or "login" in lowered
+                    or "permission" in lowered or "forbidden" in lowered
+                    or "not accessible" in lowered):
+                self.source_state = "inaccessible"
+            elif "not found" in lowered or "could not resolve" in lowered:
+                self.source_state = "missing"
+            else:
+                self.source_state = "error"
+            self.source_message = detail or "GitHub could not read this repository"
+            return {"items": []}
+        try:
+            pages = json.loads(result.stdout)
+            if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+                raise ValueError("GitHub returned malformed pull-request pages")
+            pulls = [pull for page in pages for pull in page]
+            if any(not isinstance(pull, dict) for pull in pulls):
+                raise ValueError("GitHub returned a malformed pull-request entry")
+        except (json.JSONDecodeError, ValueError) as error:
+            self.source_state = "malformed"
+            self.source_message = bounded_detail(f"malformed GitHub response: {error}")
+            return {"items": []}
+        try:
+            items = []
+            for index, pull in enumerate(pulls, 1):
+                number = pull.get("number")
+                if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+                    raise ValueError(f"pull {index} has invalid number")
+                if not isinstance(pull.get("title"), str):
+                    raise ValueError(f"pull {index} has invalid title")
+                if "user" in pull:
+                    author_source = pull["user"]
+                else:
+                    author_source = pull.get("author")
+                if author_source is not None and not isinstance(author_source, dict):
+                    raise ValueError(f"pull {index} has invalid author")
+                author = ""
+                if author_source is not None and "login" in author_source:
+                    if not isinstance(author_source["login"], str):
+                        raise ValueError(f"pull {index} has invalid login")
+                    author = author_source["login"]
+                items.append({
+                    "repository": repository,
+                    "number": number,
+                    "recommended_action": "review",
+                    "title": pull["title"],
+                    "author": author,
+                    "mergeable_state": str(pull.get("mergeable", "") or "").lower(),
+                    "check_state": "unknown",
+                    "review_state": str(pull.get("reviewDecision", "") or "").lower(),
+                })
+        except ValueError as error:
+            self.source_state = "malformed"
+            self.source_message = bounded_detail(f"malformed GitHub response: {error}")
+            return {"items": []}
+        self.source_state = "empty" if not items else "ready"
+        self.source_message = ""
+        return {"generated_at": datetime.now(timezone.utc).isoformat(), "items": items}
 
     def apply_filters(self) -> None:
         stops = [
@@ -1730,7 +2042,8 @@ class ReviewDashboard(App):
         )
         self.query_one("#status-bar", Static).update(
             f" Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
-            f"| snapshot {freshness} | as {self.self_login or 'unknown'} "
+            f"| {('source ' + self.source_state + (' — ' + self.source_message if self.source_message else ''))} "
+            f"| {('snapshot ' + freshness) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
             f"| batch: {selected}{stuck}{agents} | Hive: {self.hive_state or 'asking…'}"
         )
 
@@ -1780,11 +2093,6 @@ class ReviewDashboard(App):
             self.merge_rights[stop.repository] = (
                 rights.returncode == 0 and rights.stdout.strip() == "true"
             )
-        if stop.repository not in self.queue_label_exists:
-            probe = gh(
-                "api", f"repos/{stop.repository}/labels/{QUEUE_LABEL}", "--jq", ".name"
-            )
-            self.queue_label_exists[stop.repository] = probe.returncode == 0
         self.call_from_thread(self.render_evidence, stop)
 
     def repo_pulls(self, repo: str) -> list[dict]:
@@ -1938,6 +2246,15 @@ class ReviewDashboard(App):
             f"{reviews_block}\n"
             f"linked   {issues}\n"
             f"labels   {labels}{mechanical_block}"
+            + (
+                "\n\n[b]LAST MUTATION FAILURE[/b]\n"
+                f"command  {escape(stop.failure_command)}\n"
+                f"error    {escape(stop.failure)}\n"
+                f"checks   {escape(stop.failure_checks or 'unknown')}\n"
+                f"branch   {escape(stop.failure_branch or 'unknown')}"
+                if stop.failure
+                else ""
+            )
         )
         self.render_context(stop)
 
@@ -2030,9 +2347,10 @@ class ReviewDashboard(App):
         self.mutate_all(stop, [["gh", *args]], then=then)
 
     def mutate_all(
-        self, stop: Stop, commands: list[list[str]], then=None, on_error=None
+        self, stop: Stop, commands: list[list[str]], then=None, on_error=None,
+        on_cancel=None,
     ) -> None:
-        """Run a sequence of gh mutations behind one typed-number gate.
+        """Run a sequence of mutations behind one typed-number gate.
 
         The sequence is the unit a maintainer decides on, so it is confirmed
         once and then runs to completion off the UI thread. A failed step
@@ -2044,6 +2362,8 @@ class ReviewDashboard(App):
         def finish(confirmed: bool | None) -> None:
             if not confirmed:
                 self.notify("aborted; nothing was run.", severity="warning")
+                if on_cancel:
+                    on_cancel()
                 return
             self.notify(f"running: {' '.join(commands[0][:4])}…")
             self.run_mutations(stop, commands, then, on_error)
@@ -2054,8 +2374,8 @@ class ReviewDashboard(App):
     def run_mutations(
         self, stop: Stop, commands: list[list[str]], then, on_error=None
     ) -> None:
-        """Execute a confirmed sequence off the UI thread. A slow or hung gh
-        call must never freeze the dashboard, so each step is bounded by
+        """Execute a confirmed sequence off the UI thread. A slow or hung
+        mutation must never freeze the dashboard, so each step is bounded by
         MUTATION_TIMEOUT and reports back through call_from_thread."""
         for command in commands:
             try:
@@ -2084,7 +2404,7 @@ class ReviewDashboard(App):
                 }
             )
             if result.returncode != 0:
-                message = result.stderr.strip()[:200] or f"exit {result.returncode}"
+                message = result.stderr.strip() or f"exit {result.returncode}"
                 self.call_from_thread(
                     self.mutation_failed, stop, command, message, on_error
                 )
@@ -2095,7 +2415,15 @@ class ReviewDashboard(App):
         self, stop: Stop, command: list[str], message: str, on_error=None
     ) -> None:
         self.pulls_cache.pop(stop.repository, None)
-        self.notify(f"{' '.join(command[:4])}…: {message}", severity="error")
+        stop.failure = message
+        stop.failure_argv = list(command)
+        stop.failure_command = shlex.join(command)
+        context = live_review_context(stop.live)
+        stop.failure_checks = context["ci"]
+        stop.failure_branch = f"{context['mergeable']}/{context['merge_state']}"
+        stop.selected = True
+        self.refresh_rows()
+        self.notify(f"{shlex.join(command[:4])}…: {message[:200]}", severity="error")
         self.show_evidence(stop)
         # A failure that only prints is a failure the maintainer has to
         # remember. Hand it to whoever asked, so they can offer a way out.
@@ -2186,22 +2514,34 @@ class ReviewDashboard(App):
             if not verdict:
                 return
 
-            def with_body(body: str | None) -> None:
-                if body is None:
+            review_body = ReviewBody(stop, verdict)
+
+            def with_body(value) -> None:
+                if not isinstance(value, tuple) or len(value) != 2:
                     return
-                body = body.strip()
+                body, body_file = value
+                if not isinstance(body, str) or not isinstance(body_file, str) or not body_file:
+                    return
+                if body != review_body.previewed_body or body_file != review_body.body_file:
+                    return
+                try:
+                    with open(body_file, encoding="utf-8") as source:
+                        if source.read() != body:
+                            return
+                except (OSError, UnicodeError):
+                    return
                 if not body and verdict != "approve":
                     self.notify(
                         f"{verdict} needs a reason; nothing was submitted.",
                         severity="warning",
                     )
                     return
-                os.makedirs(os.path.dirname(TRACE_PATH), exist_ok=True)
-                body_file = os.path.join(
-                    os.path.dirname(TRACE_PATH), f"review-{stop.number}.md"
-                )
-                with open(body_file, "w", encoding="utf-8") as sink:
-                    sink.write((body or "Reviewed.") + "\n")
+                def clean_body_file() -> None:
+                    try:
+                        os.unlink(body_file)
+                    except FileNotFoundError:
+                        pass
+
                 self.mutate_all(
                     stop,
                     [[
@@ -2209,9 +2549,12 @@ class ReviewDashboard(App):
                         "--repo", stop.repository, f"--{verdict}",
                         "--body-file", body_file,
                     ]],
+                    then=clean_body_file,
+                    on_error=lambda _message: clean_body_file(),
+                    on_cancel=clean_body_file,
                 )
 
-            self.push_screen(ReviewBody(verdict), with_body)
+            self.push_screen(review_body, with_body)
 
         self.push_screen(ReviewVerdict(), with_verdict)
 
@@ -2390,38 +2733,33 @@ class ReviewDashboard(App):
         return True
 
     def _queue_automerge(self, stop: Stop, then=None) -> None:
-        """Queue for Hive auto-merge: post the exact approval the governor
-        sweep re-verifies, then add the label it scans for. The sweep enforces
-        the self-merge ban, requires green CI, and squash-merges.
+        """Ask Hive to queue this pull request through its governor contract.
 
-        The label does not exist in most repositories, and adding one that was
-        never defined fails — which used to leave the pull request formally
-        approved for an auto-merge that could never be picked up, because the
-        approval had already been submitted by then. The label is created
-        first when it is missing, so the sequence cannot end half-applied, and
-        the whole thing is one decision behind one gate.
+        The authenticated endpoint verifies merger standing and the self-merge
+        ban, then creates an exact-head approval as the Hive App and applies
+        the queue label. A review submitted by this human process cannot pass
+        Hive's App-authorship check (#247).
         """
-        body = f"Approved by @{self.self_login} for Hive auto-merge on green CI."
-        commands: list[list[str]] = []
-        if not self.queue_label_exists.get(stop.repository, True):
-            commands.append([
-                "gh", "label", "create", QUEUE_LABEL,
-                "--repo", stop.repository,
-                "--color", QUEUE_LABEL_COLOUR,
-                "--description", QUEUE_LABEL_DESCRIPTION,
-            ])
-        commands.append([
-            "gh", "pr", "review", str(stop.number),
-            "--repo", stop.repository, "--approve", "--body", body,
-        ])
-        commands.append([
-            "gh", "pr", "edit", str(stop.number),
-            "--repo", stop.repository, "--add-label", QUEUE_LABEL,
-        ])
+        base = hive_api_base()
+        if not base:
+            self.notify("Hive is unreachable; nothing was queued.", severity="warning")
+            return
+        owner, repository = stop.repository.split("/", 1)
+        endpoint = (
+            f"{base}/api/prs/{owner}/{repository}/{stop.number}/queue-automerge"
+        )
+        command = [
+            "sh",
+            "-c",
+            'exec curl --fail-with-body --location --silent --show-error '
+            '--request POST --header '
+            '"Authorization: Bearer ${GH_TOKEN:?GH_TOKEN is required}" "$1" >&2',
+            "bluefin-review-hive-queue",
+            endpoint,
+        ]
 
         def queued() -> None:
             stop.failure = ""
-            self.queue_label_exists[stop.repository] = True
             self.refresh_rows()
             if then:
                 then()
@@ -2434,7 +2772,7 @@ class ReviewDashboard(App):
             stop.selected = True
             self.refresh_rows()
 
-        self.mutate_all(stop, commands, then=queued, on_error=failed)
+        self.mutate_all(stop, [command], then=queued, on_error=failed)
 
     def action_merge(self) -> None:
         batch = [s for s in self.stops if s.selected]
@@ -2630,6 +2968,10 @@ class ReviewDashboard(App):
 
         def landed() -> None:
             stop.failure = ""
+            stop.failure_command = ""
+            stop.failure_argv = []
+            stop.failure_checks = ""
+            stop.failure_branch = ""
             stop.selected = False
             self.refresh_rows()
             if then:
@@ -2666,9 +3008,12 @@ class ReviewDashboard(App):
         if choice == "queue":
             self._queue_automerge(stop, then=then)
             return
-        if choice == "browser":
-            gh("pr", "view", str(stop.number), "--repo", stop.repository, "--web")
-        # "skip", esc, and the browser hand-off all continue the batch with
+        if choice == "handoff":
+            self.notify(
+                f"{stop.key}: exceptional manual conflict handoff; no bypass offered.",
+                severity="warning",
+            )
+        # "skip", esc, and the exceptional handoff all continue the batch with
         # the stop still selected and still marked failed.
         if then:
             then()
@@ -2799,11 +3144,13 @@ def main() -> None:
         default="",
         help="only this repository (short name or owner/repo)",
     )
+    parser.add_argument("--live-repo", default="", help="read open pull requests from owner/repo")
     parser.add_argument("--url", default=QUEUE_URL, help="read the queue from elsewhere")
     args = parser.parse_args()
     filters = QueueFilters(
         action="" if args.all else args.action,
         repository=args.repo,
+        live_repository=args.live_repo,
         url=args.url,
     )
     ReviewDashboard(filters).run()

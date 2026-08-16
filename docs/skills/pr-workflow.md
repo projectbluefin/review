@@ -1,7 +1,7 @@
 ---
 name: pr-workflow
-version: "1.9"
-last_updated: 2026-08-09
+version: "1.10"
+last_updated: 2026-08-16
 id: pr-workflow
 one_line_purpose: Open review pull requests that merge cleanly.
 entry_point: docs/skills/pr-workflow.md
@@ -102,7 +102,7 @@ machine out of comments, slash commands, or local scripts.
 
 Alongside those seven, this repository runs exactly three local automation
 labels, each owned by a named mechanism and applied by it alone: `lgtm`
-(a maintainer's opt-in to Hive's auto-merge sweep — see
+(applied by Hive's authenticated queue endpoint after a maintainer opts in — see
 [`review-dashboard.md`](review-dashboard.md)), `hive-protocol-change`
 (`.github/workflows/hive-pin-gate.yml`, when a Hive pin bump touches a consumed
 contributor runtime file), and `dependencies` (Renovate, per `renovate.json`).

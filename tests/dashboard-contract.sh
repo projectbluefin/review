@@ -108,24 +108,18 @@ grep -q '\[b\]l\[/b\]' "$tui" &&
 grep -q '\[b\]p\[/b\]' "$tui" &&
   fail "the acting key line must not advertise priority mutation"
 
-# Queueing goes through Hive's governor sweep: the exact approval body it
-# re-verifies plus the lgtm label, and the only review submission is that
-# approval inside the gated _queue_automerge helper.
-grep -q 'for Hive auto-merge on green CI.' "$tui" ||
-  fail "queueing must post the exact approval the sweep re-verifies"
-grep -q '"--add-label", QUEUE_LABEL' "$tui" ||
-  fail "queueing must add the label the sweep scans for"
+# Queueing goes through Hive's authenticated mutation endpoint. Hive owns the
+# App-authored exact-head approval and queue label; a human gh review cannot
+# satisfy the governor's authorship contract (#247).
+grep -q '/api/prs/{owner}/{repository}/{stop.number}/queue-automerge' "$tui" ||
+  fail "queueing must call Hive's queue-automerge endpoint"
 grep -q 'QUEUE_LABEL = "lgtm"' "$tui" ||
   fail "the sweep's label must still be lgtm"
-# The label does not exist in every repository, and adding one that was never
-# defined fails after the approval has already been submitted (#141).
-grep -q '"gh", "label", "create", QUEUE_LABEL' "$tui" ||
-  fail "a missing queue label must be created, not discovered mid-sequence"
-# Two review-submission sites, and both gated: the queue approval that arms
-# the sweep, and the maintainer's own review — approve, request changes, or
-# comment — which is neither a merge nor an automation opt-in.
-[[ "$(grep -c '"pr", "review"' "$tui")" -eq 2 ]] ||
-  fail "expected two review sites: the queue approval and the maintainer review"
+queue_body="$(sed -n '/def _queue_automerge/,/def action_merge/p' "$tui")"
+grep -q '"gh", "pr", "review"' <<<"$queue_body" &&
+  fail "queueing must never submit a human-authored approval"
+# The maintainer's ordinary review path remains separate: approve, request
+# changes, or comment, and it neither merges nor arms automation.
 leave_review="$(sed -n '/def leave_review/,/def action_leave_review/p' "$tui")"
 grep -q 'self.mutate_all' <<<"$leave_review" ||
   fail "leaving a review must go through the typed-number gate"
