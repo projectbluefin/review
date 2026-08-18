@@ -89,6 +89,17 @@ or any disagreement also produces `STALE` and cannot produce a clean card.
 adapters. `ReviewStateView` owns the lifecycle states `READY`, `RUNNING`,
 `STALE`, and `CANCELLED`.
 
+Terminal-normalized Shift-L may arrive as lowercase key identity plus uppercase
+character. The dashboard dispatches that event to ordinary review and keeps
+lowercase `l` pane movement on the active `Screen` focus API. Review and
+comment editor shortcuts are priority bindings, with literal hints and buttons
+that call the same actions. Review submission remains exact-body preview then
+the typed-number gate; comments use the same preview-before-gate sequence.
+Terminal dispatch failures become bounded visible errors instead of ending the
+dashboard. `e` opens bounded decision evidence; `r` opens the
+explicitly secondary raw backend transcript. `[u]` updates only clean branches;
+conflicts direct the maintainer to manual resolution before a gate.
+
 ## Core Process
 
 1. **Every mutation goes through `mutate_all()`.** It shows the exact command

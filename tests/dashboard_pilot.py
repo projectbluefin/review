@@ -25,6 +25,8 @@ import tempfile
 from types import SimpleNamespace
 from pathlib import Path
 
+from textual.events import Key
+
 TUI_DIR = Path(
     os.environ.get(
         "BLUEFIN_REVIEW_TUI_DIR",
@@ -568,8 +570,8 @@ async def main() -> int:
             )
         binding_keys = {binding.key for binding in tui.ReviewDashboard.BINDINGS}
         check(
-            "l" in binding_keys and "p" not in binding_keys,
-            f"pane navigation must be present and priority must be absent, got {sorted(binding_keys)}",
+            "l" not in binding_keys and "p" not in binding_keys,
+            f"terminal-dispatched pane navigation must not collide with a binding, got {sorted(binding_keys)}",
         )
         review = [b for b in tui.ReviewDashboard.BINDINGS if b.action == "review"]
         check(len(review) == 1, f"exactly one binding must run a review, got {len(review)}")
@@ -655,6 +657,40 @@ async def main() -> int:
         check(app.screen.query_one(tui.Input).value == "q", "q must type in the comment input")
         await pilot.press("escape")
         await pilot.pause()
+        app.action_comment()
+        await pilot.pause()
+        app.screen.query_one(tui.Input).value = "keyboard comment"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.CommentPreview),
+            "Ctrl-s from the focused comment editor must preview the exact payload",
+        )
+        check("keyboard comment" in app.screen.body, "comment preview must show verbatim Markdown")
+        await pilot.click("#comment-preview-submit")
+        await pilot.pause()
+        check(isinstance(app.screen, tui.ConfirmMutation), "comment preview submit must reach the existing gate")
+        await pilot.press("escape")
+        await pilot.pause()
+        app.action_comment()
+        await pilot.pause()
+        app.screen.query_one(tui.Input).value = "button comment"
+        await pilot.click("#comment-submit")
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.CommentPreview),
+            "comment submit button must preview the exact payload",
+        )
+        check("button comment" in app.screen.body, "button comment preview must preserve body")
+        await pilot.click("#comment-preview-submit")
+        await pilot.pause()
+        check(isinstance(app.screen, tui.ConfirmMutation), "comment preview button must reach the gate")
+        check(
+            "pr comment" not in gh_log.read_text(),
+            "comment controls must not mutate before confirmation",
+        )
+        await pilot.press("escape")
+        await pilot.pause()
         await pilot.press("/")
         await pilot.press("q")
         await pilot.pause()
@@ -700,14 +736,21 @@ async def main() -> int:
             check(screen.finished, f"review screen never finished (exit {exit_code})")
             status = screen.query_one("#review-status", tui.Static)
             card = screen.query_one("#review-card", tui.Static)
+            evidence = screen.query_one("#review-evidence", tui.Static)
             raw = screen.query_one("#review-log", tui.RichLog)
-            check("hidden" in raw.classes, "completed raw evidence must start collapsed")
+            check("hidden" in evidence.classes, "completed decision evidence must start collapsed")
+            check("hidden" in raw.classes, "completed raw transcript must start collapsed")
             await pilot.press("e")
             await pilot.pause()
-            check("hidden" not in raw.classes, "[e] must reveal the raw review evidence")
-            await pilot.press("e")
+            check(
+                "hidden" not in evidence.classes
+                and "REVIEW EVIDENCE" in str(evidence.render())
+                and "raw backend transcript" in str(evidence.render()),
+                "[e] must reveal bounded decision evidence and name raw transcript as secondary",
+            )
+            await pilot.press("r")
             await pilot.pause()
-            check("hidden" in raw.classes, "[e] must return to the decision card")
+            check("hidden" not in raw.classes, "[r] must reveal the secondary raw transcript")
             await pilot.press("q")
             await pilot.pause()
             check(app.screen is root_screen, "q must close ReviewScreen")
@@ -1474,43 +1517,38 @@ async def main() -> int:
                 await pilot.pause()
                 await pilot.press({"approve": "1", "request-changes": "2", "comment": "3"}[verdict])
                 await pilot.pause()
-                await pilot.press("ctrl+g")
+                hints = str(app.screen.query_one("#review-body-shortcuts", tui.Static).render())
+                check(
+                    "[ctrl-g]" in hints and "[ctrl-s]" in hints,
+                    "review body shortcut hints must render literally",
+                )
+                await pilot.click("#review-body-generate")
                 await pilot.pause()
                 check(app.screen.query_one("#review-body-editor", tui.TextArea).text == "generated blocker",
                       f"{verdict} generation must use the drafting capability")
-                await pilot.press("ctrl+e")
+                await pilot.click("#review-body-edit")
                 editor = app.screen.query_one("#review-body-editor", tui.TextArea)
+                check(app.focused is editor, "edit button must focus the review body editor")
+                editor.text = "clear me"
+                await pilot.click("#review-body-clear")
+                check(editor.text == "", "clear button must empty the review body editor")
                 editor.text = exact_markdown
-                await pilot.press("ctrl+p")
+                before_preview = gh_log.read_text()
+                await pilot.click("#review-body-preview")
                 await pilot.pause()
                 check(isinstance(app.screen, tui.ReviewBodyPreview), "preview must show before mutation")
                 check(exact_markdown in app.screen.body, "preview must preserve exact Markdown")
-                await pilot.press("escape")
+                check(
+                    gh_log.read_text() == before_preview,
+                    "preview must not mutate before the typed-number gate",
+                )
+                await pilot.click("#review-preview-submit")
                 await pilot.pause()
-                check(isinstance(app.screen, tui.ReviewBody), "preview cancel must return to editor")
-                app.screen.action_clear()
-                check(app.screen.query_one("#review-body-editor", tui.TextArea).text == "",
-                      "clear must empty the editor")
-                app.screen.query_one("#review-body-editor", tui.TextArea).text = exact_markdown
-                await pilot.press("ctrl+s")
-                await pilot.pause()
-                check(isinstance(app.screen, tui.ReviewBody),
-                      "editing after preview must refuse submission")
-                check(any("preview" in notification.message.lower()
-                          for notification in app._notifications),
-                      "editing after preview must explain that re-preview is required")
-                await pilot.press("ctrl+p")
-                await pilot.pause()
-                check(isinstance(app.screen, tui.ReviewBodyPreview),
-                      "the changed body must be previewed again")
-                await pilot.press("escape")
-                await pilot.pause()
-                await pilot.press("ctrl+s")
                 for _ in range(20):
                     if isinstance(app.screen, tui.ConfirmMutation):
                         break
                     await pilot.pause(0.05)
-                check(isinstance(app.screen, tui.ConfirmMutation), "submit must use the existing gate")
+                check(isinstance(app.screen, tui.ConfirmMutation), "preview submit must use the existing gate")
                 command = app.screen.commands[0]
                 check(command[:3] == ["gh", "pr", "review"], "submit must use gh pr review")
                 body_path = Path(command[command.index("--body-file") + 1])
@@ -2007,6 +2045,34 @@ async def main() -> int:
             bool(app.query("#keys-reading")) and bool(app.query("#keys-acting")),
             "the key map must be two lines at the bottom",
         )
+        # A normal terminal may report Shift-L as lower-case key identity with
+        # an upper-case character. Drive that real event shape rather than
+        # Pilot's synthetic ``press("L")`` event (#259).
+        app.post_message(Key("l", "L"))
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.ReviewVerdict),
+            "terminal-normalized Shift-L must open the ordinary review verdict",
+        )
+        if isinstance(app.screen, tui.ReviewVerdict):
+            await pilot.press("escape")
+        app.query_one("#queue", tui.ListView).focus()
+        app.post_message(Key("l", "l"))
+        await pilot.pause()
+        check(
+            app.focused is app.query_one("#steer", tui.Input),
+            "lowercase l must move focus through Textual's screen API",
+        )
+        app.query_one("#queue", tui.ListView).focus()
+        app.action_pane_next = lambda: (_ for _ in ()).throw(RuntimeError("injected pane failure"))
+        app.post_message(Key("l", "l"))
+        await pilot.pause()
+        check(
+            app.screen is not None
+            and any("injected pane failure" in notification.message for notification in app._notifications),
+            "terminal dispatch failures must be bounded notifications without ending the dashboard",
+        )
+        app.query_one("#queue", tui.ListView).focus()
         # Direct merge must refuse snapshot-known red and pending checks before
         # presenting a confirmation gate or attempting the GitHub mutation.
         for known_state, live_checks in (
@@ -2088,6 +2154,36 @@ async def main() -> int:
             if isinstance(app.screen, tui.ConfirmMutation):
                 await pilot.press("escape")
                 await pilot.pause()
+    gh_log.write_text("")
+
+    # A conflicted branch cannot be brought current by GitHub's update API;
+    # show the maintainer the manual-resolution path instead of opening a
+    # gate that is certain to fail (#261).
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        stop = app.stops[0]
+        stop.mergeable_state = "dirty"
+        stop.live = {"mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY"}
+        gh_log.write_text("")
+        await pilot.press("u")
+        await pilot.pause()
+        check(
+            not isinstance(app.screen, tui.ConfirmMutation),
+            "conflicted branches must not offer the update-branch gate",
+        )
+        check(
+            "manual" in " ".join(notification.message.lower() for notification in app._notifications),
+            "conflicted branches must direct maintainers to manual resolution",
+        )
+        check(
+            "pr update-branch" not in gh_log.read_text(),
+            "conflicted branches must not invoke GitHub's update API",
+        )
     gh_log.write_text("")
 
     # ── MECHANICAL is live evidence, not a dependency-shaped title ───────
