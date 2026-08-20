@@ -835,43 +835,45 @@ reset_logs
 default_hive_backup="$scratch/contributor.default.env"
 cp "$home/.config/hive/contributor.env" "$default_hive_backup"
 rm "$home/.config/hive/contributor.env"
-cat >"$home/.config/hive/contributor.review.env" <<'EOF'
+# The launcher derives the registration name from the checkout's directory
+# basename (git rev-parse --show-toplevel), so this scenario must too: a
+# worktree named anything but 'review' selects contributor.<basename>.env.
+repo_registration="${repo_root##*/}"
+cat >"$home/.config/hive/contributor.${repo_registration}.env" <<'EOF'
 HIVE_REGISTRATION_TOKEN=named-secret-token
 HIVE_HUB=wss://named-hive.invalid/contribute
 CONTRIBUTOR_ID=test-contributor-named
 CONTRIBUTOR_USERNAME=test-user
 AGENT_BACKEND=goose
 EOF
-chmod 600 "$home/.config/hive/contributor.review.env"
-named_hive_hash="$(sha256sum "$home/.config/hive/contributor.review.env")"
-named_hive_mode="$(stat -c '%a' "$home/.config/hive/contributor.review.env")"
-named_hive_uid="$(stat -c '%u' "$home/.config/hive/contributor.review.env")"
-named_hive_gid="$(stat -c '%g' "$home/.config/hive/contributor.review.env")"
-# The tests run with the review repository as cwd, so the repo-derived
-# registration name is 'review'.
+chmod 600 "$home/.config/hive/contributor.${repo_registration}.env"
+named_hive_hash="$(sha256sum "$home/.config/hive/contributor.${repo_registration}.env")"
+named_hive_mode="$(stat -c '%a' "$home/.config/hive/contributor.${repo_registration}.env")"
+named_hive_uid="$(stat -c '%u' "$home/.config/hive/contributor.${repo_registration}.env")"
+named_hive_gid="$(stat -c '%g' "$home/.config/hive/contributor.${repo_registration}.env")"
 run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test
-assert_file_contains "--volume ${home}/.config/hive/contributor.review.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
+assert_file_contains "--volume ${home}/.config/hive/contributor.${repo_registration}.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
 assert_file_not_exists "$home/.config/hive/contributor.env"
-assert_eq "$(sha256sum "$home/.config/hive/contributor.review.env")" "$named_hive_hash" "selected Hive registration content changed during launch construction"
-assert_eq "$(stat -c '%a' "$home/.config/hive/contributor.review.env")" "$named_hive_mode" "selected Hive registration mode changed during launch construction"
-assert_eq "$(stat -c '%u' "$home/.config/hive/contributor.review.env")" "$named_hive_uid" "selected Hive registration uid changed during launch construction"
-assert_eq "$(stat -c '%g' "$home/.config/hive/contributor.review.env")" "$named_hive_gid" "selected Hive registration gid changed during launch construction"
+assert_eq "$(sha256sum "$home/.config/hive/contributor.${repo_registration}.env")" "$named_hive_hash" "selected Hive registration content changed during launch construction"
+assert_eq "$(stat -c '%a' "$home/.config/hive/contributor.${repo_registration}.env")" "$named_hive_mode" "selected Hive registration mode changed during launch construction"
+assert_eq "$(stat -c '%u' "$home/.config/hive/contributor.${repo_registration}.env")" "$named_hive_uid" "selected Hive registration uid changed during launch construction"
+assert_eq "$(stat -c '%g' "$home/.config/hive/contributor.${repo_registration}.env")" "$named_hive_gid" "selected Hive registration gid changed during launch construction"
 # The named launch must not require, create, or mutate the default (#143).
 assert_file_not_contains "--volume ${home}/.config/hive:/home/dev/.config/hive" "$runner_log"
-assert_contains "hive: wss://named-hive.invalid/contribute (registration 'review')" "$OUT"
+assert_contains "hive: wss://named-hive.invalid/contribute (registration '${repo_registration}')" "$OUT"
 assert_not_contains "super-secret-registration-token" "$OUT"
 assert_not_contains "named-secret-token" "$OUT"
 assert_file_not_contains "named-secret-token" "$runner_log"
 reset_logs
 run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test REVIEW_CONTAINER_NAME=review-container-2
 assert_file_contains "--replace --name review-container-2 " "$runner_log"
-assert_file_contains "--volume ${home}/.config/hive/contributor.review.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
+assert_file_contains "--volume ${home}/.config/hive/contributor.${repo_registration}.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
 assert_file_not_exists "$home/.config/hive/contributor.env"
-assert_eq "$(sha256sum "$home/.config/hive/contributor.review.env")" "$named_hive_hash" "selected Hive registration content changed during concurrent launch construction"
-assert_eq "$(stat -c '%a' "$home/.config/hive/contributor.review.env")" "$named_hive_mode" "selected Hive registration mode changed during concurrent launch construction"
-assert_eq "$(stat -c '%u' "$home/.config/hive/contributor.review.env")" "$named_hive_uid" "selected Hive registration uid changed during concurrent launch construction"
-assert_eq "$(stat -c '%g' "$home/.config/hive/contributor.review.env")" "$named_hive_gid" "selected Hive registration gid changed during concurrent launch construction"
-rm -f "$home/.config/hive/contributor.review.env"
+assert_eq "$(sha256sum "$home/.config/hive/contributor.${repo_registration}.env")" "$named_hive_hash" "selected Hive registration content changed during concurrent launch construction"
+assert_eq "$(stat -c '%a' "$home/.config/hive/contributor.${repo_registration}.env")" "$named_hive_mode" "selected Hive registration mode changed during concurrent launch construction"
+assert_eq "$(stat -c '%u' "$home/.config/hive/contributor.${repo_registration}.env")" "$named_hive_uid" "selected Hive registration uid changed during concurrent launch construction"
+assert_eq "$(stat -c '%g' "$home/.config/hive/contributor.${repo_registration}.env")" "$named_hive_gid" "selected Hive registration gid changed during concurrent launch construction"
+rm -f "$home/.config/hive/contributor.${repo_registration}.env"
 cp "$default_hive_backup" "$home/.config/hive/contributor.env"
 
 begin "hive selection: no repo registration falls back to the default and says so"

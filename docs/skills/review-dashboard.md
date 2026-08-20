@@ -300,7 +300,10 @@ round `$secondary` borders with titles) over a title bar. Each batch header
 is a full-width state bar (`batch_bar_style`: running is `$text-primary on
 $primary-muted`, queued `$text-warning on $warning-muted`, exited 0
 `$text-success on $success-muted`, anything else `$text-error on
-$error-muted`), and each pull request carries its state three ways at once:
+$error-muted`). A running batch's header also names its heartbeat — the
+age of the status file's last append (`last report 3m ago`) — so a healthy
+long wait is distinguishable from a dead agent (#291), and each pull
+request carries its state three ways at once:
 the printed word, a shape-distinct glyph, and a colour from
 `LANDING_STATE_STYLES` — `◌` waiting, `◐` diagnosing/fixing, `◔`
 waiting-ci, `▶` merging, `◆` awaiting-stable, `✓` merged, `■` blocked, `✗`
@@ -316,7 +319,13 @@ the host, and `restore_landing_marks` folds the newest persisted outcome
 (`landing.persisted_events`, oldest file first) back onto matching rows
 whenever the queue (re)builds them — a relaunch shows the failure marking
 again instead of reverting to un-reviewed (#281). Only the marking is
-restored; rebuilding a batch selection stays the maintainer's. Each task id
+restored; rebuilding a batch selection stays the maintainer's. A manual
+success — a re-queue, a direct merge — clears the row in memory, so it
+also writes a superseding event (`landing.record_event`, appended to
+`manual.jsonl` with a fresh mtime, which wins the fold) or the next
+refresh would fold the stale failure back onto the row (#290). The record
+is durable, so it is bounded: batch files older than seven days are pruned
+when the record is read. Each task id
 carries the instance name (`BLUEFIN_REVIEW_INSTANCE`, set by the launcher
 from the container name) because named dashboards share the one state
 directory — a bare one-second stamp would let two of them overwrite each
@@ -351,7 +360,11 @@ On a merge-queue repository, `gh pr merge` answering "accepted by merge
 queue" means the merge completes later: poll `gh pr view` until MERGED and
 verify the merge commit's push-event publish run; never `gh run watch` a
 merge_group gate run post-merge (#291). Every wait-state note names its
-target and timeout.
+target and timeout. GitHub computes mergeability asynchronously, so a
+`mergeable: UNKNOWN` answer is a cache-warming placeholder: the brief has
+the agent re-query with backoff for up to a minute and act only on the
+computed state — `blocked` on UNKNOWN alone reports nothing a maintainer
+can act on (#294).
 - **The completed card reuses those paths.** `L`, `a`, `m`, and `u` return to
   the queue's existing handlers, so permissions, live-head checks, exact
   commands, and typed-number confirmation remain the authority boundary.

@@ -968,6 +968,10 @@ async def main() -> int:
             rows = str(rows_widget.render())
             for expected in (
                 f"batch {colour_task.task_id} — running",
+                # A running batch names its heartbeat: the age of the last
+                # report, so a stale wait is visible next to a healthy one
+                # (#291).
+                "last report",
                 "✓ merged",
                 "✗ failed",
                 "◆ awaiting-stable",
@@ -1122,8 +1126,12 @@ async def main() -> int:
         '{"pr": "projectbluefin/bluefinctl#31", "state": "failed", "note": "publish workflow red"}\n'
         '{"state": "done", "note": "one batch, one failure"}\n'
     )
-    os.utime(older, (1000, 1000))
-    os.utime(newer, (2000, 2000))
+    # Fold order is mtime order, and the record is bounded to the retention
+    # window (#290): recent but distinctly ordered, or the prune pass would
+    # collect these fixtures as expired.
+    now = time.time()
+    os.utime(older, (now - 200, now - 200))
+    os.utime(newer, (now - 100, now - 100))
     app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -1151,6 +1159,50 @@ async def main() -> int:
             "DID NOT MERGE" in row,
             f"the restored failure must render on the row, got {row!r}",
         )
+    for stale in landings_dir.iterdir():
+        stale.unlink()
+    gh_log.write_text("")
+
+    # ── a manual success supersedes the restored failure (#290) ─────────
+    # The restored mark lives in the record, so only the record can retire
+    # it: clearing the row in memory lasted exactly one refresh. A success
+    # path writes a superseding event, and the next restore leaves the row
+    # clean. An ancient record is pruned rather than restored — the
+    # directory is durable, so it must also be bounded.
+    older.write_text(
+        '{"pr": "projectbluefin/bluefinctl#31", "state": "failed", "note": "publish workflow red"}\n'
+    )
+    os.utime(older, (now - 100, now - 100))
+    restored = tui.landing.persisted_events()
+    check(
+        restored["projectbluefin/bluefinctl#31"]["state"] == "failed",
+        f"the failure must be in the record, got {restored!r}",
+    )
+    tui.landing.record_event(
+        "projectbluefin/bluefinctl#31", "merged", "merged directly by @tester"
+    )
+    restored = tui.landing.persisted_events()
+    check(
+        restored["projectbluefin/bluefinctl#31"]["state"] == "merged",
+        "a manual success must supersede the persisted failure, "
+        f"got {restored['projectbluefin/bluefinctl#31']!r}",
+    )
+    ancient = landings_dir / "20260103-000000-review-queue.jsonl"
+    ancient.write_text(
+        '{"pr": "projectbluefin/bluefinctl#31", "state": "failed", "note": "ancient"}\n'
+    )
+    expired = now - tui.landing.LANDING_RETENTION_SECONDS - 60
+    os.utime(ancient, (expired, expired))
+    restored = tui.landing.persisted_events()
+    check(
+        not ancient.exists(),
+        "an expired record must be pruned, not kept",
+    )
+    check(
+        restored["projectbluefin/bluefinctl#31"]["state"] == "merged",
+        "a pruned record must not restore, "
+        f"got {restored['projectbluefin/bluefinctl#31']!r}",
+    )
     for stale in landings_dir.iterdir():
         stale.unlink()
     gh_log.write_text("")
