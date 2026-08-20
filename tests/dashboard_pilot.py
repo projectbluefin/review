@@ -813,6 +813,7 @@ async def main() -> int:
         'echo "agent log line"\n',
     )
     os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{landing_stub} @PROMPT"
+    os.environ["BLUEFIN_REVIEW_INSTANCE"] = "review-queue-pilot"
     app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -866,6 +867,10 @@ async def main() -> int:
             )
             prompt_text = Path(task.prompt_path).read_text()
             check(
+                task.task_id.endswith("-review-queue-pilot"),
+                f"the batch id must name its instance, got {task.task_id!r}",
+            )
+            check(
                 all(stop.key in prompt_text for stop in task.stops),
                 "the agent brief must name every selected pull request",
             )
@@ -913,6 +918,87 @@ async def main() -> int:
             await pilot.press("q")
             await pilot.pause()
             check(not isinstance(app.screen, tui.LandingScreen), "q must return from LandingScreen")
+    del os.environ["BLUEFIN_REVIEW_INSTANCE"]
+    gh_log.write_text("")
+
+    # ── a relaunched dashboard restores a previous batch's failure ──────
+    # The landings directory persists on the host; the rows must show what
+    # it records at startup, or the failure markings are still lost on every
+    # relaunch (#281). A newer batch's verdict wins over an older one.
+    landings_dir = workdir / "state" / "bluefin-review" / "landings"
+    landings_dir.mkdir(parents=True, exist_ok=True)
+    for stale in landings_dir.iterdir():
+        stale.unlink()
+    older = landings_dir / "20260101-000000-review-queue.jsonl"
+    older.write_text(
+        '{"pr": "projectbluefin/bluefinctl#31", "state": "failed", "note": "stale first attempt"}\n'
+        '{"state": "done", "note": "first batch"}\n'
+    )
+    newer = landings_dir / "20260102-000000-review-queue.jsonl"
+    newer.write_text(
+        '{"pr": "projectbluefin/bluefinctl#31", "state": "failed", "note": "publish workflow red"}\n'
+        '{"state": "done", "note": "one batch, one failure"}\n'
+    )
+    os.utime(older, (1000, 1000))
+    os.utime(newer, (2000, 2000))
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        marked = {stop.key: stop for stop in app.stops}
+        check(
+            marked["projectbluefin/bluefinctl#31"].failure
+            == "failed: publish workflow red",
+            "a relaunch must restore the row's failure marking from the "
+            f"newest record, got {marked['projectbluefin/bluefinctl#31'].failure!r}",
+        )
+        check(
+            marked["projectbluefin/common#7"].failure == "",
+            "an unrelated row must stay unmarked",
+        )
+        check(
+            not marked["projectbluefin/bluefinctl#31"].selected,
+            "restoring a marking must not rebuild the batch selection",
+        )
+        row = app.row_markup(marked["projectbluefin/bluefinctl#31"])
+        check(
+            "DID NOT MERGE" in row,
+            f"the restored failure must render on the row, got {row!r}",
+        )
+    for stale in landings_dir.iterdir():
+        stale.unlink()
+    gh_log.write_text("")
+
+    # ── batch ids never collide, even inside one second ──────────────────
+    # Two named dashboards share one state directory, so the instance name
+    # qualifies the id; two batches from one dashboard in the same second
+    # get a suffix. Either collision would overwrite a batch's files.
+    os.environ["BLUEFIN_REVIEW_INSTANCE"] = "pilot-instance"
+    first_task = tui.landing.new_task(
+        [tui.Stop("o/r", 1, "review", "one")], "tester"
+    )
+    second_task = tui.landing.new_task(
+        [tui.Stop("o/r", 2, "review", "two")], "tester"
+    )
+    del os.environ["BLUEFIN_REVIEW_INSTANCE"]
+    check(
+        first_task.task_id.endswith("-pilot-instance"),
+        f"the batch id must name its instance, got {first_task.task_id!r}",
+    )
+    check(
+        first_task.task_id != second_task.task_id,
+        f"same-second batches must not share an id, got {first_task.task_id!r} twice",
+    )
+    check(
+        first_task.prompt_path != second_task.prompt_path
+        and first_task.status_path != second_task.status_path,
+        "same-second batches must not share prompt or status files",
+    )
+    for stale in landings_dir.iterdir():
+        stale.unlink()
     gh_log.write_text("")
 
     # ── aborting the plan gate dispatches nothing ────────────────────────

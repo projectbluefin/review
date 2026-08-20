@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import time
 from dataclasses import dataclass, field
@@ -85,8 +86,22 @@ class LandingTask:
 
 def new_task(stops: list, login: str) -> LandingTask:
     """A task with its prompt, status, and log paths laid out."""
-    task_id = time.strftime("%Y%m%d-%H%M%S")
     directory = landing_state_dir()
+    # A bare one-second stamp collides for two named dashboards sharing the
+    # one state directory — REVIEW_QUEUE_NAME exists precisely so both can
+    # run at once — so the instance name rides in the id, which also makes
+    # the record attributable. The suffix covers same-second batches from a
+    # single dashboard.
+    instance = re.sub(
+        r"[^A-Za-z0-9_.-]+", "-", os.environ.get("BLUEFIN_REVIEW_INSTANCE", "")
+    ).strip("-.")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    base = f"{stamp}-{instance}" if instance else stamp
+    task_id = base
+    suffix = 2
+    while os.path.exists(os.path.join(directory, f"{task_id}.prompt.md")):
+        task_id = f"{base}-{suffix}"
+        suffix += 1
     task = LandingTask(
         task_id=task_id,
         stops=list(stops),
@@ -198,4 +213,27 @@ def parse_status(path: str) -> dict[str, dict]:
                 latest[str(event.get("pr", ""))] = event
     except OSError:
         pass
+    return latest
+
+
+def persisted_events(directory: str | None = None) -> dict[str, dict]:
+    """The latest event per pull request across every recorded batch, so a
+    relaunched dashboard can fold a previous run's outcomes back onto the
+    rows (#281). Files fold oldest first by mtime, so newer batches win;
+    the task-level "" key is not a pull request and is dropped."""
+    root = directory or landing_state_dir()
+    try:
+        paths = [
+            os.path.join(root, name)
+            for name in os.listdir(root)
+            if name.endswith(".jsonl")
+        ]
+        paths.sort(key=lambda path: (os.path.getmtime(path), path))
+    except OSError:
+        return {}
+    latest: dict[str, dict] = {}
+    for path in paths:
+        for key, event in parse_status(path).items():
+            if key:
+                latest[key] = event
     return latest

@@ -1,7 +1,7 @@
 ---
 name: launcher
-version: "3.1"
-last_updated: 2026-08-11
+version: "3.3"
+last_updated: 2026-08-20
 id: launcher
 one_line_purpose: Change review just recipes without breaking the launch contract.
 entry_point: docs/skills/launcher.md
@@ -52,8 +52,10 @@ Goose, or image build skill documents.
    stamps `review.owner=detached`, a later launch refuses to reclaim it, and
    `review-stop` is its only lifecycle verb — polite `podman stop`, never a
    force flag, and it refuses attended runs and containers it did not label.
-   Nothing else may background a run, and no persistent launcher state is
-   allowed beyond the pinned Hive checkout under `~/.local/state/review/`.
+   Nothing else may background a run. Persistent state is two directories:
+   the launcher owns only the pinned Hive checkout under
+   `~/.local/state/review/`, and `review-queue` mounts the dashboard's
+   `bluefin-review` state directory from the host (below).
    Ctrl-C stops an interactive run; `--replace` only reclaims a container
    name when a new launch starts.
 3. Keep the container path narrow. It mounts only the read-only Hive
@@ -71,6 +73,19 @@ Goose, or image build skill documents.
    the dashboard. Its instance name is `review-queue`, overridable with
    `REVIEW_QUEUE_NAME` — the dashboard's analogue of `REVIEW_CONTAINER_NAME`,
    and likewise the only instance knob it gets.
+   The dashboard's state — landing-batch records, their failure reasons, and
+   the action trace — is the only durable record of what the landing agent
+   did, so the recipe bind-mounts
+   `${XDG_STATE_HOME:-~/.local/state}/bluefin-review` from the host at the
+   container's XDG state path with `rw,z` (#281). One shared directory
+   across instance names: the queue it records is the same whichever name
+   runs, and `:z` keeps it writable for concurrent named dashboards. Sharing
+   it is safe because the recipe also passes the container name in as
+   `BLUEFIN_REVIEW_INSTANCE`, and the dashboard qualifies every batch id
+   with it — two dashboards' batches cannot overwrite each other's files.
+   The dashboard writes the directory; the launcher creates and mounts it,
+   nothing more. `review-container` mounts no state: the worker's record
+   flows through Hive.
    An explicitly set `BLUEFIN_REVIEW_BACKEND` is validated as `goose` or
    `codex` and forwarded only to this recipe. Unset preserves the dashboard's
    default; explicit Codex preselects the existing takeoff panel but never

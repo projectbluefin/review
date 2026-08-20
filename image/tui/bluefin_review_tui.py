@@ -2112,6 +2112,7 @@ class ReviewDashboard(App):
             if self.filters.wants(item)
         ]
         stops.sort(key=lambda stop: (action_rank(stop.action), stop.repository, stop.number))
+        self.restore_landing_marks(stops)
         if self.reselect:
             for stop in stops:
                 stop.selected = stop.key in self.reselect
@@ -3071,6 +3072,22 @@ class ReviewDashboard(App):
                 stop.selected = True
                 stop.failure = f"{state}: {event.get('note', 'no reason given')}"
         self.refresh_rows()
+
+    def restore_landing_marks(self, stops: list[Stop]) -> None:
+        """Fold a previous run's landing outcomes back onto matching rows.
+        The state directory persists on the host across relaunches (#281),
+        but the record only helps if the rows show it. Only the failure
+        marking is restored; selecting a batch stays the maintainer's."""
+        events = landing.persisted_events()
+        if not events:
+            return
+        for stop in stops:
+            event = events.get(stop.key)
+            if not event:
+                continue
+            state = event.get("state")
+            if state in ("blocked", "failed", "awaiting-stable"):
+                stop.failure = f"{state}: {event.get('note', 'no reason given')}"
 
     def action_agents(self) -> None:
         if not self.landing_queue:
