@@ -100,8 +100,9 @@ COMMANDS = (
     CommandSpec("pane_next", "l", "pane_next", "next pane", terminal_dispatched=True),
     CommandSpec("activate", "enter", "activate", "inspect highlighted item"),
     CommandSpec("back", "escape", "back", "back"),
-    CommandSpec("back_alias", "q", "back", "back"),
-    CommandSpec("quit", "ctrl+q", "quit", "quit"),
+    CommandSpec("back_alias", "q", "back", "back", terminal_dispatched=True),
+    CommandSpec("quit", "ctrl+c", "quit", "quit"),
+    CommandSpec("quit_alias", "ctrl+q", "quit", "quit"),
     CommandSpec("steer", "slash", "steer", "steer review"),
     CommandSpec("review", "r", "review", "start a review"),
     CommandSpec("copy_review_context", "y", "handoff", "copy review context"),
@@ -2056,7 +2057,7 @@ class ReviewDashboard(App):
             event.stop()
             self._dispatch_terminal_action("next pane", self.action_pane_next)
             return
-        if event.key == "q" and not isinstance(self.focused, Input):
+        if event.key == "q" and not isinstance(self.focused, (Input, TextArea)):
             event.stop()
             self.action_back()
             return
@@ -2737,10 +2738,12 @@ class ReviewDashboard(App):
             self.action_view_diff()
 
     def action_back(self) -> None:
-        if self.focused is self.query_one("#steer", Input):
-            self.query_one("#queue", ListView).focus()
-        elif len(self.screen_stack) > 1:
+        if isinstance(self.focused, (Input, TextArea)):
+            return
+        if len(self.screen_stack) > 1:
             self.pop_screen()
+        else:
+            self.exit()
 
     def action_help(self) -> None:
         entries = "  ".join(f"{c.key or '—'} {c.label}" for c in COMMANDS)

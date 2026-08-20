@@ -70,8 +70,9 @@ actions that require explicit human consent.
 The live TUI exposes one `command_registry()` from
 `image/tui/bluefin_review_tui.py`. Bindings and help/palette entries are
 projections of that registry, including `j/k`, `g/G`, `Ctrl-d/Ctrl-u`, `h/l`,
-Enter, Escape, `Ctrl-q`, `/`, `r`, `y`, `Ctrl-p`, `:`, and `?`. Textual
-editor and confirmation focus remains authoritative: suspended commands do
+Enter, Escape, `q`, `Ctrl-C`, `Ctrl-q`, `/`, `r`, `y`, `Ctrl-p`, `:`, and `?`.
+On the root dashboard, `q` and Ctrl-C quit; on pushed screens, `q` and Escape
+go back. Textual editor and confirmation focus remains authoritative: suspended commands do
 not consume typed prose or PR numbers. `u` remains the gated branch update;
 `U` selects live-evidence mechanical Renovate rows; `a` is approve+queue
 only and never touches a selection; `A` is the only batch-landing key (it
