@@ -707,6 +707,42 @@ class BatchPlanScreen(ModalScreen[bool]):
         self.dismiss(True)
 
 
+# Per-state presentation for the batch queue. The printed state word stays
+# the primary carrier of the fact; the glyph adds a distinct *shape* and the
+# style adds colour on top, so no fact exists only as colour (the design
+# rule in docs/skills/review-dashboard.md). Deuteranopia merges red and
+# green, so shapes differ between states and the terminal states also read
+# bold on a muted fill rather than relying on hue.
+# Verified against the pinned Textual (8.2.8): markup spans resolve $-theme
+# variables through the active app's stylesheet (Style.parse falls back to
+# app.stylesheet.parse_style), and padding spaces inside a span keep its
+# background — which is what turns a batch header into a full-width bar.
+LANDING_STATE_STYLES: dict[str, tuple[str, str]] = {
+    "waiting": ("◌", "dim"),
+    "diagnosing": ("◐", "cyan"),
+    "fixing": ("◐", "cyan"),
+    "waiting-ci": ("◔", "$text-warning"),
+    "merging": ("▶", "bold $text-primary"),
+    "awaiting-stable": ("◆", "$text-accent"),
+    "merged": ("✓", "bold $text-success on $success-muted"),
+    "blocked": ("■", "$text-warning on $warning-muted"),
+    "failed": ("✗", "bold $text-error on $error-muted"),
+}
+
+
+def batch_bar_style(state: str) -> str:
+    """The header bar's style for a batch-level state. Every header is a
+    filled bar, its fill naming the state with the theme's own
+    text-on-muted pairing so the text stays legible on it."""
+    if state == "running":
+        return "bold $text-primary on $primary-muted"
+    if state == "queued":
+        return "bold $text-warning on $warning-muted"
+    if state == "exited 0":
+        return "bold $text-success on $success-muted"
+    return "bold $text-error on $error-muted"
+
+
 class LandingScreen(Screen):
     """The live batch queue: every dispatched batch, its agent, the per-PR
     state the agent reports, and what Hive is doing alongside.
@@ -714,6 +750,25 @@ class LandingScreen(Screen):
     Status comes from the agent's JSONL report file, polled on a timer —
     never scraped from its prose. The screen is read-only except [x], which
     stops the running agent's process group the same way a review stop does.
+
+    The presentation is a cabinet of framed panels in the Midnight Commander
+    mold: a title bar, the BATCHES panel where each header is a state-filled
+    bar and each pull request carries its state as word, glyph, and colour
+    together, the HIVE line, and the AGENT LOG.
+    """
+
+    CSS = """
+    #landing-status {
+        height: 1; background: $secondary; color: $text; text-style: bold;
+    }
+    #landing-rows {
+        border: round $secondary; height: auto; padding: 0 1;
+    }
+    #landing-hive {
+        border: round $secondary; height: 3; padding: 0 1;
+        color: $text-secondary;
+    }
+    #landing-log { border: round $secondary; }
     """
 
     BINDINGS = [
@@ -733,31 +788,47 @@ class LandingScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
+        self.query_one("#landing-rows", Static).border_title = "BATCHES"
+        self.query_one("#landing-hive", Static).border_title = "HIVE"
+        self.query_one("#landing-log", RichLog).border_title = "AGENT LOG"
         self.poll()
         self.set_interval(2.0, self.poll)
 
     def poll(self) -> None:
+        rows = self.query_one("#landing-rows", Static)
+        width = rows.content_region.width
         lines: list[str] = []
         for task in self.dashboard.landing_queue:
             if task.returncode is None:
                 state = "running" if task.running else "queued"
             else:
                 state = f"exited {task.returncode}"
-            lines.append(f"[b]batch {task.task_id}[/b] — {state}")
+            header = f" batch {task.task_id} — {state}"
+            # ljust(0) is a no-op, so the first pre-layout poll renders a
+            # text-wide bar and the next tick paints it to the panel's edge.
+            lines.append(f"[{batch_bar_style(state)}]{header.ljust(width)}[/]")
             events = landing.parse_status(task.status_path)
             done = events.get("", {})
             for stop in task.stops:
                 event = events.get(stop.key, {})
                 note = event.get("note", "")
                 mark = event.get("state", "waiting")
+                glyph, style = LANDING_STATE_STYLES.get(mark, ("?", ""))
+                badge = f"{glyph} {mark}"
+                if style:
+                    badge = f"[{style}]{badge}[/]"
                 lines.append(
                     f"  {link(stop.key, pr_url(stop.repository, stop.number))}"
-                    f"  {mark}"
+                    f"  {badge}"
                     + (f" — {escape(str(note))}" if note else "")
                 )
             if done:
-                lines.append(f"  done — {escape(str(done.get('note', '')))}")
-        self.query_one("#landing-rows", Static).update("\n".join(lines))
+                note = escape(str(done.get("note", "")))
+                lines.append(
+                    "  [bold $text-success]✔ done[/]"
+                    + (f" — {note}" if note else "")
+                )
+        rows.update("\n".join(lines))
         self.query_one("#landing-hive", Static).update(
             f" Hive: {self.dashboard.hive_state or 'asking…'}"
         )

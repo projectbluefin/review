@@ -921,6 +921,125 @@ async def main() -> int:
     del os.environ["BLUEFIN_REVIEW_INSTANCE"]
     gh_log.write_text("")
 
+    # ── the batch queue paints every state, and never by colour alone ────
+    # Every state keeps its printed word and gains a shape-distinct glyph on
+    # a styled span; terminal states sit on a muted fill and each batch
+    # header is a filled state bar. A colourless read — the text alone —
+    # must still carry every fact, and a bold-words-only implementation must
+    # fail the background assertions.
+    os.environ["BLUEFIN_REVIEW_INSTANCE"] = "pilot-colours"
+    colour_task = tui.landing.new_task(
+        [
+            tui.Stop("projectbluefin/bluefinctl", 31, "review", "one"),
+            tui.Stop("projectbluefin/common", 7, "review", "two"),
+            tui.Stop("projectbluefin/dakota", 12, "review", "three"),
+            tui.Stop("projectbluefin/bluefin", 99, "review", "four"),
+        ],
+        "tester",
+    )
+    del os.environ["BLUEFIN_REVIEW_INSTANCE"]
+    Path(colour_task.status_path).write_text(
+        '{"pr": "projectbluefin/bluefinctl#31", "state": "merged", "note": "on :stable"}\n'
+        '{"pr": "projectbluefin/common#7", "state": "failed", "note": "publish workflow red"}\n'
+        '{"pr": "projectbluefin/dakota#12", "state": "awaiting-stable", "note": "watching the publish"}\n'
+        '{"state": "done", "note": "two landed, one failed"}\n'
+    )
+    colour_task.process = object()  # a live handle: the header reads running
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        app.landing_queue.append(colour_task)
+        await app.push_screen(tui.LandingScreen(app))
+        await pilot.pause()
+        screen = app.screen
+        check(
+            isinstance(screen, tui.LandingScreen),
+            f"the fabricated batch must open the batch queue, got {type(screen).__name__}",
+        )
+        if isinstance(screen, tui.LandingScreen):
+            screen.poll()
+            rows_widget = screen.query_one("#landing-rows", tui.Static)
+            rows = str(rows_widget.render())
+            for expected in (
+                f"batch {colour_task.task_id} — running",
+                "✓ merged",
+                "✗ failed",
+                "◆ awaiting-stable",
+                "◌ waiting",
+                "✔ done",
+                "publish workflow red",
+                "two landed, one failed",
+            ):
+                check(
+                    expected in rows,
+                    f"the batch queue must show {expected!r}, got {rows!r}",
+                )
+
+            def line_styles(fragment: str) -> list:
+                """The segment styles of the rendered line holding fragment."""
+                for y in range(rows_widget.region.height):
+                    strip = rows_widget.render_line(y)
+                    if fragment in "".join(segment.text for segment in strip):
+                        return [segment.style for segment in strip]
+                return []
+
+            from rich.color import Color
+
+            def theme_rgb(name: str):
+                return Color.parse(app.theme_variables[name]).get_truecolor()
+
+            base_rgb = theme_rgb("background")
+
+            def fills(fragment: str) -> list:
+                """Segment styles on fragment's line that sit on a real fill —
+                not the screen's base background, which every segment carries."""
+                return [
+                    style
+                    for style in line_styles(fragment)
+                    if style is not None
+                    and style.bgcolor is not None
+                    and style.bgcolor.get_truecolor() != base_rgb
+                ]
+
+            header_fills = fills(f"batch {colour_task.task_id} — running")
+            check(
+                any(
+                    style.bgcolor.get_truecolor() == theme_rgb("primary-muted")
+                    for style in header_fills
+                ),
+                "the running batch header must be a filled bar, got "
+                f"{header_fills!r}",
+            )
+            merged_fills = fills("✓ merged")
+            check(
+                any(
+                    style.bgcolor.get_truecolor() == theme_rgb("success-muted")
+                    and style.bold
+                    for style in merged_fills
+                ),
+                "the merged state must be bold on a muted fill, got "
+                f"{merged_fills!r}",
+            )
+            failed_fills = fills("✗ failed")
+            check(
+                any(
+                    style.bgcolor.get_truecolor() == theme_rgb("error-muted")
+                    and style.bold
+                    for style in failed_fills
+                ),
+                "the failed state must be bold on a muted fill, got "
+                f"{failed_fills!r}",
+            )
+        check(
+            "BATCHES" in str(screen.query_one("#landing-rows", tui.Static).border_title),
+            "the batch list must be a framed panel with a title",
+        )
+    for artifact in (
+        Path(colour_task.prompt_path),
+        Path(colour_task.status_path),
+    ):
+        artifact.unlink(missing_ok=True)
+    gh_log.write_text("")
+
     # ── a relaunched dashboard restores a previous batch's failure ──────
     # The landings directory persists on the host; the rows must show what
     # it records at startup, or the failure markings are still lost on every

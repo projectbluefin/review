@@ -1,6 +1,6 @@
 ---
 name: review-dashboard
-version: "1.6"
+version: "1.7"
 last_updated: 2026-08-20
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
@@ -171,6 +171,13 @@ Content.from_markup("hello [bold]$name[/bold]!", name=name)
 at the colon; `[link="https://…"]` is correct, and reaches the terminal as
 OSC 8.
 
+**Markup spans resolve `$`-theme variables.** `[$text-success on
+$success-muted]…[/]` inside a `Static` parses through the active app's
+stylesheet, so the theme's text-on-muted pairings work in markup, not only
+in CSS. Padding spaces inside a span keep its background — that is how a
+markup line becomes a full-width bar (`ljust` the label to the content
+width, then wrap it in the styled span).
+
 **Never touch the DOM from a thread worker — including the query.** Textual
 is not thread-safe. `self.call_from_thread(self.query_one(...).update, text)`
 looks safe and is not: the query runs on the worker thread and can race a
@@ -204,7 +211,10 @@ distinct states. `[o]` is only an optional browser escape hatch.
   true conflict offers exceptional manual handoff without a bypass.
 - **Colour is never the only carrier of a fact.** Rows colour by state *and*
   carry `⚑ CONFLICTS`, `✓ CI GREEN`, `✗ CI FAILED`, `… CI PENDING`, or
-  `? CI UNKNOWN`, as applicable.
+  `? CI UNKNOWN`, as applicable. The batch queue applies the same rule three
+  layers deep — printed state word, a shape-distinct glyph from
+  `LANDING_STATE_STYLES`, then colour — so a colourless or colour-blind read
+  loses nothing (see "Batch landing").
 - **Direct merge respects known CI state.** Ordinary `[m]` refuses a pull
   request whose snapshot or fetched live evidence says CI failed or is
   pending; GitHub branch protection remains an additional gate.
@@ -268,6 +278,22 @@ state, the agent log tail, and Hive stats. Never scrape agent prose for
 status. When a task finishes, `landing_finished` folds the report onto the
 rows: merged leaves the batch; blocked, failed, and awaiting-stable stays
 selected with the agent's reason — the same rule as every other failure.
+
+The screen is a cabinet of framed panels (`BATCHES`, `HIVE`, `AGENT LOG`,
+round `$secondary` borders with titles) over a title bar. Each batch header
+is a full-width state bar (`batch_bar_style`: running is `$text-primary on
+$primary-muted`, queued `$text-warning on $warning-muted`, exited 0
+`$text-success on $success-muted`, anything else `$text-error on
+$error-muted`), and each pull request carries its state three ways at once:
+the printed word, a shape-distinct glyph, and a colour from
+`LANDING_STATE_STYLES` — `◌` waiting, `◐` diagnosing/fixing, `◔`
+waiting-ci, `▶` merging, `◆` awaiting-stable, `✓` merged, `■` blocked, `✗`
+failed, `✔` for the task-level done. Colour is additive: terminal states
+also read bold on a muted fill, so hue is never the only difference between
+two states. Verified against the pinned Textual: markup spans resolve
+`$`-theme variables through the active app's stylesheet, and padding spaces
+inside a span keep its background — that is what makes the header bar
+full-width.
 
 The record outlives the run: the launcher mounts the state directory from
 the host, and `restore_landing_marks` folds the newest persisted outcome
