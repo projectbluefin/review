@@ -1,6 +1,6 @@
 ---
 name: review-dashboard
-version: "1.8"
+version: "1.9"
 last_updated: 2026-08-20
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
@@ -283,8 +283,17 @@ awaiting-stable|merged|blocked|failed`, then a task-level `done`), and
 `LandingScreen` ([w], auto-pushed on dispatch) renders all batches, per-PR
 state, the agent log tail, and Hive stats. Never scrape agent prose for
 status. When a task finishes, `landing_finished` folds the report onto the
-rows: merged leaves the batch; blocked, failed, and awaiting-stable stays
-selected with the agent's reason — the same rule as every other failure.
+rows and notifies the maintainer: the toast carries the batch id and the
+per-state counts, at error severity when anything failed or the agent
+exited without the task-level `done` event, and the same text persists on
+the status line (`last batch …`) until the next dispatch or refresh. The
+rows keep what the toast cannot outlive: merged leaves the batch; blocked,
+failed, and awaiting-stable stays selected with the agent's reason — the
+same rule as every other failure. A pull request the agent never carried
+to an outcome is marked `no outcome reported` when the agent closed its
+report with `done` and `agent died mid-batch` when it never did — each
+with the last reported state, both distinguishable from every state the
+agent can report.
 
 The screen is a cabinet of framed panels (`BATCHES`, `HIVE`, `AGENT LOG`,
 round `$secondary` borders with titles) over a title bar. Each batch header

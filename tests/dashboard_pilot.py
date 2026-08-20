@@ -1319,6 +1319,373 @@ async def main() -> int:
         check(
             not app.landing_queue and landing_log.read_text() == "",
             "escape from the [A] gate must dispatch nothing",
+)
+    gh_log.write_text("")
+
+    # ── a finished batch tells the maintainer ──────────────────────────
+    # "I can't tell when it's done." A completed batch announces itself:
+    # the notification carries the batch id and the per-state outcome, and
+    # the rows keep what the notification cannot outlive.
+    mixed_stub = write_stub(
+        workdir / "stub-landing-mixed",
+        'prompt=""\n'
+        'for arg in "$@"; do case "$arg" in *.prompt.md) prompt="$arg" ;; esac; done\n'
+        'status="${prompt%.prompt.md}.jsonl"\n'
+        'prs=$(grep -oE "[a-z]+/[a-z-]+#[0-9]+" "$prompt" | sort -u)\n'
+        'first=$(echo "$prs" | head -1); last=$(echo "$prs" | tail -1)\n'
+        'printf "{\\"pr\\": \\"%s\\", \\"state\\": \\"merged\\", \\"note\\": \\"green\\"}\\n" "$first" >>"$status"\n'
+        'printf "{\\"pr\\": \\"%s\\", \\"state\\": \\"failed\\", \\"note\\": \\"branch protection refused\\"}\\n" "$last" >>"$status"\n'
+        'printf "{\\"state\\": \\"done\\", \\"note\\": \\"one landed, one refused\\"}\\n" >>"$status"\n',
+    )
+    os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{mixed_stub} @PROMPT"
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        app.self_login = "castrojo"
+        notices: list[tuple[str, str]] = []
+        real_notify = app.notify
+
+        def record(message, *args, **kwargs):
+            notices.append((str(message), kwargs.get("severity", "information")))
+            real_notify(message, *args, **kwargs)
+
+        app.notify = record
+        for stop in app.stops:
+            stop.selected = True
+        app.action_land_batch()
+        await pilot.pause()
+        gate = app.screen
+        check(isinstance(gate, tui.BatchPlanScreen), "the batch must gate")
+        await pilot.press("enter")
+        task = gate.plan
+        for _ in range(400):
+            if task.returncode is not None and any(
+                "finished" in message for message, _ in notices
+            ):
+                break
+            await pilot.pause(0.05)
+        expected = f"batch {task.task_id} finished: 1 merged, 1 failed"
+        check(
+            any(expected in message for message, _ in notices),
+            f"a finished batch must notify its outcome, want {expected!r} "
+            f"in {notices}",
+        )
+        check(
+            any(
+                expected in message and severity == "error"
+                for message, severity in notices
+            ),
+            "a batch carrying a failure must notify at error severity, "
+            f"got {notices}",
+        )
+        for _ in range(200):
+            if not app.stops[0].selected and app.stops[1].selected:
+                break
+            await pilot.pause(0.05)
+        check(
+            not app.stops[0].selected and not app.stops[0].failure,
+            "a merged pull request leaves the batch",
+        )
+        check(
+            app.stops[1].selected and "failed" in app.stops[1].failure,
+            "a failed pull request stays selected with its reason — the "
+            "notification does not outlive the row",
+        )
+        # The outcome also persists where a toast cannot: the status line
+        # keeps the last batch's result until the next dispatch or refresh.
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check(
+            expected in status,
+            f"the status line must keep the batch outcome, got {status!r}",
+        )
+        await pilot.press("R")
+        for _ in range(200):
+            status = str(app.query_one("#status-bar", tui.Static).render())
+            if expected not in status and len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check(
+            expected not in status,
+            f"a refresh must clear the last-batch outcome, got {status!r}",
+        )
+    gh_log.write_text("")
+
+    # ── an agent that dies mid-batch says so ───────────────────────────
+    # Exiting without the task-level done event used to be
+    # indistinguishable from still working: the row silently kept its last
+    # mark. It is its own surfaced state now.
+    died_stub = write_stub(
+        workdir / "stub-landing-died",
+        'prompt=""\n'
+        'for arg in "$@"; do case "$arg" in *.prompt.md) prompt="$arg" ;; esac; done\n'
+        'status="${prompt%.prompt.md}.jsonl"\n'
+        'first=$(grep -oE "[a-z]+/[a-z-]+#[0-9]+" "$prompt" | sort -u | head -1)\n'
+        'printf "{\\"pr\\": \\"%s\\", \\"state\\": \\"fixing\\", \\"note\\": \\"retrying CI\\"}\\n" "$first" >>"$status"\n'
+        'exit 1\n',
+    )
+    os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{died_stub} @PROMPT"
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        app.self_login = "castrojo"
+        notices = []
+        real_notify = app.notify
+
+        def record(message, *args, **kwargs):
+            notices.append((str(message), kwargs.get("severity", "information")))
+            real_notify(message, *args, **kwargs)
+
+        app.notify = record
+        for stop in app.stops:
+            stop.selected = True
+        app.action_land_batch()
+        await pilot.pause()
+        gate = app.screen
+        check(isinstance(gate, tui.BatchPlanScreen), "the batch must gate")
+        await pilot.press("enter")
+        task = gate.plan
+        for _ in range(400):
+            if task.returncode is not None and any(
+                "without reporting done" in message for message, _ in notices
+            ):
+                break
+            await pilot.pause(0.05)
+        check(
+            any(
+                f"batch {task.task_id}" in message
+                and "without reporting done" in message
+                and severity == "error"
+                for message, severity in notices
+            ),
+            "a batch whose agent exits without the done event must say so "
+            f"at error severity, got {notices}",
+        )
+        for _ in range(200):
+            if all("died mid-batch" in s.failure for s in app.stops):
+                break
+            await pilot.pause(0.05)
+        check(
+            all(s.selected for s in app.stops),
+            "an unfinished batch keeps every pull request selected",
+        )
+        check(
+            all("died mid-batch" in s.failure for s in app.stops),
+            "each unfinished pull request must be marked distinguishable "
+            f"from a reported state, got {[s.failure for s in app.stops]}",
+        )
+        check(
+            "fixing" in app.stops[0].failure,
+            "the mark must keep the agent's last reported state, got "
+            f"{app.stops[0].failure!r}",
+        )
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check(
+            "without reporting done" in status,
+            f"the status line must keep the dead-agent outcome, got {status!r}",
+        )
+    gh_log.write_text("")
+
+    # ── done with a missing outcome is a gap, not a dead agent ──────────
+    # A batch that writes the task-level done event but never carried one
+    # pull request to an outcome must not cry "died mid-batch" — the agent
+    # finished; its report has a hole, and the hole is what is marked.
+    gap_stub = write_stub(
+        workdir / "stub-landing-gap",
+        'prompt=""\n'
+        'for arg in "$@"; do case "$arg" in *.prompt.md) prompt="$arg" ;; esac; done\n'
+        'status="${prompt%.prompt.md}.jsonl"\n'
+        'first=$(grep -oE "[a-z]+/[a-z-]+#[0-9]+" "$prompt" | sort -u | head -1)\n'
+        'printf "{\\"pr\\": \\"%s\\", \\"state\\": \\"merged\\", \\"note\\": \\"green\\"}\\n" "$first" >>"$status"\n'
+        'printf "{\\"state\\": \\"done\\", \\"note\\": \\"landed what I saw\\"}\\n" >>"$status"\n',
+    )
+    os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{gap_stub} @PROMPT"
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        app.self_login = "castrojo"
+        notices = []
+        real_notify = app.notify
+
+        def record(message, *args, **kwargs):
+            notices.append((str(message), kwargs.get("severity", "information")))
+            real_notify(message, *args, **kwargs)
+
+        app.notify = record
+        for stop in app.stops:
+            stop.selected = True
+        app.action_land_batch()
+        await pilot.pause()
+        gate = app.screen
+        check(isinstance(gate, tui.BatchPlanScreen), "the batch must gate")
+        await pilot.press("enter")
+        task = gate.plan
+        expected = f"batch {task.task_id} finished: 1 merged, 1 no outcome"
+        for _ in range(400):
+            if task.returncode is not None and any(
+                expected in message for message, _ in notices
+            ):
+                break
+            await pilot.pause(0.05)
+        check(
+            any(expected in message for message, _ in notices),
+            f"a done batch with a missing outcome must say so, want "
+            f"{expected!r} in {notices}",
+        )
+        check(
+            all(", 0 " not in message for message, _ in notices),
+            "the summary must count only states that occurred, got "
+            f"{notices}",
+        )
+        check(
+            all(
+                "without reporting done" not in message
+                for message, _ in notices
+            ),
+            "a batch that wrote done must not be reported as a dead agent, "
+            f"got {notices}",
+        )
+        for _ in range(200):
+            if app.stops[1].failure:
+                break
+            await pilot.pause(0.05)
+        check(
+            app.stops[1].failure.startswith("no outcome reported"),
+            "the out-of-report pull request must be marked as a reporting "
+            f"gap, got {app.stops[1].failure!r}",
+        )
+        check(
+            all("died mid-batch" not in s.failure for s in app.stops),
+            "no row may claim a dead agent when the agent reported done, "
+            f"got {[s.failure for s in app.stops]}",
+        )
+        check(
+            app.stops[1].selected,
+            "the out-of-report pull request stays in the batch",
+        )
+    gh_log.write_text("")
+
+    # ── a pr-less line is not the done event ────────────────────────────
+    # parse_status files every line lacking "pr" under the task key, so a
+    # truthiness test lets one malformed tail line pass for done. Only
+    # {"state": "done"} closes a report; anything less is a dead agent.
+    tail_stub = write_stub(
+        workdir / "stub-landing-tail",
+        'prompt=""\n'
+        'for arg in "$@"; do case "$arg" in *.prompt.md) prompt="$arg" ;; esac; done\n'
+        'status="${prompt%.prompt.md}.jsonl"\n'
+        'grep -oE "[a-z]+/[a-z-]+#[0-9]+" "$prompt" | sort -u | while read -r pr; do\n'
+        '  printf "{\\"pr\\": \\"%s\\", \\"state\\": \\"merged\\", \\"note\\": \\"green\\"}\\n" "$pr" >>"$status"\n'
+        'done\n'
+        'printf "{\\"note\\": \\"unstructured tail\\"}\\n" >>"$status"\n',
+    )
+    os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{tail_stub} @PROMPT"
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        app.self_login = "castrojo"
+        notices = []
+        real_notify = app.notify
+
+        def record(message, *args, **kwargs):
+            notices.append((str(message), kwargs.get("severity", "information")))
+            real_notify(message, *args, **kwargs)
+
+        app.notify = record
+        for stop in app.stops:
+            stop.selected = True
+        app.action_land_batch()
+        await pilot.pause()
+        gate = app.screen
+        check(isinstance(gate, tui.BatchPlanScreen), "the batch must gate")
+        await pilot.press("enter")
+        task = gate.plan
+        for _ in range(400):
+            if task.returncode is not None and any(
+                f"batch {task.task_id}" in message for message, _ in notices
+            ):
+                break
+            await pilot.pause(0.05)
+        check(
+            any(
+                f"batch {task.task_id}" in message
+                and "without reporting done" in message
+                and severity == "error"
+                for message, severity in notices
+            ),
+            "a malformed pr-less line must not pass for the done event, "
+            f"got {notices}",
+        )
+        check(
+            all("finished" not in message for message, _ in notices),
+            f"a report without done must never read as finished, got {notices}",
+        )
+    gh_log.write_text("")
+
+    # ── the summary counts only what occurred ────────────────────────────
+    # An all-blocked batch reads "finished: 2 blocked" — not a litter of
+    # zero counts for states nothing reached.
+    blocked_stub = write_stub(
+        workdir / "stub-landing-blocked",
+        'prompt=""\n'
+        'for arg in "$@"; do case "$arg" in *.prompt.md) prompt="$arg" ;; esac; done\n'
+        'status="${prompt%.prompt.md}.jsonl"\n'
+        'grep -oE "[a-z]+/[a-z-]+#[0-9]+" "$prompt" | sort -u | while read -r pr; do\n'
+        '  printf "{\\"pr\\": \\"%s\\", \\"state\\": \\"blocked\\", \\"note\\": \\"draft\\"}\\n" "$pr" >>"$status"\n'
+        'done\n'
+        'printf "{\\"state\\": \\"done\\", \\"note\\": \\"all blocked\\"}\\n" >>"$status"\n',
+    )
+    os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{blocked_stub} @PROMPT"
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        app.self_login = "castrojo"
+        notices = []
+        real_notify = app.notify
+
+        def record(message, *args, **kwargs):
+            notices.append((str(message), kwargs.get("severity", "information")))
+            real_notify(message, *args, **kwargs)
+
+        app.notify = record
+        for stop in app.stops:
+            stop.selected = True
+        app.action_land_batch()
+        await pilot.pause()
+        gate = app.screen
+        await pilot.press("enter")
+        task = gate.plan
+        expected = f"batch {task.task_id} finished: 2 blocked"
+        for _ in range(400):
+            if task.returncode is not None and any(
+                f"batch {task.task_id}" in message for message, _ in notices
+            ):
+                break
+            await pilot.pause(0.05)
+        check(
+            any(expected in message for message, _ in notices),
+            f"an all-blocked batch must say exactly that, want {expected!r} "
+            f"in {notices}",
         )
     gh_log.write_text("")
 

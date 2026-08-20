@@ -1852,6 +1852,10 @@ class ReviewDashboard(App):
         # a batch confirmed while another runs waits behind it — a proper
         # queue, not a pile of concurrent agents mutating the same queue.
         self.landing_queue: list[landing.LandingTask] = []
+        # The last finished batch's outcome, kept on the status line until
+        # the next dispatch or refresh: a toast is gone in seconds and a
+        # maintainer looks up late.
+        self.last_landing_outcome = ""
         self.source_state = "loading"
         self.source_message = ""
 
@@ -2268,6 +2272,11 @@ class ReviewDashboard(App):
         # the whole queue is how a maintainer concludes there are five open
         # pull requests when there are a hundred and twenty-one.
         held_back = f" (of {total}; [f] widens)" if shown != total else ""
+        landed = (
+            f" | last {self.last_landing_outcome}"
+            if self.last_landing_outcome
+            else ""
+        )
         breakdown = ", ".join(
             f"{count} {action}"
             for action, count in sorted(
@@ -2281,7 +2290,7 @@ class ReviewDashboard(App):
             f" Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
             f"| {('source ' + self.source_state + (' — ' + self.source_message if self.source_message else ''))} "
             f"| {('snapshot ' + freshness) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
-            f"| batch: {selected}{stuck}{agents} | Hive: {self.hive_state or 'asking…'}"
+            f"| batch: {selected}{stuck}{agents}{landed} | Hive: {self.hive_state or 'asking…'}"
         )
 
     def action_filter(self) -> None:
@@ -2807,6 +2816,7 @@ class ReviewDashboard(App):
         Relaunching the dashboard to see current state is not a workflow.
         """
         self.reselect = {stop.key for stop in self.stops if stop.selected}
+        self.last_landing_outcome = ""
         self.notify("refreshing the queue…")
         self.load_queue()
         self.load_hive()
@@ -3111,6 +3121,8 @@ class ReviewDashboard(App):
 
     def enqueue_landing(self, task: "landing.LandingTask") -> None:
         self.landing_queue.append(task)
+        # A new dispatch supersedes the previous batch's outcome line.
+        self.last_landing_outcome = ""
         self.refresh_status()
         if not any(t.running for t in self.landing_queue):
             self.drain_landings()
@@ -3161,9 +3173,15 @@ class ReviewDashboard(App):
         self.call_from_thread(self.landing_finished, task)
 
     def landing_finished(self, task: "landing.LandingTask") -> None:
-        """Fold the agent's report back onto the rows: landed work leaves
-        the batch; blocked and failed work stays selected with its reason."""
+        """Fold the agent's report back onto the rows and say so: landed
+        work leaves the batch; blocked, failed, and unfinished work stays
+        selected with its reason. The notification announces the outcome —
+        the row marking is what survives it."""
         events = landing.parse_status(task.status_path)
+        # parse_status files every pr-less line under "" — a malformed tail
+        # line included — so only the exact done event closes a report.
+        done = events.get("", {}).get("state") == landing.TASK_DONE
+        counts: Counter[str] = Counter()
         for stop in task.stops:
             event = events.get(stop.key, {})
             state = event.get("state")
@@ -3176,7 +3194,57 @@ class ReviewDashboard(App):
                 # exit code — the row keeps the reason and stays selected.
                 stop.selected = True
                 stop.failure = f"{state}: {event.get('note', 'no reason given')}"
+            else:
+                detail = f"last report: {state}" if state else "no report"
+                stop.selected = True
+                if done:
+                    # The agent closed its report but never carried this
+                    # pull request to an outcome — a hole in the report,
+                    # not a dead agent, and the row must say which.
+                    stop.failure = f"no outcome reported ({detail})"
+                    state = "no outcome"
+                else:
+                    # No done event at all: the agent died mid-batch,
+                    # distinguishable from every state it can report.
+                    stop.failure = f"agent died mid-batch ({detail})"
+                    state = "died mid-batch"
+            counts[state] += 1
+        parts = [
+            f"{counts[state]} {state}"
+            for state in (
+                "merged",
+                "failed",
+                "blocked",
+                "awaiting-stable",
+                "no outcome",
+                "died mid-batch",
+            )
+            if counts[state]
+        ]
+        if done:
+            message = f"batch {task.task_id} finished: {', '.join(parts)}"
+        else:
+            # The agent never closed its report: distinguishable from a
+            # batch that reported done with failures.
+            message = (
+                f"batch {task.task_id} agent exited without reporting done: "
+                f"{', '.join(parts)}"
+            )
+        if (
+            counts["failed"]
+            or counts["no outcome"]
+            or counts["died mid-batch"]
+            or not done
+        ):
+            severity = "error"
+        elif counts["blocked"] or counts["awaiting-stable"]:
+            severity = "warning"
+        else:
+            severity = "information"
+        # Set before refresh_rows: refresh_status renders it onto the bar.
+        self.last_landing_outcome = message
         self.refresh_rows()
+        self.notify(message, severity=severity)
 
     def restore_landing_marks(self, stops: list[Stop]) -> None:
         """Fold a previous run's landing outcomes back onto matching rows.
