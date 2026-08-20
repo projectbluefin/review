@@ -1,7 +1,7 @@
 ---
 name: review-dashboard
 version: "1.6"
-last_updated: 2026-08-19
+last_updated: 2026-08-20
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
 entry_point: docs/skills/review-dashboard.md
@@ -272,8 +272,8 @@ selected with the agent's reason — the same rule as every other failure.
 **Done is `:stable`, not the merge.** A GitHub merge only starts the
 publish pipeline; the batch item is landed when the image's `:stable` tag
 carries the merged commit (verified via the publish workflow and the
-package version's tags: the version carrying `:stable` must also carry the
-commit). The agent reports
+anonymous ghcr registry: a tag containing the commit must resolve to
+`:stable`'s digest or one of its index children). The agent reports
 `awaiting-stable` at merge and `merged` only once `:stable` has it.
 - **The completed card reuses those paths.** `L`, `a`, `m`, and `u` return to
   the queue's existing handlers, so permissions, live-head checks, exact

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-19",
+  "generated_at": "2026-08-20",
   "schema_version": "1.0",
   "skills": [
     {
@@ -114,8 +114,8 @@
         "audit"
       ],
       "description": "Use when maintaining the pinned FSDK-derived contributor image, audit, Goose canary assets, Hive runtime, or publishing path.",
-      "version": "2.22",
-      "last_updated": "2026-08-13",
+      "version": "2.23",
+      "last_updated": "2026-08-20",
       "doc_type": "procedure"
     },
     {
@@ -171,7 +171,7 @@
       ],
       "description": "Maintains image/tui/bluefin_review_tui.py: the mutation gate, the queue view, and its Textual patterns. Use when editing the dashboard or its pilot tests.",
       "version": "1.6",
-      "last_updated": "2026-08-19",
+      "last_updated": "2026-08-20",
       "doc_type": "runbook"
     },
     {

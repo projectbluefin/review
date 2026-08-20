@@ -1,7 +1,7 @@
 ---
 name: image-build
-version: "2.22"
-last_updated: 2026-08-13
+version: "2.23"
+last_updated: 2026-08-20
 id: image-build
 one_line_purpose: Derive and pin the review contributor image safely.
 entry_point: docs/skills/image-build.md
@@ -231,12 +231,22 @@ Two rules follow, and both are about trusting the wrong signal:
   schedule's whole purpose is a condition the push does not know about, so
   when it cancels a push it substitutes a run that cannot publish the source.
 - **Verify the published image, never the green check.** After any change that
-  must reach users, read the revision back:
+  must reach users, confirm `:stable` moved onto the merge commit. No registry
+  client is needed — the contributor image ships none (fsdk-containers#164),
+  and ghcr.io serves public packages anonymously. The publish tags every image
+  `sha-<commit>`, so compare the digests the two refs return:
 
   ```bash
-  skopeo inspect docker://ghcr.io/projectbluefin/review:stable \
-    | jq -r '.Labels["org.opencontainers.image.revision"]'
+  tok=$(curl -fsSL "https://ghcr.io/token?scope=repository:projectbluefin/review:pull" | jq -r .token)
+  curl -fsSI -H "Authorization: Bearer $tok" \
+    -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json" \
+    https://ghcr.io/v2/projectbluefin/review/manifests/stable \
+    | grep -i docker-content-digest
   ```
+
+  HEAD `manifests/sha-<commit>` the same way; `:stable` has the change when
+  the digests match. ghcr content-negotiates strictly: an `Accept` header
+  that omits the stored media type answers 404 for a ref that exists.
 
   A green publish workflow has meant "nothing was published" twice — once from
   the cancelled schedule, once from a commit message that skipped CI entirely.

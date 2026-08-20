@@ -102,8 +102,8 @@ def new_task(stops: list, login: str) -> LandingTask:
     return task
 
 
-# fsdk-containers#164 ships skopeo in the base; it deletes the gh-api tag
-# check in step 5 below.
+# fsdk-containers#164 ships skopeo in the base; it deletes the anonymous
+# registry check in step 5 below.
 def landing_prompt(task: LandingTask) -> str:
     """The batch brief. The agent acts on the maintainer's confirmed
     selection; the rules it may not cross are stated in it, not assumed."""
@@ -132,17 +132,26 @@ For each pull request, in order:
 5. A GitHub merge is not done. Done is the merged commit published on the
    image's `:stable` tag: report `awaiting-stable` right after merging, then
    watch the repository's publish workflow for the merge commit and verify
-   the `:stable` tag moved onto it. The published image carries the commit
-   in its tags (`sha-<commit>` here; other repositories tag the bare or
-   arch-prefixed commit), so verify with the package versions API — `gh`
-   ships in the image, no registry tooling needed:
+   the `:stable` tag moved onto it. The image ships no registry client and
+   needs none — ghcr.io serves public packages anonymously, whether the
+   repository's owner is an org or a user. Mint a pull token:
 
-   gh api /orgs/<org>/packages/container/<image>/versions --paginate \
-     --jq '.[] | select(.metadata.container.tags | index("stable")) | .metadata.container.tags | join(" ")'
+   tok=$(curl -fsSL "https://ghcr.io/token?scope=repository:<org>/<image>:pull" | jq -r .token)
 
-   Only when the version carrying `stable` also carries the merge commit in
-   a tag, report `merged`. If the publish fails, that failure is the
-   deliverable: report `failed` with the evidence.
+   then HEAD `https://ghcr.io/v2/<org>/<image>/manifests/<ref>` with
+   `Authorization: Bearer $tok` and read the `docker-content-digest` header.
+   ghcr content-negotiates strictly: the `Accept` header must name the OCI
+   index AND manifest media types
+   (`application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json`),
+   or a ref that exists answers 404. The publish tags every build with the
+   commit — `sha-<commit>` on the index here, arch-suffixed
+   `sha-<commit>-amd64`/`-arm64` on its children, the bare commit elsewhere;
+   `/tags/list` with the same token names them all. `:stable` carries the
+   merge when a tag containing the commit resolves to `stable`'s digest or,
+   for a multi-arch index, to one of its children (GET `stable` with the
+   index Accept and read `.manifests[].digest`). Only then report `merged`.
+   If the publish fails, that failure is the deliverable: report `failed`
+   with the evidence.
 6. Never merge a draft, never merge with failing required checks, never pass
    `--admin` or any flag that bypasses branch protection, never force-push.
    A pull request the rules cannot land is reported, not forced.

@@ -92,9 +92,17 @@ grep -q 'awaiting-stable' "$landing_py" ||
 grep -q ':stable' "$landing_py" ||
   fail "the landing brief must define done as :stable published"
 # The image ships no registry inspector until fsdk-containers#164 lands in
-# the base, so the brief must never instruct one.
-grep -q 'skopeo inspect' "$landing_py" &&
-  fail "the landing brief must not instruct skopeo; the image does not ship it (fsdk-containers#164)"
+# the base, so neither the brief nor the skills may instruct one.
+for doc in "$landing_py" \
+  "$repo_root/docs/skills/review-dashboard.md" \
+  "$repo_root/docs/skills/image-build.md"; do
+  grep -q 'skopeo inspect' "$doc" &&
+    fail "$(basename "$doc") must not instruct skopeo; the image does not ship it (fsdk-containers#164)"
+done
+# The brief's verification is the anonymous ghcr flow: no token scope, no
+# org/user endpoint split, index children count as carrying a tag.
+grep -q 'ghcr.io/token' "$landing_py" ||
+  fail "the landing brief must verify :stable through the anonymous ghcr token flow"
 
 # The gate is the typed pull request number: no y/yes, no timeout.
 grep -q 'class ConfirmMutation' "$tui" || fail "the ConfirmMutation gate must exist"
