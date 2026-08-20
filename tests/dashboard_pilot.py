@@ -291,8 +291,10 @@ async def main() -> int:
     os.environ["LIVE_QUEUE_FILE"] = str(live_file)
     live_app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
 
+    # Polling budgets are ceilings, not timings (#284): a loaded CI runner
+    # needs the headroom, and a fast one returns on the first true poll.
     async def wait_for_live_rows(app, pilot, state: str, count: int) -> None:
-        for _ in range(100):
+        for _ in range(600):
             if app.source_state == state and len(app.stops) == count:
                 return
             await pilot.pause(0.05)
@@ -327,7 +329,7 @@ async def main() -> int:
               "live queue must hold rows when viewer identity is unavailable")
     os.environ.pop("GH_USER_FAIL", None)
     async def wait_for_state(app, pilot, state: str) -> None:
-        for _ in range(100):
+        for _ in range(600):
             if app.source_state == state:
                 return
             await pilot.pause(0.05)
@@ -337,6 +339,13 @@ async def main() -> int:
         app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
         async with app.run_test() as pilot:
             await wait_for_state(app, pilot, state)
+            # The state flag lands before the status bar re-renders; wait on
+            # the rendered condition, not a fixed beat after the flag (#284).
+            for _ in range(600):
+                status = str(app.query_one("#status-bar").render())
+                if detail in app.source_message and detail in status:
+                    break
+                await pilot.pause(0.05)
             status = str(app.query_one("#status-bar").render())
             check(app.source_state == state and not app.stops,
                   f"real app path must hold rows for {state} source state")
@@ -357,6 +366,11 @@ async def main() -> int:
     malformed_repo = tui.ReviewDashboard(tui.QueueFilters(live_repository="not-a-repo"))
     async with malformed_repo.run_test() as pilot:
         await wait_for_state(malformed_repo, pilot, "malformed")
+        for _ in range(600):
+            status = str(malformed_repo.query_one("#status-bar").render())
+            if "use owner/repo" in status:
+                break
+            await pilot.pause(0.05)
         status = str(malformed_repo.query_one("#status-bar").render())
         check(not malformed_repo.stops and "use owner/repo" in status,
               "real app path must report malformed repositories")
@@ -4005,6 +4019,13 @@ async def main() -> int:
                 "focus on exact-head evidence" in codex_calls[-1][0][-1],
                 "dashboard steering must reach the Codex invocation prompt",
             )
+            # The finished flag can land ahead of the card's evidence render;
+            # wait on the card's content, not a fixed beat (#284).
+            for _ in range(600):
+                card = str(app.screen.query_one("#review-card", tui.Static).render())
+                if "CI success" in card and "MERGEABLE/CLEAN" in card:
+                    break
+                await pilot.pause(0.05)
             card = str(app.screen.query_one("#review-card", tui.Static).render())
             check(
                 "CI success" in card and "MERGEABLE/CLEAN" in card
