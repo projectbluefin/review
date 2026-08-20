@@ -351,7 +351,10 @@ mutates GitHub.
 ## Red Flags
 
 - `then=lambda: self.mutate(...)` — a chained gate; the contract fails on it.
-- Interpolating any GitHub-sourced text into markup without `escape()`.
+- Interpolating any GitHub- or agent-sourced text into markup without
+  `escape()`. An agent-reported JSONL state is attacker-shaped text too:
+  unescaped, `waiting[/][blink]OWNED` raised `MarkupError` in
+  `rows.update()` and took the whole batch-queue screen down.
 - `self.query_one(...)` evaluated inside an `@work(thread=True)` body.
 - A new mutating verb passed to the read-only `gh()` helper.
 - A default view that filters the queue without saying so.
@@ -370,6 +373,6 @@ pre-commit run --all-files
 - [ ] Multi-command actions are one gate, ordered so the first failure is
       harmless.
 - [ ] Failures mark the row and keep the stop selected.
-- [ ] All GitHub-sourced text passes through `escape()`.
+- [ ] All GitHub- and agent-sourced text passes through `escape()`.
 - [ ] No DOM access inside a thread worker.
 - [ ] The pilot presses the key and asserts the result.

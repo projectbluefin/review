@@ -26,6 +26,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 from textual.events import Key
+from textual.geometry import Region
 
 TUI_DIR = Path(
     os.environ.get(
@@ -1030,12 +1031,69 @@ async def main() -> int:
                 f"{failed_fills!r}",
             )
         check(
-            "BATCHES" in str(screen.query_one("#landing-rows", tui.Static).border_title),
-            "the batch list must be a framed panel with a title",
+            rows_widget.styles.border_top[0] == "round",
+            "the batch list must carry a real border style, got "
+            f"{rows_widget.styles.border_top!r}",
+        )
+        top_edge = "".join(
+            segment.text
+            for strip in rows_widget.render_lines(
+                Region(0, 0, rows_widget.region.width, 1)
+            )
+            for segment in strip
+        )
+        check(
+            top_edge.startswith("╭") and "BATCHES" in top_edge,
+            f"the batch list must render a framed title edge, got {top_edge!r}",
         )
     for artifact in (
         Path(colour_task.prompt_path),
         Path(colour_task.status_path),
+    ):
+        artifact.unlink(missing_ok=True)
+    gh_log.write_text("")
+
+    # ── a hostile agent-reported state cannot break the batch queue ──────
+    # The state string is agent-sourced JSONL. An unknown state must render
+    # literally, escaped like every other agent string — never parsed as
+    # markup. Unescaped, "waiting[/][blink]OWNED" raises MarkupError in
+    # rows.update() and takes the whole screen down from inside poll().
+    os.environ["BLUEFIN_REVIEW_INSTANCE"] = "pilot-hostile"
+    hostile_task = tui.landing.new_task(
+        [tui.Stop("projectbluefin/bluefin", 42, "review", "hostile")],
+        "tester",
+    )
+    del os.environ["BLUEFIN_REVIEW_INSTANCE"]
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        app.landing_queue.append(hostile_task)
+        await app.push_screen(tui.LandingScreen(app))
+        await pilot.pause()
+        # The state arrives after mount, the way the agent's report does.
+        Path(hostile_task.status_path).write_text(
+            '{"pr": "projectbluefin/bluefin#42", "state": "waiting[/][blink]OWNED"}\n'
+        )
+        screen = app.screen
+        poll_error = None
+        if isinstance(screen, tui.LandingScreen):
+            try:
+                screen.poll()
+            except Exception as error:  # the check below reports it
+                poll_error = error
+        check(
+            poll_error is None,
+            "an unknown agent-reported state must not take the batch queue "
+            f"down, got {poll_error!r}",
+        )
+        if poll_error is None:
+            rows = str(screen.query_one("#landing-rows", tui.Static).render())
+            check(
+                "? waiting[/][blink]OWNED" in rows,
+                f"an unknown state must render literally, got {rows!r}",
+            )
+    for artifact in (
+        Path(hostile_task.prompt_path),
+        Path(hostile_task.status_path),
     ):
         artifact.unlink(missing_ok=True)
     gh_log.write_text("")

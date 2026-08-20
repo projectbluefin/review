@@ -812,11 +812,17 @@ class LandingScreen(Screen):
             for stop in task.stops:
                 event = events.get(stop.key, {})
                 note = event.get("note", "")
-                mark = event.get("state", "waiting")
+                # The state string is agent-sourced JSONL: coerce it (a
+                # non-string would raise on the dict lookup) and escape it
+                # before it meets the markup parser. The styled branch only
+                # fires on this module's own fixed literal keys, so the
+                # escape belongs on the fallback alone.
+                mark = str(event.get("state", "waiting"))
                 glyph, style = LANDING_STATE_STYLES.get(mark, ("?", ""))
-                badge = f"{glyph} {mark}"
                 if style:
-                    badge = f"[{style}]{badge}[/]"
+                    badge = f"[{style}]{glyph} {mark}[/]"
+                else:
+                    badge = f"{glyph} {escape(mark)}"
                 lines.append(
                     f"  {link(stop.key, pr_url(stop.repository, stop.number))}"
                     f"  {badge}"
