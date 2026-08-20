@@ -115,8 +115,9 @@ COMMANDS = (
     CommandSpec("open_browser", "o", "open_browser", "open"),
     CommandSpec("view_diff", "v", "view_diff", "diff"),
     CommandSpec("comment", "c", "comment", "comment", mutating=True),
-    CommandSpec("approve_or_land", "a", "merge", "approve+queue / land batch", mutating=True),
-    CommandSpec("agents", "A", "agents", "batch queue"),
+    CommandSpec("approve_or_land", "a", "merge", "approve+queue", mutating=True),
+    CommandSpec("land_batch", "A", "land_batch", "land batch", mutating=True),
+    CommandSpec("agents", "w", "agents", "watch batches"),
     CommandSpec("merge_now", "m", "merge_now", "merge now", mutating=True),
     CommandSpec("reject", "x", "reject", "reject", mutating=True),
     CommandSpec("update_branch", "u", "update_branch", "update clean branch", mutating=True),
@@ -148,11 +149,11 @@ def back_bindings(dismiss_action: str) -> list[Binding]:
 # typed-number gate.
 KEYS_READING = (
     " [b]r[/b] review [b]v[/b] diff [b]o[/b] open [b]h[/b] handoff"
-    " [b]/[/b] steer [b]f[/b] filter [b]b[/b] batch [b]A[/b] agents [b]H[/b] hive"
+    " [b]/[/b] steer [b]f[/b] filter [b]b[/b] batch [b]w[/b] watch batches [b]H[/b] hive"
     " [b]R[/b] refresh [b]q[/b]/Esc back"
 )
 KEYS_ACTING = (
-    " [b]L[/b] leave review [b]a[/b] approve+queue · land batch [b]m[/b] merge"
+    " [b]L[/b] leave review [b]a[/b] approve+queue [b]A[/b] land batch [b]m[/b] merge"
     " [b]u[/b] update clean branch [b]U[/b] select mechanical [b]x[/b] reject [b]M[/b] dupes"
 )
 
@@ -1806,6 +1807,7 @@ class ReviewDashboard(App):
     #review-evidence.hidden, #review-log.hidden { display: none; }
     #diff-scroll { border: solid $secondary; background: $surface; }
     #diff-body { padding: 0 1; width: auto; }
+    ListItem.selected { background: $primary-muted; }
     ListItem.selected Label { color: magenta; text-style: bold; }
     #review-status { height: auto; padding: 0 1; background: $panel; }
     #review-status.running { background: $panel; color: cyan; }
@@ -2197,6 +2199,9 @@ class ReviewDashboard(App):
         self.populate(stops)
 
     def row_markup(self, stop: Stop) -> str:
+        # Selection is not colour-only: a ● leads the row and the whole row
+        # carries a background, so the batch in progress reads at a glance.
+        selected = "● " if stop.selected else "  "
         # MECHANICAL replaces the old title-only BATCHABLE tag: it means this
         # branch can be brought current, never that the change is approved.
         tag = " (MECHANICAL)" if stop.mechanical else ""
@@ -2211,7 +2216,7 @@ class ReviewDashboard(App):
         if stop.review_state == "approved":
             marks += " ✓ approved"
         body = (
-            f"{link(stop.key, pr_url(stop.repository, stop.number))}: "
+            f"{selected}{link(stop.key, pr_url(stop.repository, stop.number))}: "
             f"{escape(stop.title[:60])}{tag} "
             f"{marks} {escape('[' + stop.action + ']')}{failed}"
         )
@@ -2251,7 +2256,7 @@ class ReviewDashboard(App):
             1 for t in self.landing_queue if t.process is None and t.returncode is None
         )
         agents = (
-            f" | agents: {running} running, {queued} queued [A]"
+            f" | agents: {running} running, {queued} queued [w]"
             if self.landing_queue
             else ""
         )
@@ -2726,6 +2731,9 @@ class ReviewDashboard(App):
         item = self.query_one("#queue", ListView).highlighted_child
         if item:
             item.set_class(stop.selected, "selected")
+            labels = item.query(Label)
+            if labels:
+                labels.first().update(self.row_markup(stop))
         self.refresh_status()
 
     def action_review(self) -> None:
@@ -3047,10 +3055,8 @@ class ReviewDashboard(App):
         self.mutate_all(stop, [command], then=queued, on_error=failed)
 
     def action_merge(self) -> None:
-        batch = [s for s in self.stops if s.selected]
-        if batch:
-            self.plan_landing(batch)
-            return
+        # `a` is approve+queue only. The batch key is `A` — a selection
+        # must never turn this key into an undocumented batch gate.
         stop = self.current
         if not stop:
             return
@@ -3060,8 +3066,25 @@ class ReviewDashboard(App):
         if self._queueable(stop):
             self._queue_automerge(stop)
 
+    def action_land_batch(self) -> None:
+        """`A`: land every selected pull request as one batch.
+
+        The maintainer tags rows with [b] and then reaches for the capital —
+        "do them All". The stronger keystroke does the strong thing: the
+        batch plan gate. Without a selection there is nothing to land; the
+        read-only batch queue this key used to open lives on [w].
+        """
+        batch = [s for s in self.stops if s.selected]
+        if not batch:
+            self.notify(
+                "nothing selected — [b] marks rows for the batch.",
+                severity="warning",
+            )
+            return
+        self.plan_landing(batch)
+
     def plan_landing(self, batch: list[Stop]) -> None:
-        """Batch `a`: the reviewed selection becomes one agent's brief.
+        """Batch `A`: the reviewed selection becomes one agent's brief.
 
         The maintainer picked every row by hand; the BatchPlanScreen is the
         proportionate gate — the whole plan and the exact command, confirmed

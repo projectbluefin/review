@@ -170,7 +170,7 @@
         "maintainer"
       ],
       "description": "Maintains image/tui/bluefin_review_tui.py: the mutation gate, the queue view, and its Textual patterns. Use when editing the dashboard or its pilot tests.",
-      "version": "1.7",
+      "version": "1.8",
       "last_updated": "2026-08-20",
       "doc_type": "runbook"
     },

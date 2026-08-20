@@ -833,10 +833,16 @@ async def main() -> int:
         )
         await pilot.press("a")
         await pilot.pause()
+        check(
+            not isinstance(app.screen, tui.BatchPlanScreen),
+            "[a] must never open the batch gate — [A] is the only batch key",
+        )
+        await pilot.press("A")
+        await pilot.pause()
         gate = app.screen
         check(
             isinstance(gate, tui.BatchPlanScreen),
-            f"a selected batch must open the plan gate, got {type(gate).__name__}",
+            f"[A] on a selection must open the plan gate, got {type(gate).__name__}",
         )
         if isinstance(gate, tui.BatchPlanScreen):
             check(
@@ -910,11 +916,11 @@ async def main() -> int:
                 not isinstance(app.screen, tui.LandingScreen),
                 "escape must return to the review queue",
             )
-            await pilot.press("A")
+            await pilot.press("w")
             await pilot.pause()
             check(
                 isinstance(app.screen, tui.LandingScreen),
-                "[A] must reopen the live batch queue",
+                "[w] must reopen the live batch queue",
             )
             await pilot.press("q")
             await pilot.pause()
@@ -1190,7 +1196,7 @@ async def main() -> int:
         app.self_login = "castrojo"
         for stop in app.stops:
             stop.selected = True
-        app.action_merge()
+        app.action_land_batch()
         await pilot.pause()
         check(
             isinstance(app.screen, tui.BatchPlanScreen),
@@ -1202,12 +1208,118 @@ async def main() -> int:
             not app.landing_queue and landing_log.read_text() == "",
             "escape must abort the batch without dispatching an agent",
         )
-        app.action_merge()
+        app.action_land_batch()
         await pilot.pause()
         check(isinstance(app.screen, tui.BatchPlanScreen), "BatchPlanScreen must activate")
         await pilot.press("q")
         await pilot.pause()
         check(not isinstance(app.screen, tui.BatchPlanScreen), "q must abort BatchPlanScreen")
+    gh_log.write_text("")
+
+    # ── a selection is unmistakable on the row itself ──────────────────
+    # Colour is never the only carrier of a fact: a selected row carries a
+    # ● marker in its text AND a full-row background, so the batch the
+    # maintainer is building is visible without reading the status line.
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        queue = app.query_one("#queue", tui.ListView)
+        # The ListView cursor carries its own background, so the selection
+        # background can only be proven on a selected row the cursor has
+        # left: capture both reference backgrounds first.
+        cursor_bg = queue.children[0].styles.background
+        plain_bg = queue.children[1].styles.background
+        await pilot.press("b")
+        await pilot.press("down")
+        await pilot.pause()
+        check(
+            [s.selected for s in app.stops] == [True, False],
+            f"[b] must select only the highlighted row, got {[s.selected for s in app.stops]}",
+        )
+        first = str(queue.children[0].query(tui.Label).first().render())
+        second = str(queue.children[1].query(tui.Label).first().render())
+        check(
+            "●" in first and "●" not in second,
+            f"a selected row must carry the ● marker and an unselected row "
+            f"must not, got {first!r} / {second!r}",
+        )
+        selected_bg = queue.children[0].styles.background
+        check(
+            selected_bg != plain_bg and selected_bg != cursor_bg,
+            "a selected row must carry a full-row background, not "
+            "colour-only text",
+        )
+        await pilot.press("up")
+        await pilot.press("b")
+        await pilot.press("down")
+        await pilot.pause()
+        first = str(queue.children[0].query(tui.Label).first().render())
+        check(
+            "●" not in first,
+            f"deselecting must remove the marker, got {first!r}",
+        )
+        check(
+            queue.children[0].styles.background == plain_bg,
+            "deselecting must drop the full-row background",
+        )
+    gh_log.write_text("")
+
+    # ── A lands the batch; w watches it ────────────────────────────────
+    # The maintainer selects with [b] and reaches for capital A — "do them
+    # All". The stronger keystroke does the strong thing: A opens the batch
+    # plan gate. The read-only batch queue viewer lives on w.
+    landing_log.write_text("")
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        app.self_login = "castrojo"
+        notices: list[str] = []
+        real_notify = app.notify
+
+        def record(message, *args, **kwargs):
+            notices.append(str(message))
+            real_notify(message, *args, **kwargs)
+
+        app.notify = record
+        await pilot.press("A")
+        await pilot.pause()
+        check(
+            not isinstance(app.screen, tui.BatchPlanScreen)
+            and not isinstance(app.screen, tui.LandingScreen),
+            "[A] without a selection must open neither the gate nor the viewer",
+        )
+        check(
+            any("[b]" in n for n in notices),
+            f"[A] without a selection must say what selects, got {notices}",
+        )
+        await pilot.press("w")
+        await pilot.pause()
+        check(
+            not isinstance(app.screen, tui.LandingScreen),
+            "[w] before any dispatch must warn, not open an empty viewer",
+        )
+        await pilot.press("b")
+        await pilot.press("A")
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.BatchPlanScreen),
+            "[A] on a selection must open the batch plan gate, got "
+            f"{type(app.screen).__name__}",
+        )
+        await pilot.press("escape")
+        await pilot.pause()
+        check(
+            not app.landing_queue and landing_log.read_text() == "",
+            "escape from the [A] gate must dispatch nothing",
+        )
     gh_log.write_text("")
 
     # ── merging without lgtm is a maintainer power ───────────────────────

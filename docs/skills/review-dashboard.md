@@ -1,6 +1,6 @@
 ---
 name: review-dashboard
-version: "1.7"
+version: "1.8"
 last_updated: 2026-08-20
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
@@ -73,8 +73,9 @@ projections of that registry, including `j/k`, `g/G`, `Ctrl-d/Ctrl-u`, `h/l`,
 Enter, Escape, `Ctrl-q`, `/`, `r`, `y`, `Ctrl-p`, `:`, and `?`. Textual
 editor and confirmation focus remains authoritative: suspended commands do
 not consume typed prose or PR numbers. `u` remains the gated branch update;
-`U` selects live-evidence mechanical Renovate rows; `a` retains its
-approve+queue or selected-batch landing meanings.
+`U` selects live-evidence mechanical Renovate rows; `a` is approve+queue
+only and never touches a selection; `A` is the only batch-landing key (it
+does nothing without a selection) and `w` opens the read-only batch queue.
 
 `QueueRow` and `DecisionCard` carry the pull-request identity, TL;DR, current
 and reviewed heads, freshness, CI, mergeability, provenance, verification,
@@ -119,8 +120,9 @@ conflicts direct the maintainer to manual resolution before a gate.
    batch carries it forward. A toast is gone before a batch of eight
    finishes.
 5. **Batch every action that a maintainer repeats.** Merging and updating
-   branches take the batch selection when one exists. `a` on a selection is
-   different: the reviewed batch becomes one landing agent's brief behind
+   branches take the batch selection when one exists. `A` on a selection is
+   different: the reviewed batch
+   becomes one landing agent's brief behind
    one proportionate gate (see "Batch landing" below), not one typed gate
    per pull request.
 6. **Add the behaviour to `tests/dashboard_pilot.py`**, which drives the real
@@ -214,7 +216,8 @@ distinct states. `[o]` is only an optional browser escape hatch.
   `? CI UNKNOWN`, as applicable. The batch queue applies the same rule three
   layers deep — printed state word, a shape-distinct glyph from
   `LANDING_STATE_STYLES`, then colour — so a colourless or colour-blind read
-  loses nothing (see "Batch landing").
+  loses nothing (see "Batch landing"). Selection is not colour-only either:
+  a selected row leads with a `●` marker and carries a full-row background.
 - **Direct merge respects known CI state.** Ordinary `[m]` refuses a pull
   request whose snapshot or fetched live evidence says CI failed or is
   pending; GitHub branch protection remains an additional gate.
@@ -240,10 +243,14 @@ distinct states. `[o]` is only an optional browser escape hatch.
   which is duplicate evidence about the subject and says nothing about whether
   the branch can be brought current; `dependency_subject()` survives for
   duplicate detection only.
-- **Distinguish the merge paths.** Unselected, `a` asks Hive to create the
-  App-authored exact-head approval and apply `lgtm`, an opt-in to its sweep.
-  On a selection, `a` dispatches one
-  landing agent for the whole batch. `m` squashes now and is gated on
+- **Distinguish the merge paths.** `a` asks Hive to create the
+  App-authored exact-head approval and apply `lgtm` to the highlighted
+  pull request, an opt-in to its sweep.
+  On a selection, `A` dispatches one
+  landing agent for the whole batch; without a selection `A` does nothing.
+  `a` never touches a selection — it is approve+queue only.
+  `w` opens the read-only batch queue.
+  `m` squashes now and is gated on
   GitHub's `push` permission, read per repository. `L` leaves a review and
   merges nothing. A review that can only be given by also queueing or
   merging is not a review.
@@ -273,7 +280,7 @@ its own process group so `[x]` stops it whole.
 The agent reports, the screen polls: every per-PR state change is one JSON
 line in the task's status file (`diagnosing|fixing|waiting-ci|merging|
 awaiting-stable|merged|blocked|failed`, then a task-level `done`), and
-`LandingScreen` ([A], auto-pushed on dispatch) renders all batches, per-PR
+`LandingScreen` ([w], auto-pushed on dispatch) renders all batches, per-PR
 state, the agent log tail, and Hive stats. Never scrape agent prose for
 status. When a task finishes, `landing_finished` folds the report onto the
 rows: merged leaves the batch; blocked, failed, and awaiting-stable stays
