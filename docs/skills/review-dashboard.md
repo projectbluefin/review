@@ -1,6 +1,6 @@
 ---
 name: review-dashboard
-version: "1.8"
+version: "2.0"
 last_updated: 2026-08-20
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
@@ -314,12 +314,35 @@ directory — a bare one-second stamp would let two of them overwrite each
 other's files, and the name makes the record attributable. Same-second
 batches from one dashboard get a numeric suffix.
 
-**Done is `:stable`, not the merge.** A GitHub merge only starts the
-publish pipeline; the batch item is landed when the image's `:stable` tag
-carries the merged commit (verified via the publish workflow and the
-anonymous ghcr registry: a tag containing the commit must resolve to
-`:stable`'s digest or one of its index children). The agent reports
-`awaiting-stable` at merge and `merged` only once `:stable` has it.
+**Done is the release tag, not the merge — where an image is published.**
+A GitHub merge only starts the
+publish pipeline; the batch item is landed when the repository's release
+tag carries the merged commit. The tag is the repository's fact, never an
+assumption: the brief has the agent list the package's tags through the
+anonymous ghcr flow and accept the publish it can prove — the convention
+is `:stable`, a repository publishing only `:latest` proves it there
+(common#1008 was reported blocked on a successful `latest` publish), and
+a commit-tagged image with no moving release tag is itself a proven
+publish. `failed`/`blocked` is only for a merge commit no publication can
+evidence. The agent reports
+`awaiting-stable` at merge and `merged` only once the tag has it.
+A repository with no publish workflow and no image package — a
+config/quadlets repository — can never publish, so the brief has
+the agent detect that *before* merging and define done as the GitHub merge
+itself, reported as `merged` with a note that no image pipeline exists.
+The detection never uses the packages API (the shipped token lacks
+`read:packages`, and the orgs endpoint 404s on user-owned repositories —
+both read as a false "no package"): a repository counts as publishing
+unless both signals are absent — no workflow's YAML names `ghcr.io`, and
+the package is not anonymously readable: ghcr never 404s a missing
+package, so the signal is a denied anonymous token mint (403 DENIED) or
+`/tags/list` answering 401/403. A 403 alone is ambiguous with a private
+package; the mandatory workflow conjunction covers that case.
+On a merge-queue repository, `gh pr merge` answering "accepted by merge
+queue" means the merge completes later: poll `gh pr view` until MERGED and
+verify the merge commit's push-event publish run; never `gh run watch` a
+merge_group gate run post-merge (#291). Every wait-state note names its
+target and timeout.
 - **The completed card reuses those paths.** `L`, `a`, `m`, and `u` return to
   the queue's existing handlers, so permissions, live-head checks, exact
   commands, and typed-number confirmation remain the authority boundary.

@@ -1321,6 +1321,94 @@ async def main() -> int:
             "escape from the [A] gate must dispatch nothing",
         )
     gh_log.write_text("")
+    # ── the landing brief covers repositories with no image pipeline ────
+    # "Done is :stable" can never resolve where nothing publishes an image
+    # (observed: projectbluefin/bluespeed, a config/quadlets repository —
+    # a squash-merged PR sat marked failed). The brief must have the agent
+    # detect the missing pipeline before merging and treat the GitHub
+    # merge itself as done there — without the packages API, whose
+    # read:packages scope the shipped token lacks and whose orgs endpoint
+    # 404s on user-owned repositories (a false "no package").
+    probe = tui.landing.new_task(
+        [SimpleNamespace(key="projectbluefin/bluespeed#63", title="chore: bump digest")],
+        "castrojo",
+    )
+    brief = " ".join(Path(probe.prompt_path).read_text().split())
+    check(
+        "no publish workflow" in brief and "no image package" in brief,
+        "the brief must have the agent detect a missing publish workflow "
+        "and image package",
+    )
+    check(
+        "BEFORE merging" in brief,
+        "the pipeline check must happen before the merge, not after it",
+    )
+    check(
+        "the GitHub merge itself is done" in brief,
+        "the brief must define done as the GitHub merge when no image "
+        "pipeline exists",
+    )
+    check(
+        "unless BOTH signals are absent" in brief,
+        "the no-pipeline path must require both signals absent — one "
+        "signal alone never skips :stable verification",
+    )
+    check(
+        "token mint is denied" in brief and "401/403" in brief,
+        "the registry signal must be a denied anonymous token mint or "
+        "a /tags/list 401/403 — ghcr never 404s a missing package, so a "
+        "404-based test never fires (bluespeed proved it)",
+    )
+    check(
+        "PRIVATE package" in brief and "ambiguous" in brief,
+        "the brief must name the 403/private-package ambiguity and the "
+        "workflow conjunction that covers it",
+    )
+    check(
+        "not an error to retry" in brief,
+        "a denied mint is the negative signal itself — the brief must "
+        "say so, since curl -fsSL exits nonzero on it",
+    )
+    check(
+        "package_type=container" not in brief,
+        "the detection must not call the packages API",
+    )
+    check(
+        ":stable" in brief and "awaiting-stable" in brief,
+        "the brief must keep the :stable definition where a pipeline exists",
+    )
+
+    # On a merge-queue repository the merge completes after `gh pr merge`
+    # returns (common#1008: the agent watched a merge_group gate run for 20
+    # minutes on an already-merged pull request). The brief must teach the
+    # accept-then-poll path and the push-event publish run.
+    check(
+        "accepted by merge queue" in brief and "merge_group" in brief,
+        "the brief must teach the merge-queue accept, and never watching "
+        "a merge_group run",
+    )
+    check(
+        "until it reads MERGED" in brief,
+        "the merge-queue wait must poll the pull request state",
+    )
+    check(
+        "names its target and timeout" in brief,
+        "every wait-state note must name its target and timeout",
+    )
+
+    # common#1008 published successfully as `common:latest` and was
+    # reported blocked because common carries no `:stable` tag — the
+    # release tag is the repository's fact, never the brief's assumption,
+    # and blocked/failed is for a publish nothing can evidence at all.
+    check(
+        "is a fact about the repository" in brief and "`latest`" in brief,
+        "the brief must discover the release tag, not assume :stable",
+    )
+    check(
+        "no publication of the merge commit can be evidenced" in brief,
+        "the brief must accept the publish it can prove and fail only "
+        "when none can be evidenced",
+    )
 
     # ── merging without lgtm is a maintainer power ───────────────────────
     # lgtm is an opt-in to Hive's automation, not a toll on merging: a

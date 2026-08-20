@@ -35,9 +35,13 @@ DEFAULT_LANDING_COMMAND = "goose run --no-session -i @PROMPT"
 # "blocked" and "failed" differ: blocked means the rules forbid landing
 # (draft, failing required checks, no permission); failed means the attempt
 # itself errored. Both come back to the batch selected, with the note.
-# A GitHub merge is not "done": done is the merged commit published on the
-# repository's :stable image tag. "merged" is only reported once :stable
-# carries the change.
+# "Done" depends on the repository: with a publish pipeline it is the
+# merged commit published under the repository's release tag (the factory
+# convention is :stable; a repository publishing only :latest proves it
+# there), and "merged" is only reported once the tag carries the change;
+# with no publish workflow and no image package the GitHub merge itself
+# is done. The brief has the agent detect which kind of repository it is
+# landing before it merges.
 PR_STATES = (
     "diagnosing",
     "fixing",
@@ -144,12 +148,40 @@ For each pull request, in order:
    then squash-merge: `gh pr merge --squash`. If GitHub refuses (branch
    protection, review requirements), do not force anything — add the `lgtm`
    label instead and move on.
-5. A GitHub merge is not done. Done is the merged commit published on the
-   image's `:stable` tag: report `awaiting-stable` right after merging, then
-   watch the repository's publish workflow for the merge commit and verify
-   the `:stable` tag moved onto it. The image ships no registry client and
-   needs none — ghcr.io serves public packages anonymously, whether the
-   repository's owner is an org or a user. Mint a pull token:
+5. Done depends on whether this repository publishes an image, so check
+   BEFORE merging — never discover it after. Treat the repository as
+   publishing an image unless BOTH signals are absent: no workflow under
+   `.github/workflows` pushes to the registry (its YAML names `ghcr.io`),
+   and the package `ghcr.io/<owner>/<repo>` is not anonymously readable.
+   ghcr never 404s a missing package: the anonymous token mint is denied
+   (403 DENIED) for one, and `/tags/list` answers 401/403 — a 404 is only
+   ever a missing REF inside an existing package. The mint command below
+   (`curl -fsSL`) exits nonzero on a denied mint: that denial IS the
+   negative signal, not an error to retry. A 403 alone is ambiguous with
+   a PRIVATE package no anonymous caller can see; the mandatory
+   conjunction with the workflow signal covers that case — a repository
+   whose workflow publishes still takes the publish path. Only when both
+   are absent, the GitHub merge itself is done: report `merged` right after
+   merging, with a note like "no publish workflow, no image package — the
+   merge is the deliverable". Never take that path on one signal alone.
+
+   `gh pr merge` may answer "accepted by merge queue": the merge completes
+   later, on the queue's terms. Never `gh run watch` the merge_group gate
+   run — the pull request can be merged while that run still goes. Poll
+   `gh pr view --json state` until it reads MERGED, and verify the merge
+   commit's push-event publish run: on main the publish workflow triggers
+   on `push`, never `merge_group`.
+
+   A GitHub merge is otherwise not done. Done is the merged commit
+   published under the repository's release tag — and which tag that is
+   is a fact about the repository, never an assumption: the factory
+   convention is `:stable`, but a repository that publishes only `latest`
+   (projectbluefin/common is one) proves its publish there. Report
+   `awaiting-stable` right after merging, then watch the repository's
+   publish workflow for the merge commit (the push-event run). The image
+   ships no registry client and needs none — ghcr.io serves public
+   packages anonymously, whether the repository's owner is an org or a
+   user. Mint a pull token:
 
    tok=$(curl -fsSL "https://ghcr.io/token?scope=repository:<org>/<image>:pull" | jq -r .token)
 
@@ -158,17 +190,25 @@ For each pull request, in order:
    ghcr content-negotiates strictly: the `Accept` header must name the OCI
    index AND manifest media types
    (`application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json`),
-   or a ref that exists answers 404. The publish tags every build with the
+   or a ref that exists answers 404. `/tags/list` with the same token
+   lists the package's tags — paginated at 100, so follow the
+   `Link: rel="next"` cursor (`?last=<tag>`) until you have them all — and
+   names the release tag up front. The publish tags every build with the
    commit — `sha-<commit>` on the index here, arch-suffixed
-   `sha-<commit>-amd64`/`-arm64` on its children, the bare commit elsewhere;
-   `/tags/list` with the same token lists them — paginated at 100, so follow
-   the `Link: rel="next"` cursor (`?last=<tag>`) until the commit's tags
-   appear; they are not necessarily on the first page. `:stable` carries the
-   merge when a tag containing the commit resolves to `stable`'s digest or,
-   for a multi-arch index, to one of its children (GET `stable` with the
-   index Accept and read `.manifests[].digest`). Only then report `merged`.
-   If the publish fails, that failure is the deliverable: report `failed`
+   `sha-<commit>-amd64`/`-arm64` on its children, the bare commit
+   elsewhere; they are not necessarily on the first page. The release tag
+   carries the merge when a tag containing the commit resolves to the
+   release tag's digest or, for a multi-arch index, to one of its
+   children (GET the release tag with the index Accept and read
+   `.manifests[].digest`). A commit-tagged image with no moving release
+   tag is itself a proven publish. Only then report `merged`, naming the
+   evidence. If the publish fails — or no publication of the merge commit
+   can be evidenced at all — that is the deliverable: report `failed`
    with the evidence.
+
+   Every wait-state note names its target and timeout: `waiting-ci` names
+   the run and when you give up, `merging` names the merge-queue wait and
+   when you give up, `awaiting-stable` names the tag and when you give up.
 6. Never merge a draft, never merge with failing required checks, never pass
    `--admin` or any flag that bypasses branch protection, never force-push.
    A pull request the rules cannot land is reported, not forced.
