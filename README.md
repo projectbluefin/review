@@ -292,7 +292,10 @@ pull request to Hive's governor sweep with `a`, drafts are
 refused, and every
 action
 is appended as a JSON trace to `~/.local/state/bluefin-review/trace.jsonl`
-inside the container for the review feedback loop.
+for the review feedback loop. The launcher bind-mounts that directory from
+the host (`${XDG_STATE_HOME:-~/.local/state}/bluefin-review`), so the trace
+and the landing-batch records under `landings/` — what was dispatched, what
+failed, and the agent's reasons — survive a `review-queue` relaunch.
 `tests/dashboard-contract.sh` pins all of it.
 
 The leading arguments are the same model profiles `review-container` takes
@@ -637,6 +640,12 @@ selection is recomputed from the environment at every launch and never written
 to disk. `~/.config/hive/contributor.env` is host state that `review` reads but
 does not own; Hive's upstream setup creates it and owns its format. No other
 launcher state persists.
+
+One dashboard state directory is deliberately durable: `review-queue`
+bind-mounts `${XDG_STATE_HOME:-~/.local/state}/bluefin-review` into the
+container, so landing-batch records and the action trace survive the
+reclaim-by-replace relaunch. The dashboard writes it; the launcher only
+creates and mounts it.
 
 The image's controlled Goose configuration sets `GOOSE_MODE: auto`, so the
 agent runs its tools without a per-tool confirmation prompt. This is required,

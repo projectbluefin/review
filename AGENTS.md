@@ -18,7 +18,8 @@ context. Hive owns the WebSocket contributor protocol, task selection, the
 ## Boundaries
 
 Keep this repository focused: it ships the review appliance and nothing
-beside it. Persistent state stays limited to launcher configuration.
+beside it. Persistent state stays limited to launcher configuration and the
+review-queue landing record the launcher mounts for the dashboard.
 
 The interactive recipes run in the foreground of the terminal that launched
 them, and Ctrl-C stops them: a maintainer steers `review-queue`, and an

@@ -298,7 +298,7 @@ run_recipe() {
       -u REVIEW_NON_INTERACTIVE -u GOOSE_INSTALLED \
       -u REVIEW_CONTAINER_NAME -u REVIEW_DETACH \
       -u REVIEW_HIVE -u REVIEW_CONTRIBUTOR_IMAGE \
-      -u REVIEW_QUEUE_NAME \
+      -u REVIEW_QUEUE_NAME -u XDG_STATE_HOME \
       HOME="$home" PATH="$fake_bin:/usr/bin:/bin" TMPDIR="$tmp_root" \
       XDG_RUNTIME_DIR="$tmp_root" \
       GUM_LOG="$gum_log" RUNNER_LOG="$runner_log" \
@@ -518,6 +518,15 @@ assert_file_contains "GH_TOKEN:present" "$credential_log"
 assert_not_contains "contributor.env" "$OUT"
 assert_file_not_contains "/home/dev/.codex/auth.json" "$runner_log"
 assert_contains "starting the maintainer review dashboard (no Hive)" "$OUT"
+
+begin "review-queue: the dashboard state directory persists on the host"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
+# Landing batches, their failure reasons, and the action trace are the only
+# durable record of what the landing agent did; the reclaim-by-replace
+# relaunch must not wipe them (#281).
+assert_file_contains "--volume ${home}/.local/state/bluefin-review:/home/dev/.local/state/bluefin-review:rw,z" "$runner_log"
+assert_file_exists "${home}/.local/state/bluefin-review"
 
 begin "review-queue: explicit Codex selection reaches the shipped dashboard"
 reset_logs
