@@ -146,7 +146,9 @@ For each pull request, in order:
    or a ref that exists answers 404. The publish tags every build with the
    commit — `sha-<commit>` on the index here, arch-suffixed
    `sha-<commit>-amd64`/`-arm64` on its children, the bare commit elsewhere;
-   `/tags/list` with the same token names them all. `:stable` carries the
+   `/tags/list` with the same token lists them — paginated at 100, so follow
+   the `Link: rel="next"` cursor (`?last=<tag>`) until the commit's tags
+   appear; they are not necessarily on the first page. `:stable` carries the
    merge when a tag containing the commit resolves to `stable`'s digest or,
    for a multi-arch index, to one of its children (GET `stable` with the
    index Accept and read `.manifests[].digest`). Only then report `merged`.
