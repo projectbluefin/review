@@ -102,6 +102,8 @@ def new_task(stops: list, login: str) -> LandingTask:
     return task
 
 
+# fsdk-containers#164 ships skopeo in the base; it deletes the gh-api tag
+# check in step 5 below.
 def landing_prompt(task: LandingTask) -> str:
     """The batch brief. The agent acts on the maintainer's confirmed
     selection; the rules it may not cross are stated in it, not assumed."""
@@ -130,11 +132,17 @@ For each pull request, in order:
 5. A GitHub merge is not done. Done is the merged commit published on the
    image's `:stable` tag: report `awaiting-stable` right after merging, then
    watch the repository's publish workflow for the merge commit and verify
-   the `:stable` tag moved onto it (the image's
-   `org.opencontainers.image.revision` label is the commit — `skopeo inspect
-   docker://<image>:stable`). Only when `:stable` carries the change, report
-   `merged`. If the publish fails, that failure is the deliverable: report
-   `failed` with the evidence.
+   the `:stable` tag moved onto it. The published image carries the commit
+   in its tags (`sha-<commit>` here; other repositories tag the bare or
+   arch-prefixed commit), so verify with the package versions API — `gh`
+   ships in the image, no registry tooling needed:
+
+   gh api /orgs/<org>/packages/container/<image>/versions --paginate \
+     --jq '.[] | select(.metadata.container.tags | index("stable")) | .metadata.container.tags | join(" ")'
+
+   Only when the version carrying `stable` also carries the merge commit in
+   a tag, report `merged`. If the publish fails, that failure is the
+   deliverable: report `failed` with the evidence.
 6. Never merge a draft, never merge with failing required checks, never pass
    `--admin` or any flag that bypasses branch protection, never force-push.
    A pull request the rules cannot land is reported, not forced.

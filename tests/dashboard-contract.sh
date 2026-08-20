@@ -91,6 +91,10 @@ grep -q 'awaiting-stable' "$landing_py" ||
   fail "a merge is not done until :stable carries the change"
 grep -q ':stable' "$landing_py" ||
   fail "the landing brief must define done as :stable published"
+# The image ships no registry inspector until fsdk-containers#164 lands in
+# the base, so the brief must never instruct one.
+grep -q 'skopeo inspect' "$landing_py" &&
+  fail "the landing brief must not instruct skopeo; the image does not ship it (fsdk-containers#164)"
 
 # The gate is the typed pull request number: no y/yes, no timeout.
 grep -q 'class ConfirmMutation' "$tui" || fail "the ConfirmMutation gate must exist"
