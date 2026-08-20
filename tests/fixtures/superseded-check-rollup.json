@@ -1,0 +1,79 @@
+{
+  "headRefOid": "be8fdbdc55e5a8a5326f48d8aeef6b480fc4b4cc",
+  "mergeable": "MERGEABLE",
+  "mergeStateStatus": "CLEAN",
+  "statusCheckRollup": [
+    {
+      "__typename": "CheckRun",
+      "name": "Check PR base branch",
+      "workflowName": "PR Validation — testsuite",
+      "status": "COMPLETED",
+      "conclusion": "CANCELLED",
+      "startedAt": "2026-08-10T00:28:53Z",
+      "completedAt": "2026-08-10T00:28:53Z"
+    },
+    {
+      "__typename": "CheckRun",
+      "name": "validate-release-notes",
+      "workflowName": "Consumer validate shared generate-release-notes action",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "startedAt": "2026-08-10T00:28:55Z",
+      "completedAt": "2026-08-10T00:29:02Z"
+    },
+    {
+      "__typename": "CheckRun",
+      "name": "Check PR base branch",
+      "workflowName": "PR Validation — testsuite",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "startedAt": "2026-08-10T00:28:57Z",
+      "completedAt": "2026-08-10T00:29:00Z"
+    },
+    {
+      "__typename": "CheckRun",
+      "name": "E2E smoke",
+      "workflowName": "PR Validation — testsuite",
+      "status": "COMPLETED",
+      "conclusion": "SKIPPED",
+      "startedAt": "2026-08-10T00:28:54Z",
+      "completedAt": "2026-08-10T00:28:54Z"
+    },
+    {
+      "__typename": "CheckRun",
+      "name": "validate",
+      "workflowName": "PR Validation — testsuite",
+      "status": "COMPLETED",
+      "conclusion": "CANCELLED",
+      "startedAt": "2026-08-10T00:28:54Z",
+      "completedAt": "2026-08-10T00:28:53Z"
+    },
+    {
+      "__typename": "CheckRun",
+      "name": "validate",
+      "workflowName": "PR Validation — testsuite",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "startedAt": "2026-08-10T00:29:03Z",
+      "completedAt": "2026-08-10T00:30:09Z"
+    },
+    {
+      "__typename": "CheckRun",
+      "name": "Unit tests",
+      "workflowName": "PR Validation — testsuite",
+      "status": "COMPLETED",
+      "conclusion": "CANCELLED",
+      "startedAt": "2026-08-10T00:28:54Z",
+      "completedAt": "2026-08-10T00:28:53Z"
+    },
+    {
+      "__typename": "CheckRun",
+      "name": "Unit tests",
+      "workflowName": "PR Validation — testsuite",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "startedAt": "2026-08-10T00:29:03Z",
+      "completedAt": "2026-08-10T00:30:26Z"
+    }
+  ]
+}

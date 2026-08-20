@@ -1028,6 +1028,20 @@ review-queue *queue_args:
       # Podman does not pass COLORTERM through on its own.
       --env COLORTERM
     )
+    # The dashboard's record — dispatched landing batches, their failure
+    # reasons, the action trace — lives under the container's XDG state
+    # directory, and a reclaim-by-replace relaunch must not lose it (#281).
+    # One shared host directory under the host XDG state root: the queue it
+    # records is the same whichever instance name runs, and :z keeps it
+    # writable for concurrent named dashboards.
+    QUEUE_STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-review"
+    mkdir -p "$QUEUE_STATE_DIR"
+    CONTAINER_ARGS+=(--volume "${QUEUE_STATE_DIR}:/home/dev/.local/state/bluefin-review:rw,z")
+    # The instance name qualifies each landing batch id: two named dashboards
+    # share the state directory, and a bare timestamp id would let their
+    # batches overwrite each other's prompt, status, and log.
+    export BLUEFIN_REVIEW_INSTANCE="$CONTAINER_NAME"
+    CONTAINER_ARGS+=(--env BLUEFIN_REVIEW_INSTANCE)
     if [[ "$REVIEW_BACKEND" != codex ]]; then
       [[ -n "$GOOSE_PROVIDER" ]] && CONTAINER_ARGS+=(--env "GOOSE_PROVIDER=${GOOSE_PROVIDER}")
       [[ -n "$GOOSE_MODEL" ]] && CONTAINER_ARGS+=(--env "GOOSE_MODEL=${GOOSE_MODEL}")

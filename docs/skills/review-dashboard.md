@@ -1,7 +1,7 @@
 ---
 name: review-dashboard
-version: "1.4"
-last_updated: 2026-08-16
+version: "2.0"
+last_updated: 2026-08-20
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
 entry_point: docs/skills/review-dashboard.md
@@ -73,8 +73,9 @@ projections of that registry, including `j/k`, `g/G`, `Ctrl-d/Ctrl-u`, `h/l`,
 Enter, Escape, `Ctrl-q`, `/`, `r`, `y`, `Ctrl-p`, `:`, and `?`. Textual
 editor and confirmation focus remains authoritative: suspended commands do
 not consume typed prose or PR numbers. `u` remains the gated branch update;
-`U` selects live-evidence mechanical Renovate rows; `a` retains its
-approve+queue or selected-batch landing meanings.
+`U` selects live-evidence mechanical Renovate rows; `a` is approve+queue
+only and never touches a selection; `A` is the only batch-landing key (it
+does nothing without a selection) and `w` opens the read-only batch queue.
 
 `QueueRow` and `DecisionCard` carry the pull-request identity, TL;DR, current
 and reviewed heads, freshness, CI, mergeability, provenance, verification,
@@ -119,8 +120,9 @@ conflicts direct the maintainer to manual resolution before a gate.
    batch carries it forward. A toast is gone before a batch of eight
    finishes.
 5. **Batch every action that a maintainer repeats.** Merging and updating
-   branches take the batch selection when one exists. `a` on a selection is
-   different: the reviewed batch becomes one landing agent's brief behind
+   branches take the batch selection when one exists. `A` on a selection is
+   different: the reviewed batch
+   becomes one landing agent's brief behind
    one proportionate gate (see "Batch landing" below), not one typed gate
    per pull request.
 6. **Add the behaviour to `tests/dashboard_pilot.py`**, which drives the real
@@ -171,6 +173,13 @@ Content.from_markup("hello [bold]$name[/bold]!", name=name)
 at the colon; `[link="https://…"]` is correct, and reaches the terminal as
 OSC 8.
 
+**Markup spans resolve `$`-theme variables.** `[$text-success on
+$success-muted]…[/]` inside a `Static` parses through the active app's
+stylesheet, so the theme's text-on-muted pairings work in markup, not only
+in CSS. Padding spaces inside a span keep its background — that is how a
+markup line becomes a full-width bar (`ljust` the label to the content
+width, then wrap it in the styled span).
+
 **Never touch the DOM from a thread worker — including the query.** Textual
 is not thread-safe. `self.call_from_thread(self.query_one(...).update, text)`
 looks safe and is not: the query runs on the worker thread and can race a
@@ -204,10 +213,20 @@ distinct states. `[o]` is only an optional browser escape hatch.
   true conflict offers exceptional manual handoff without a bypass.
 - **Colour is never the only carrier of a fact.** Rows colour by state *and*
   carry `⚑ CONFLICTS`, `✓ CI GREEN`, `✗ CI FAILED`, `… CI PENDING`, or
-  `? CI UNKNOWN`, as applicable.
+  `? CI UNKNOWN`, as applicable. The batch queue applies the same rule three
+  layers deep — printed state word, a shape-distinct glyph from
+  `LANDING_STATE_STYLES`, then colour — so a colourless or colour-blind read
+  loses nothing (see "Batch landing"). Selection is not colour-only either:
+  a selected row leads with a `●` marker and carries a full-row background.
 - **Direct merge respects known CI state.** Ordinary `[m]` refuses a pull
   request whose snapshot or fetched live evidence says CI failed or is
   pending; GitHub branch protection remains an additional gate.
+- **Roll up checks at the exact current head.** Fetch `headRefOid` and
+  `statusCheckRollup` in the same `gh pr view`, group check runs by workflow
+  and job name (commit statuses by context), and use only the newest run in
+  each stable context. Superseded cancellations do not make a successful
+  rerun fail; authoritative failures, cancellations, pending checks, absent
+  checks, and GitHub's merge state remain separate evidence.
 - **Prefer the snapshot already in memory.** `mergeable_state`, `check_state`,
   `review_state`, `labels` and every duplicate's title arrive with the queue
   and the cluster listing. Colour, the merge-queue meter and the duplicate
@@ -224,13 +243,24 @@ distinct states. `[o]` is only an optional browser escape hatch.
   which is duplicate evidence about the subject and says nothing about whether
   the branch can be brought current; `dependency_subject()` survives for
   duplicate detection only.
-- **Distinguish the merge paths.** Unselected, `a` asks Hive to create the
-  App-authored exact-head approval and apply `lgtm`, an opt-in to its sweep.
-  On a selection, `a` dispatches one
-  landing agent for the whole batch. `m` squashes now and is gated on
+- **Distinguish the merge paths.** `a` asks Hive to create the
+  App-authored exact-head approval and apply `lgtm` to the highlighted
+  pull request, an opt-in to its sweep.
+  On a selection, `A` dispatches one
+  landing agent for the whole batch; without a selection `A` does nothing.
+  `a` never touches a selection — it is approve+queue only.
+  `w` opens the read-only batch queue.
+  `m` squashes now and is gated on
   GitHub's `push` permission, read per repository. `L` leaves a review and
   merges nothing. A review that can only be given by also queueing or
   merging is not a review.
+- **Treat the Hive API as JSON, not a browser.** The read-only status probe
+  reports missing hub configuration, missing credentials, network failure,
+  authentication, authorization, edge/login redirects, malformed responses,
+  and server failure as separate concise states. The queue POST never follows
+  a redirect and succeeds only when a bounded JSON response explicitly says
+  `queued`; the typed pull-request-number gate remains the authority boundary.
+  Hosted queueing remains blocked by the ingress defect tracked in #258.
 
 ## Batch landing
 
@@ -250,17 +280,91 @@ its own process group so `[x]` stops it whole.
 The agent reports, the screen polls: every per-PR state change is one JSON
 line in the task's status file (`diagnosing|fixing|waiting-ci|merging|
 awaiting-stable|merged|blocked|failed`, then a task-level `done`), and
-`LandingScreen` ([A], auto-pushed on dispatch) renders all batches, per-PR
+`LandingScreen` ([w], auto-pushed on dispatch) renders all batches, per-PR
 state, the agent log tail, and Hive stats. Never scrape agent prose for
 status. When a task finishes, `landing_finished` folds the report onto the
-rows: merged leaves the batch; blocked, failed, and awaiting-stable stays
-selected with the agent's reason — the same rule as every other failure.
+rows and notifies the maintainer: the toast carries the batch id and the
+per-state counts, at error severity when anything failed or the agent
+exited without the task-level `done` event, and the same text persists on
+the status line (`last batch …`) until the next dispatch or refresh. The
+rows keep what the toast cannot outlive: merged leaves the batch; blocked,
+failed, and awaiting-stable stays selected with the agent's reason — the
+same rule as every other failure. A pull request the agent never carried
+to an outcome is marked `no outcome reported` when the agent closed its
+report with `done` and `agent died mid-batch` when it never did — each
+with the last reported state, both distinguishable from every state the
+agent can report.
 
-**Done is `:stable`, not the merge.** A GitHub merge only starts the
-publish pipeline; the batch item is landed when the image's `:stable` tag
-carries the merged commit (verified via the publish workflow and the
-image's `org.opencontainers.image.revision` label). The agent reports
-`awaiting-stable` at merge and `merged` only once `:stable` has it.
+The screen is a cabinet of framed panels (`BATCHES`, `HIVE`, `AGENT LOG`,
+round `$secondary` borders with titles) over a title bar. Each batch header
+is a full-width state bar (`batch_bar_style`: running is `$text-primary on
+$primary-muted`, queued `$text-warning on $warning-muted`, exited 0
+`$text-success on $success-muted`, anything else `$text-error on
+$error-muted`). A running batch's header also names its heartbeat — the
+age of the status file's last append (`last report 3m ago`) — so a healthy
+long wait is distinguishable from a dead agent (#291), and each pull
+request carries its state three ways at once:
+the printed word, a shape-distinct glyph, and a colour from
+`LANDING_STATE_STYLES` — `◌` waiting, `◐` diagnosing/fixing, `◔`
+waiting-ci, `▶` merging, `◆` awaiting-stable, `✓` merged, `■` blocked, `✗`
+failed, `✔` for the task-level done. Colour is additive: terminal states
+also read bold on a muted fill, so hue is never the only difference between
+two states. Verified against the pinned Textual: markup spans resolve
+`$`-theme variables through the active app's stylesheet, and padding spaces
+inside a span keep its background — that is what makes the header bar
+full-width.
+
+The record outlives the run: the launcher mounts the state directory from
+the host, and `restore_landing_marks` folds the newest persisted outcome
+(`landing.persisted_events`, oldest file first) back onto matching rows
+whenever the queue (re)builds them — a relaunch shows the failure marking
+again instead of reverting to un-reviewed (#281). Only the marking is
+restored; rebuilding a batch selection stays the maintainer's. A manual
+success — a re-queue, a direct merge — clears the row in memory, so it
+also writes a superseding event (`landing.record_event`, appended to
+`manual.jsonl` with a fresh mtime, which wins the fold) or the next
+refresh would fold the stale failure back onto the row (#290). The record
+is durable, so it is bounded: batch files older than seven days are pruned
+when the record is read. Each task id
+carries the instance name (`BLUEFIN_REVIEW_INSTANCE`, set by the launcher
+from the container name) because named dashboards share the one state
+directory — a bare one-second stamp would let two of them overwrite each
+other's files, and the name makes the record attributable. Same-second
+batches from one dashboard get a numeric suffix.
+
+**Done is the release tag, not the merge — where an image is published.**
+A GitHub merge only starts the
+publish pipeline; the batch item is landed when the repository's release
+tag carries the merged commit. The tag is the repository's fact, never an
+assumption: the brief has the agent list the package's tags through the
+anonymous ghcr flow and accept the publish it can prove — the convention
+is `:stable`, a repository publishing only `:latest` proves it there
+(common#1008 was reported blocked on a successful `latest` publish), and
+a commit-tagged image with no moving release tag is itself a proven
+publish. `failed`/`blocked` is only for a merge commit no publication can
+evidence. The agent reports
+`awaiting-stable` at merge and `merged` only once the tag has it.
+A repository with no publish workflow and no image package — a
+config/quadlets repository — can never publish, so the brief has
+the agent detect that *before* merging and define done as the GitHub merge
+itself, reported as `merged` with a note that no image pipeline exists.
+The detection never uses the packages API (the shipped token lacks
+`read:packages`, and the orgs endpoint 404s on user-owned repositories —
+both read as a false "no package"): a repository counts as publishing
+unless both signals are absent — no workflow's YAML names `ghcr.io`, and
+the package is not anonymously readable: ghcr never 404s a missing
+package, so the signal is a denied anonymous token mint (403 DENIED) or
+`/tags/list` answering 401/403. A 403 alone is ambiguous with a private
+package; the mandatory workflow conjunction covers that case.
+On a merge-queue repository, `gh pr merge` answering "accepted by merge
+queue" means the merge completes later: poll `gh pr view` until MERGED and
+verify the merge commit's push-event publish run; never `gh run watch` a
+merge_group gate run post-merge (#291). Every wait-state note names its
+target and timeout. GitHub computes mergeability asynchronously, so a
+`mergeable: UNKNOWN` answer is a cache-warming placeholder: the brief has
+the agent re-query with backoff for up to a minute and act only on the
+computed state — `blocked` on UNKNOWN alone reports nothing a maintainer
+can act on (#294).
 - **The completed card reuses those paths.** `L`, `a`, `m`, and `u` return to
   the queue's existing handlers, so permissions, live-head checks, exact
   commands, and typed-number confirmation remain the authority boundary.
@@ -299,7 +403,10 @@ mutates GitHub.
 ## Red Flags
 
 - `then=lambda: self.mutate(...)` — a chained gate; the contract fails on it.
-- Interpolating any GitHub-sourced text into markup without `escape()`.
+- Interpolating any GitHub- or agent-sourced text into markup without
+  `escape()`. An agent-reported JSONL state is attacker-shaped text too:
+  unescaped, `waiting[/][blink]OWNED` raised `MarkupError` in
+  `rows.update()` and took the whole batch-queue screen down.
 - `self.query_one(...)` evaluated inside an `@work(thread=True)` body.
 - A new mutating verb passed to the read-only `gh()` helper.
 - A default view that filters the queue without saying so.
@@ -318,6 +425,6 @@ pre-commit run --all-files
 - [ ] Multi-command actions are one gate, ordered so the first failure is
       harmless.
 - [ ] Failures mark the row and keep the stop selected.
-- [ ] All GitHub-sourced text passes through `escape()`.
+- [ ] All GitHub- and agent-sourced text passes through `escape()`.
 - [ ] No DOM access inside a thread worker.
 - [ ] The pilot presses the key and asserts the result.

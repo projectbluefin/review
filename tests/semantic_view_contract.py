@@ -283,6 +283,43 @@ class SemanticViewContractTests(unittest.TestCase):
             ),
         )
 
+    def test_decision_card_leads_with_a_complete_maintainer_summary(self):
+        result = ReviewResult.from_dict({
+            "version": 1,
+            "state": "findings",
+            "counts": {"critical": 0, "high": 1, "medium": 0, "low": 0},
+            "findings": [{
+                "severity": "high",
+                "title": "unsafe mutation",
+                "file": "image/tui/example.py",
+                "line": 7,
+            }],
+            "provenance": {
+                "backend": "codex",
+                "model": "gpt-5.6-luna",
+                "head_sha": "b" * 40,
+            },
+            "live": {
+                "title": "Make completed reviews decision-first",
+                "tldr": "Replace the transcript-first result with a maintainer brief.",
+                "mergeable_state": "clean",
+                "check_state": "success",
+            },
+        })
+
+        card = build_decision_card(result, exact_head="b" * 40)
+
+        self.assertEqual(
+            card.summary.what_changed,
+            "Replace the transcript-first result with a maintainer brief.",
+        )
+        self.assertEqual(card.summary.risk_impact, "HIGH risk · 1 actionable finding")
+        self.assertEqual(card.summary.ci_merge_state, "CI GREEN · MERGEABLE")
+        self.assertEqual(
+            card.summary.recommended_action,
+            "Request changes or comment on the cited finding.",
+        )
+
     def test_decision_card_binds_landed_goose_live_full_head(self):
         result = ReviewResult.from_dict({
             "version": 1,

@@ -46,7 +46,9 @@ from textual.widgets import (
     TextArea,
 )
 from review_result import ReviewResult, adapt_current_engine
+from semantic_view import DecisionState, build_decision_card
 import landing
+import hive_api
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from harness.codex import CodexHarness
 from harness.goose import GooseHarness
@@ -68,6 +70,7 @@ TRACE_PATH = os.path.join(
 )
 MUTATION_TIMEOUT = 60
 HIVE_TIMEOUT = 15
+HIVE_API_HELPER = os.path.join(os.path.dirname(__file__), "hive_api.py")
 MAX_REVIEW_BODY_CHARS = 4096
 # The label Hive's governor sweep scans for. It is not defined in most
 # repositories; Hive's queue endpoint owns creating and applying it.
@@ -112,8 +115,9 @@ COMMANDS = (
     CommandSpec("open_browser", "o", "open_browser", "open"),
     CommandSpec("view_diff", "v", "view_diff", "diff"),
     CommandSpec("comment", "c", "comment", "comment", mutating=True),
-    CommandSpec("approve_or_land", "a", "merge", "approve+queue / land batch", mutating=True),
-    CommandSpec("agents", "A", "agents", "batch queue"),
+    CommandSpec("approve_or_land", "a", "merge", "approve+queue", mutating=True),
+    CommandSpec("land_batch", "A", "land_batch", "land batch", mutating=True),
+    CommandSpec("agents", "w", "agents", "watch batches"),
     CommandSpec("merge_now", "m", "merge_now", "merge now", mutating=True),
     CommandSpec("reject", "x", "reject", "reject", mutating=True),
     CommandSpec("update_branch", "u", "update_branch", "update clean branch", mutating=True),
@@ -145,11 +149,11 @@ def back_bindings(dismiss_action: str) -> list[Binding]:
 # typed-number gate.
 KEYS_READING = (
     " [b]r[/b] review [b]v[/b] diff [b]o[/b] open [b]h[/b] handoff"
-    " [b]/[/b] steer [b]f[/b] filter [b]b[/b] batch [b]A[/b] agents [b]H[/b] hive"
+    " [b]/[/b] steer [b]f[/b] filter [b]b[/b] batch [b]w[/b] watch batches [b]H[/b] hive"
     " [b]R[/b] refresh [b]q[/b]/Esc back"
 )
 KEYS_ACTING = (
-    " [b]L[/b] leave review [b]a[/b] approve+queue · land batch [b]m[/b] merge"
+    " [b]L[/b] leave review [b]a[/b] approve+queue [b]A[/b] land batch [b]m[/b] merge"
     " [b]u[/b] update clean branch [b]U[/b] select mechanical [b]x[/b] reject [b]M[/b] dupes"
 )
 
@@ -318,26 +322,18 @@ def hive_token() -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def hive_get(path: str) -> dict:
+def hive_get(path: str) -> hive_api.Result:
     """Read one hub endpoint. Read-only, and never fatal.
 
-    Consulting Hive must not be able to break the dashboard: an unreachable
-    or unauthenticated hub is reported as unreachable, not raised. Hive
-    remains the sole authority for assigning contributor tasks — nothing here
-    claims, reorders, or declines any of them.
+    Consulting Hive must not be able to break the dashboard. The result keeps
+    routing, authentication, authorization, network, malformed-response, and
+    server failures distinct without exposing credentials.
     """
     base = hive_api_base()
     token = hive_token()
-    if not base or not token:
-        return {}
-    request = urllib.request.Request(
-        f"{base}{path}", headers={"Authorization": f"Bearer {token}"}
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=HIVE_TIMEOUT) as response:
-            return json.load(response)
-    except Exception:
-        return {}
+    if not base:
+        return hive_api.Result(False, "configuration", "not configured", {})
+    return hive_api.request(f"{base}{path}", token, timeout=HIVE_TIMEOUT)
 
 
 def trace(record: dict) -> None:
@@ -417,7 +413,7 @@ def mechanical_reason(author: str, live: dict) -> str | None:
         return None
     if (live.get("mergeStateStatus") or "").upper() != "BEHIND":
         return None
-    checks = live.get("statusCheckRollup") or []
+    checks = authoritative_checks(live)
     if not checks:
         return None
     for check in checks:
@@ -462,9 +458,40 @@ def ci_marker(checks: str) -> str:
     }.get(checks, "? CI UNKNOWN")
 
 
+def authoritative_checks(live: dict) -> list[dict]:
+    """Return the latest run for each stable current-head check context.
+
+    GitHub's pull-request ``statusCheckRollup`` is fetched together with
+    ``headRefOid``, so every entry belongs to that exact current head. Reruns
+    may leave older entries in the rollup; a check-run context is its workflow
+    plus job name, while a commit status context is its context string.
+    """
+    latest: dict[tuple[str, ...], tuple[tuple[str, str, int], dict]] = {}
+    ungrouped: list[dict] = []
+    for index, check in enumerate(live.get("statusCheckRollup") or []):
+        typename = str(check.get("__typename") or "")
+        name = str(check.get("name") or "")
+        context = str(check.get("context") or "")
+        if typename == "CheckRun" or name:
+            key = ("check-run", str(check.get("workflowName") or ""), name)
+        elif typename == "StatusContext" or context:
+            key = ("status-context", context)
+        else:
+            ungrouped.append(check)
+            continue
+        rank = (
+            str(check.get("startedAt") or ""),
+            str(check.get("completedAt") or ""),
+            index,
+        )
+        if key not in latest or rank > latest[key][0]:
+            latest[key] = (rank, check)
+    return [item[1] for item in sorted(latest.values(), key=lambda item: item[0])] + ungrouped
+
+
 def effective_check_state(snapshot: str, live: dict) -> str:
     """Prefer fetched check evidence, retaining the snapshot when absent."""
-    checks = live.get("statusCheckRollup") or []
+    checks = authoritative_checks(live)
     if not checks:
         return snapshot or "unknown"
     outcomes = [check.get("conclusion") or check.get("state") or "PENDING" for check in checks]
@@ -589,8 +616,8 @@ class Stop:
         return mechanical_reason(self.author, self.live)
 
 
-def live_review_context(live: dict) -> dict:
-    checks = live.get("statusCheckRollup") or []
+def live_review_context(live: dict, *, title: str = "") -> dict:
+    checks = authoritative_checks(live)
     outcomes = [
         str(item.get("conclusion") or item.get("state") or "PENDING").upper()
         for item in checks
@@ -605,11 +632,14 @@ def live_review_context(live: dict) -> dict:
         ci = "pending"
     else:
         ci = "unknown"
+    head_sha = str(live.get("headRefOid") or "")
     return {
         "ci": ci,
         "mergeable": live.get("mergeable") or "?",
         "merge_state": live.get("mergeStateStatus") or "?",
-        "head": str(live.get("headRefOid") or "?")[:12],
+        "head": (head_sha or "?")[:12],
+        "head_sha": head_sha,
+        "title": title or live.get("title") or "",
         "draft": live.get("isDraft", "?"),
     }
 
@@ -618,7 +648,7 @@ def live_review_verification(live: dict) -> list[dict]:
     records = []
     passed = {"SUCCESS", "NEUTRAL", "SKIPPED"}
     failed = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}
-    for index, item in enumerate(live.get("statusCheckRollup") or [], start=1):
+    for index, item in enumerate(authoritative_checks(live), start=1):
         outcome = str(item.get("conclusion") or item.get("state") or "PENDING").upper()
         state = (
             "verified"
@@ -678,6 +708,42 @@ class BatchPlanScreen(ModalScreen[bool]):
         self.dismiss(True)
 
 
+# Per-state presentation for the batch queue. The printed state word stays
+# the primary carrier of the fact; the glyph adds a distinct *shape* and the
+# style adds colour on top, so no fact exists only as colour (the design
+# rule in docs/skills/review-dashboard.md). Deuteranopia merges red and
+# green, so shapes differ between states and the terminal states also read
+# bold on a muted fill rather than relying on hue.
+# Verified against the pinned Textual (8.2.8): markup spans resolve $-theme
+# variables through the active app's stylesheet (Style.parse falls back to
+# app.stylesheet.parse_style), and padding spaces inside a span keep its
+# background — which is what turns a batch header into a full-width bar.
+LANDING_STATE_STYLES: dict[str, tuple[str, str]] = {
+    "waiting": ("◌", "dim"),
+    "diagnosing": ("◐", "cyan"),
+    "fixing": ("◐", "cyan"),
+    "waiting-ci": ("◔", "$text-warning"),
+    "merging": ("▶", "bold $text-primary"),
+    "awaiting-stable": ("◆", "$text-accent"),
+    "merged": ("✓", "bold $text-success on $success-muted"),
+    "blocked": ("■", "$text-warning on $warning-muted"),
+    "failed": ("✗", "bold $text-error on $error-muted"),
+}
+
+
+def batch_bar_style(state: str) -> str:
+    """The header bar's style for a batch-level state. Every header is a
+    filled bar, its fill naming the state with the theme's own
+    text-on-muted pairing so the text stays legible on it."""
+    if state == "running":
+        return "bold $text-primary on $primary-muted"
+    if state == "queued":
+        return "bold $text-warning on $warning-muted"
+    if state == "exited 0":
+        return "bold $text-success on $success-muted"
+    return "bold $text-error on $error-muted"
+
+
 class LandingScreen(Screen):
     """The live batch queue: every dispatched batch, its agent, the per-PR
     state the agent reports, and what Hive is doing alongside.
@@ -685,6 +751,25 @@ class LandingScreen(Screen):
     Status comes from the agent's JSONL report file, polled on a timer —
     never scraped from its prose. The screen is read-only except [x], which
     stops the running agent's process group the same way a review stop does.
+
+    The presentation is a cabinet of framed panels in the Midnight Commander
+    mold: a title bar, the BATCHES panel where each header is a state-filled
+    bar and each pull request carries its state as word, glyph, and colour
+    together, the HIVE line, and the AGENT LOG.
+    """
+
+    CSS = """
+    #landing-status {
+        height: 1; background: $secondary; color: $text; text-style: bold;
+    }
+    #landing-rows {
+        border: round $secondary; height: auto; padding: 0 1;
+    }
+    #landing-hive {
+        border: round $secondary; height: 3; padding: 0 1;
+        color: $text-secondary;
+    }
+    #landing-log { border: round $secondary; }
     """
 
     BINDINGS = [
@@ -704,31 +789,58 @@ class LandingScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
+        self.query_one("#landing-rows", Static).border_title = "BATCHES"
+        self.query_one("#landing-hive", Static).border_title = "HIVE"
+        self.query_one("#landing-log", RichLog).border_title = "AGENT LOG"
         self.poll()
         self.set_interval(2.0, self.poll)
 
     def poll(self) -> None:
+        rows = self.query_one("#landing-rows", Static)
+        width = rows.content_region.width
         lines: list[str] = []
         for task in self.dashboard.landing_queue:
             if task.returncode is None:
                 state = "running" if task.running else "queued"
             else:
                 state = f"exited {task.returncode}"
-            lines.append(f"[b]batch {task.task_id}[/b] — {state}")
+            header = f" batch {task.task_id} — {state}"
+            if task.running:
+                # A wait that names its target is still invisible if the
+                # row cannot say how long the agent has been silent: the
+                # report file's mtime is the heartbeat (#291).
+                header += f" · {landing.report_age(task.status_path)}"
+            # ljust(0) is a no-op, so the first pre-layout poll renders a
+            # text-wide bar and the next tick paints it to the panel's edge.
+            lines.append(f"[{batch_bar_style(state)}]{header.ljust(width)}[/]")
             events = landing.parse_status(task.status_path)
             done = events.get("", {})
             for stop in task.stops:
                 event = events.get(stop.key, {})
                 note = event.get("note", "")
-                mark = event.get("state", "waiting")
+                # The state string is agent-sourced JSONL: coerce it (a
+                # non-string would raise on the dict lookup) and escape it
+                # before it meets the markup parser. The styled branch only
+                # fires on this module's own fixed literal keys, so the
+                # escape belongs on the fallback alone.
+                mark = str(event.get("state", "waiting"))
+                glyph, style = LANDING_STATE_STYLES.get(mark, ("?", ""))
+                if style:
+                    badge = f"[{style}]{glyph} {mark}[/]"
+                else:
+                    badge = f"{glyph} {escape(mark)}"
                 lines.append(
                     f"  {link(stop.key, pr_url(stop.repository, stop.number))}"
-                    f"  {mark}"
+                    f"  {badge}"
                     + (f" — {escape(str(note))}" if note else "")
                 )
             if done:
-                lines.append(f"  done — {escape(str(done.get('note', '')))}")
-        self.query_one("#landing-rows", Static).update("\n".join(lines))
+                note = escape(str(done.get("note", "")))
+                lines.append(
+                    "  [bold $text-success]✔ done[/]"
+                    + (f" — {note}" if note else "")
+                )
+        rows.update("\n".join(lines))
         self.query_one("#landing-hive", Static).update(
             f" Hive: {self.dashboard.hive_state or 'asking…'}"
         )
@@ -1447,6 +1559,7 @@ class ReviewScreen(Screen):
         self.finished = True
         stop = self.stop_record
         elapsed = int(time.monotonic() - self.started)
+        live_context = live_review_context(stop.live, title=stop.title)
         if ACTIVE_BACKEND == "codex":
             base_sha = str(stop.live.get("baseRefOid") or "")
             head_sha = str(stop.live.get("headRefOid") or "")
@@ -1465,7 +1578,7 @@ class ReviewScreen(Screen):
                 result = ReviewResult(
                     result.version, result.state, result.counts, result.findings,
                     live_review_verification(stop.live), result.provenance,
-                    stop.overlap, live_review_context(stop.live), result.raw_evidence,
+                    stop.overlap, live_context, result.raw_evidence,
                 )
         else:
             result = adapt_current_engine(
@@ -1475,7 +1588,7 @@ class ReviewScreen(Screen):
                  "repository": stop.repository, "pull_request": stop.number},
                 verification=live_review_verification(stop.live),
                 overlap=stop.overlap,
-                live=live_review_context(stop.live),
+                live=live_context,
             )
         if ACTIVE_BACKEND == "codex" and len(str(stop.live.get("baseRefOid") or "")) == 40 and len(str(stop.live.get("headRefOid") or "")) == 40:
             request = ReviewRequest(
@@ -1489,22 +1602,27 @@ class ReviewScreen(Screen):
                     Preference("codex", result.provenance.get("model", "gpt-5.6-luna"),
                                result.provenance.get("reasoning_effort", "low")),
                 )
+        card = build_decision_card(
+            result, exact_head=str(stop.live.get("headRefOid") or "")
+        )
         if error:
             outcome, state = "error", f"FAILED to start: {error}"
         elif self.stop_requested:
             outcome, state = "stopped", "STOPPED — you cancelled it. Nothing was submitted."
         elif code is not None and code < 0:
             outcome, state = "stopped", "STOPPED — the review was killed. Nothing was submitted."
-        elif result.state in ("complete", "findings"):
+        elif card.state in (DecisionState.CLEAN, DecisionState.FINDINGS):
             outcome = "complete"
             state = "COMPLETE — a Review Draft for you to judge. Nothing was submitted."
-        elif result.state == "incomplete":
+        elif card.state is DecisionState.STALE:
+            outcome, state = "stale", "STALE — the review does not match the current head. Rerun it."
+        elif card.state is DecisionState.INCOMPLETE:
             outcome = "incomplete"
             state = (
                 "INCOMPLETE — part of this review returned no verdict. "
                 "Its finding count is not a clean bill of health."
             )
-        elif result.state == "unparsable":
+        elif card.state is DecisionState.UNPARSABLE:
             outcome = "incomplete"
             state = "UNPARSABLE — the review output is not a clean result."
         else:
@@ -1519,46 +1637,51 @@ class ReviewScreen(Screen):
             f" {link(stop.key, pr_url(stop.repository, stop.number))} — "
             f"{escape(state)} ({elapsed}s) — {escape('[escape]')} closes"
         )
-        finding_total = sum(result.counts.values())
-        headline = (
-            "No evidenced findings."
-            if result.is_clean else
-            f"{finding_total} evidenced finding{'s' if finding_total != 1 else ''}."
-            if result.state == "findings" else
-            "No clean decision: inspect raw evidence."
-        )
+        finding_total = sum(card.counts.values())
         lines = [
-            f"{result.state.upper()}  {escape(stop.key)} — {headline}",
+            f"{card.state.value.upper()}  {escape(stop.key)}",
+            f"what changed  {escape(card.summary.what_changed)}",
+            f"risk/impact  {escape(card.summary.risk_impact)}",
+            f"confidence  {escape(card.summary.ci_merge_state)} · head "
+            f"{escape(card.freshness.label)} "
+            f"{escape((card.exact_head or card.reviewed_head or '?')[:12])}",
+            f"next action  {escape(card.summary.recommended_action)}",
+            (
+                f"findings  {finding_total} evidenced finding"
+                f"{'s' if finding_total != 1 else ''}."
+                if card.findings
+                else "findings  No evidenced findings."
+            ),
             "severity  "
             + "  ".join(
-                f"{key}:{result.counts[key]}"
+                f"{key}:{card.counts[key]}"
                 for key in ("critical", "high", "medium", "low")
             ),
         ]
-        for finding in result.findings[:5]:
+        for finding in card.findings[:5]:
             lines.append(
-                f"{finding['severity'].upper()}  "
-                f"{escape(finding.get('file', '?'))}:{finding.get('line', '?')}  "
-                f"{escape(finding.get('title', ''))}"
+                f"{finding.severity.upper()}  "
+                f"{escape(finding.file)}:{finding.line}  "
+                f"{escape(finding.title)}"
             )
-        verified = sum(1 for item in result.verification if item.get("state") == "verified")
-        unverified = sum(1 for item in result.verification if item.get("state") == "unverified")
+        verified = sum(1 for item in card.verification if item.state == "verified")
+        unverified = sum(1 for item in card.verification if item.state == "unverified")
         lines.append(
             f"checks  {verified} verified / {unverified} unverified / "
-            f"{len(result.verification)} reported"
-        )
-        duplicates = result.overlap.get("duplicates") or []
-        overlaps = result.overlap.get("overlaps") or []
-        lines.append(f"overlap {len(duplicates)} duplicate / {len(overlaps)} shared-file hazard")
-        lines.append(
-            f"live     CI {result.live.get('ci', 'unknown')} · merge "
-            f"{escape(result.live.get('mergeable', '?'))}/"
-            f"{escape(result.live.get('merge_state', '?'))} · "
-            f"head {escape(result.live.get('head', '?'))}"
+            f"{len(card.verification)} reported"
         )
         lines.append(
-            f"source  {escape(result.provenance.get('backend', '?'))} / "
-            f"{escape(result.provenance.get('model', '?'))}"
+            f"overlap {card.duplicate_count} duplicate / "
+            f"{card.shared_file_count} shared-file hazard"
+        )
+        lines.append(
+            f"live     CI {escape(card.ci.value)} · merge "
+            f"{escape(card.mergeability.label)}/{escape(card.merge_state)} · head "
+            f"{escape((card.exact_head or card.reviewed_head or '?')[:12])}"
+        )
+        lines.append(
+            f"source  {escape(card.provenance.backend or '?')} / "
+            f"{escape(card.provenance.model or '?')}"
         )
         lines.append(
             "actions  "
@@ -1689,11 +1812,13 @@ class ReviewDashboard(App):
     #review-evidence.hidden, #review-log.hidden { display: none; }
     #diff-scroll { border: solid $secondary; background: $surface; }
     #diff-body { padding: 0 1; width: auto; }
+    ListItem.selected { background: $primary-muted; }
     ListItem.selected Label { color: magenta; text-style: bold; }
     #review-status { height: auto; padding: 0 1; background: $panel; }
     #review-status.running { background: $panel; color: cyan; }
     #review-status.complete { background: $success; color: $text; text-style: bold; }
     #review-status.incomplete { background: $warning; color: $text; text-style: bold; }
+    #review-status.stale { background: $warning; color: $text; text-style: bold; }
     #review-status.failed, #review-status.error, #review-status.stopped {
         background: $error; color: $text; text-style: bold;
     }
@@ -1732,6 +1857,10 @@ class ReviewDashboard(App):
         # a batch confirmed while another runs waits behind it — a proper
         # queue, not a pile of concurrent agents mutating the same queue.
         self.landing_queue: list[landing.LandingTask] = []
+        # The last finished batch's outcome, kept on the status line until
+        # the next dispatch or refresh: a toast is gone in seconds and a
+        # maintainer looks up late.
+        self.last_landing_outcome = ""
         self.source_state = "loading"
         self.source_message = ""
 
@@ -1796,10 +1925,14 @@ class ReviewDashboard(App):
             self.call_from_thread(self.hive_loaded, "not configured", [])
             return
         status = hive_get("/api/v1/status")
-        if not status:
-            self.call_from_thread(self.hive_loaded, "unreachable", [])
+        if not status.ok:
+            self.call_from_thread(self.hive_loaded, status.message, [])
             return
-        contributors = hive_get("/api/v1/contributors").get("contributors", [])
+        contributor_result = hive_get("/api/v1/contributors")
+        if not contributor_result.ok:
+            self.call_from_thread(self.hive_loaded, contributor_result.message, [])
+            return
+        contributors = contributor_result.data.get("contributors", [])
         workers = [
             {
                 "login": contributor.get("github_username", "?"),
@@ -1809,8 +1942,8 @@ class ReviewDashboard(App):
             if contributor.get("current_task")
         ]
         state = (
-            f"{status.get('hub', 'online')} · "
-            f"{status.get('actionable_items', '?')} actionable · "
+            f"{status.data.get('hub', 'online')} · "
+            f"{status.data.get('actionable_items', '?')} actionable · "
             f"{len(workers)} working"
         )
         self.call_from_thread(self.hive_loaded, state, workers)
@@ -2044,8 +2177,8 @@ class ReviewDashboard(App):
                     "review_state": str(pull.get("reviewDecision", "") or "").lower(),
                 })
         except ValueError as error:
-            self.source_state = "malformed"
             self.source_message = bounded_detail(f"malformed GitHub response: {error}")
+            self.source_state = "malformed"
             return {"items": []}
         self.source_state = "empty" if not items else "ready"
         self.source_message = ""
@@ -2067,6 +2200,7 @@ class ReviewDashboard(App):
             if self.filters.wants(item)
         ]
         stops.sort(key=lambda stop: (action_rank(stop.action), stop.repository, stop.number))
+        self.restore_landing_marks(stops)
         if self.reselect:
             for stop in stops:
                 stop.selected = stop.key in self.reselect
@@ -2074,6 +2208,9 @@ class ReviewDashboard(App):
         self.populate(stops)
 
     def row_markup(self, stop: Stop) -> str:
+        # Selection is not colour-only: a ● leads the row and the whole row
+        # carries a background, so the batch in progress reads at a glance.
+        selected = "● " if stop.selected else "  "
         # MECHANICAL replaces the old title-only BATCHABLE tag: it means this
         # branch can be brought current, never that the change is approved.
         tag = " (MECHANICAL)" if stop.mechanical else ""
@@ -2088,7 +2225,7 @@ class ReviewDashboard(App):
         if stop.review_state == "approved":
             marks += " ✓ approved"
         body = (
-            f"{link(stop.key, pr_url(stop.repository, stop.number))}: "
+            f"{selected}{link(stop.key, pr_url(stop.repository, stop.number))}: "
             f"{escape(stop.title[:60])}{tag} "
             f"{marks} {escape('[' + stop.action + ']')}{failed}"
         )
@@ -2128,7 +2265,7 @@ class ReviewDashboard(App):
             1 for t in self.landing_queue if t.process is None and t.returncode is None
         )
         agents = (
-            f" | agents: {running} running, {queued} queued [A]"
+            f" | agents: {running} running, {queued} queued [w]"
             if self.landing_queue
             else ""
         )
@@ -2140,6 +2277,11 @@ class ReviewDashboard(App):
         # the whole queue is how a maintainer concludes there are five open
         # pull requests when there are a hundred and twenty-one.
         held_back = f" (of {total}; [f] widens)" if shown != total else ""
+        landed = (
+            f" | last {self.last_landing_outcome}"
+            if self.last_landing_outcome
+            else ""
+        )
         breakdown = ", ".join(
             f"{count} {action}"
             for action, count in sorted(
@@ -2153,7 +2295,7 @@ class ReviewDashboard(App):
             f" Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
             f"| {('source ' + self.source_state + (' — ' + self.source_message if self.source_message else ''))} "
             f"| {('snapshot ' + freshness) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
-            f"| batch: {selected}{stuck}{agents} | Hive: {self.hive_state or 'asking…'}"
+            f"| batch: {selected}{stuck}{agents}{landed} | Hive: {self.hive_state or 'asking…'}"
         )
 
     def action_filter(self) -> None:
@@ -2285,11 +2427,12 @@ class ReviewDashboard(App):
             return
         live = stop.live
         self.refresh_rows()
-        checks = live.get("statusCheckRollup") or []
+        checks = authoritative_checks(live)
         outcomes = [c.get("conclusion") or c.get("state") or "PENDING" for c in checks]
         ok = sum(1 for o in outcomes if o in ("SUCCESS", "NEUTRAL", "SKIPPED"))
-        bad = sum(1 for o in outcomes if o in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"))
-        pending = len(outcomes) - ok - bad
+        cancelled = sum(1 for o in outcomes if o == "CANCELLED")
+        bad = sum(1 for o in outcomes if o in ("FAILURE", "ERROR", "TIMED_OUT"))
+        pending = len(outcomes) - ok - bad - cancelled
         issues = ", ".join(
             link(f"#{r['number']}", issue_url(stop.repository, r["number"]))
             for r in (live.get("closingIssuesReferences") or [])
@@ -2351,7 +2494,7 @@ class ReviewDashboard(App):
             f"merge    {live.get('mergeable', '?')} / {live.get('mergeStateStatus', '?')}\n"
             f"size     +{live.get('additions', '?')} -{live.get('deletions', '?')} "
             f"across {live.get('changedFiles', '?')} files\n"
-            f"checks   {ok} ok, {bad} failed, {pending} pending\n"
+            f"checks   {ok} ok, {bad} failed, {cancelled} cancelled, {pending} pending\n"
             f"{reviews_block}\n"
             f"linked   {issues}\n"
             f"labels   {labels}{mechanical_block}"
@@ -2602,6 +2745,9 @@ class ReviewDashboard(App):
         item = self.query_one("#queue", ListView).highlighted_child
         if item:
             item.set_class(stop.selected, "selected")
+            labels = item.query(Label)
+            if labels:
+                labels.first().update(self.row_markup(stop))
         self.refresh_status()
 
     def action_review(self) -> None:
@@ -2675,6 +2821,7 @@ class ReviewDashboard(App):
         Relaunching the dashboard to see current state is not a workflow.
         """
         self.reselect = {stop.key for stop in self.stops if stop.selected}
+        self.last_landing_outcome = ""
         self.notify("refreshing the queue…")
         self.load_queue()
         self.load_hive()
@@ -2885,6 +3032,11 @@ class ReviewDashboard(App):
         ban, then creates an exact-head approval as the Hive App and applies
         the queue label. A review submitted by this human process cannot pass
         Hive's App-authorship check (#247).
+
+        The versioned `/api/v1` route is the only one a GitHub bearer token
+        may use: kubestellar/hive#4052 gave it a hosted ingress without the
+        browser-login intercept, while the session-only `/api/prs` route still
+        belongs to the dashboard's browser clients (#258).
         """
         base = hive_api_base()
         if not base:
@@ -2892,20 +3044,20 @@ class ReviewDashboard(App):
             return
         owner, repository = stop.repository.split("/", 1)
         endpoint = (
-            f"{base}/api/prs/{owner}/{repository}/{stop.number}/queue-automerge"
+            f"{base}/api/v1/prs/{owner}/{repository}/{stop.number}/queue-automerge"
         )
         command = [
-            "sh",
-            "-c",
-            'exec curl --fail-with-body --location --silent --show-error '
-            '--request POST --header '
-            '"Authorization: Bearer ${GH_TOKEN:?GH_TOKEN is required}" "$1" >&2',
-            "bluefin-review-hive-queue",
+            sys.executable,
+            HIVE_API_HELPER,
+            "queue",
             endpoint,
         ]
 
         def queued() -> None:
             stop.failure = ""
+            # Supersede any persisted failure, or the next refresh folds
+            # it back onto a row the maintainer just re-queued (#290).
+            landing.record_event(stop.key, "queued", f"re-queued by @{self.self_login or 'maintainer'}")
             self.refresh_rows()
             if then:
                 then()
@@ -2921,10 +3073,8 @@ class ReviewDashboard(App):
         self.mutate_all(stop, [command], then=queued, on_error=failed)
 
     def action_merge(self) -> None:
-        batch = [s for s in self.stops if s.selected]
-        if batch:
-            self.plan_landing(batch)
-            return
+        # `a` is approve+queue only. The batch key is `A` — a selection
+        # must never turn this key into an undocumented batch gate.
         stop = self.current
         if not stop:
             return
@@ -2934,8 +3084,25 @@ class ReviewDashboard(App):
         if self._queueable(stop):
             self._queue_automerge(stop)
 
+    def action_land_batch(self) -> None:
+        """`A`: land every selected pull request as one batch.
+
+        The maintainer tags rows with [b] and then reaches for the capital —
+        "do them All". The stronger keystroke does the strong thing: the
+        batch plan gate. Without a selection there is nothing to land; the
+        read-only batch queue this key used to open lives on [w].
+        """
+        batch = [s for s in self.stops if s.selected]
+        if not batch:
+            self.notify(
+                "nothing selected — [b] marks rows for the batch.",
+                severity="warning",
+            )
+            return
+        self.plan_landing(batch)
+
     def plan_landing(self, batch: list[Stop]) -> None:
-        """Batch `a`: the reviewed selection becomes one agent's brief.
+        """Batch `A`: the reviewed selection becomes one agent's brief.
 
         The maintainer picked every row by hand; the BatchPlanScreen is the
         proportionate gate — the whole plan and the exact command, confirmed
@@ -2962,6 +3129,8 @@ class ReviewDashboard(App):
 
     def enqueue_landing(self, task: "landing.LandingTask") -> None:
         self.landing_queue.append(task)
+        # A new dispatch supersedes the previous batch's outcome line.
+        self.last_landing_outcome = ""
         self.refresh_status()
         if not any(t.running for t in self.landing_queue):
             self.drain_landings()
@@ -3012,9 +3181,15 @@ class ReviewDashboard(App):
         self.call_from_thread(self.landing_finished, task)
 
     def landing_finished(self, task: "landing.LandingTask") -> None:
-        """Fold the agent's report back onto the rows: landed work leaves
-        the batch; blocked and failed work stays selected with its reason."""
+        """Fold the agent's report back onto the rows and say so: landed
+        work leaves the batch; blocked, failed, and unfinished work stays
+        selected with its reason. The notification announces the outcome —
+        the row marking is what survives it."""
         events = landing.parse_status(task.status_path)
+        # parse_status files every pr-less line under "" — a malformed tail
+        # line included — so only the exact done event closes a report.
+        done = events.get("", {}).get("state") == landing.TASK_DONE
+        counts: Counter[str] = Counter()
         for stop in task.stops:
             event = events.get(stop.key, {})
             state = event.get("state")
@@ -3027,7 +3202,73 @@ class ReviewDashboard(App):
                 # exit code — the row keeps the reason and stays selected.
                 stop.selected = True
                 stop.failure = f"{state}: {event.get('note', 'no reason given')}"
+            else:
+                detail = f"last report: {state}" if state else "no report"
+                stop.selected = True
+                if done:
+                    # The agent closed its report but never carried this
+                    # pull request to an outcome — a hole in the report,
+                    # not a dead agent, and the row must say which.
+                    stop.failure = f"no outcome reported ({detail})"
+                    state = "no outcome"
+                else:
+                    # No done event at all: the agent died mid-batch,
+                    # distinguishable from every state it can report.
+                    stop.failure = f"agent died mid-batch ({detail})"
+                    state = "died mid-batch"
+            counts[state] += 1
+        parts = [
+            f"{counts[state]} {state}"
+            for state in (
+                "merged",
+                "failed",
+                "blocked",
+                "awaiting-stable",
+                "no outcome",
+                "died mid-batch",
+            )
+            if counts[state]
+        ]
+        if done:
+            message = f"batch {task.task_id} finished: {', '.join(parts)}"
+        else:
+            # The agent never closed its report: distinguishable from a
+            # batch that reported done with failures.
+            message = (
+                f"batch {task.task_id} agent exited without reporting done: "
+                f"{', '.join(parts)}"
+            )
+        if (
+            counts["failed"]
+            or counts["no outcome"]
+            or counts["died mid-batch"]
+            or not done
+        ):
+            severity = "error"
+        elif counts["blocked"] or counts["awaiting-stable"]:
+            severity = "warning"
+        else:
+            severity = "information"
+        # Set before refresh_rows: refresh_status renders it onto the bar.
+        self.last_landing_outcome = message
         self.refresh_rows()
+        self.notify(message, severity=severity)
+
+    def restore_landing_marks(self, stops: list[Stop]) -> None:
+        """Fold a previous run's landing outcomes back onto matching rows.
+        The state directory persists on the host across relaunches (#281),
+        but the record only helps if the rows show it. Only the failure
+        marking is restored; selecting a batch stays the maintainer's."""
+        events = landing.persisted_events()
+        if not events:
+            return
+        for stop in stops:
+            event = events.get(stop.key)
+            if not event:
+                continue
+            state = event.get("state")
+            if state in ("blocked", "failed", "awaiting-stable"):
+                stop.failure = f"{state}: {event.get('note', 'no reason given')}"
 
     def action_agents(self) -> None:
         if not self.landing_queue:
@@ -3119,6 +3360,9 @@ class ReviewDashboard(App):
             stop.failure_checks = ""
             stop.failure_branch = ""
             stop.selected = False
+            # Supersede any persisted failure, or the next refresh folds
+            # it back onto a row the maintainer just merged (#290).
+            landing.record_event(stop.key, "merged", f"merged directly by @{self.self_login or 'maintainer'}")
             self.refresh_rows()
             if then:
                 then()

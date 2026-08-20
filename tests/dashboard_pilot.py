@@ -26,6 +26,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 from textual.events import Key
+from textual.geometry import Region
 
 TUI_DIR = Path(
     os.environ.get(
@@ -155,6 +156,17 @@ async def main() -> int:
 
     import bluefin_review_tui as tui
 
+    hive_api_stub = workdir / "hive_api_stub.py"
+    hive_api_stub.write_text(
+        "import json, os, sys\n"
+        f"with open({str(curl_log)!r}, 'a') as sink: sink.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "if os.environ.get('CURL_FAIL'):\n"
+        "    print('Hive queue failed ' + ('e' * 300), file=sys.stderr)\n"
+        "    raise SystemExit(1)\n"
+        "print(json.dumps({'status': 'queued'}))\n"
+    )
+    tui.HIVE_API_HELPER = str(hive_api_stub)
+
     # Queueing belongs to Hive: its authenticated endpoint records the human
     # actor, enforces merger standing and self-merge protection, then creates
     # the exact-head approval as the Hive App. A human-authored `gh pr review`
@@ -175,10 +187,16 @@ async def main() -> int:
         queue_commands = captured_queue[0][1] if captured_queue else []
         check(
             len(queue_commands) == 1
-            and queue_commands[0][:2] == ["sh", "-c"]
+            and queue_commands[0][1] == tui.HIVE_API_HELPER
+            and queue_commands[0][2] == "queue"
             and queue_commands[0][-1]
-            == "https://hive.example.test/api/prs/projectbluefin/bluefinctl/31/queue-automerge",
+            == "https://hive.example.test/api/v1/prs/projectbluefin/bluefinctl/31/queue-automerge",
             f"queueing must call Hive's App-authored queue endpoint once, got {queue_commands}",
+        )
+        check(
+            "--location" not in queue_commands[0]
+            and "-L" not in queue_commands[0],
+            f"a mutating Hive request must not follow redirects, got {queue_commands}",
         )
         check(
             not any(command[:3] == ["gh", "pr", "review"] for command in queue_commands),
@@ -334,6 +352,8 @@ async def main() -> int:
     await assert_live_state("network timeout", "error", "network timeout")
     await assert_live_state("authentication required", "inaccessible", "authentication required")
 
+    os.environ.pop("LIVE_GH_ERROR", None)
+    os.environ.pop("LIVE_PAGES", None)
     malformed_repo = tui.ReviewDashboard(tui.QueueFilters(live_repository="not-a-repo"))
     async with malformed_repo.run_test() as pilot:
         await wait_for_state(malformed_repo, pilot, "malformed")
@@ -361,6 +381,11 @@ async def main() -> int:
         app = tui.ReviewDashboard(tui.QueueFilters(live_repository="acme/widgets"))
         async with app.run_test() as pilot:
             await wait_for_state(app, pilot, "malformed")
+            for _ in range(100):
+                status = str(app.query_one("#status-bar").render())
+                if detail in app.source_message and detail in status:
+                    break
+                await pilot.pause(0.05)
             status = str(app.query_one("#status-bar").render())
             check(app.source_state == "malformed" and not app.stops,
                   f"invalid {detail} must produce no rows through the real app")
@@ -369,7 +394,7 @@ async def main() -> int:
 
     await assert_malformed_pull(
         {"number": 44, "title": "hostile author", "user": "not-an-object"},
-        "author",
+        "malformed GitHub response",
     )
     await assert_malformed_pull(
         {"title": "missing number", "user": None},
@@ -701,7 +726,13 @@ async def main() -> int:
             "Ctrl-q must remain the quit binding",
         )
 
-    async def run_review(exit_code: int, output: str):
+    async def run_review(
+        exit_code: int,
+        output: str,
+        *,
+        head_sha: str = "0123456789abcdef0123456789abcdef01234567",
+        reviewed_head: str = "",
+    ):
         review_stub(exit_code, output)
         app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
         async with app.run_test() as pilot:
@@ -712,7 +743,7 @@ async def main() -> int:
                 await pilot.pause(0.05)
             app.stops[0].live = {
                 "baseRefOid": "fedcba9876543210fedcba9876543210fedcba98",
-                "headRefOid": "0123456789abcdef0123456789abcdef01234567",
+                "headRefOid": head_sha,
                 "isDraft": False,
                 "mergeable": "MERGEABLE",
                 "mergeStateStatus": "CLEAN",
@@ -723,6 +754,13 @@ async def main() -> int:
             }
             app.stops[0].overlap = {"duplicates": [44], "overlaps": [45, 46]}
             root_screen = app.screen
+            original_adapter = tui.adapt_current_engine
+            if reviewed_head:
+                def stale_adapter(*args, **kwargs):
+                    result = original_adapter(*args, **kwargs)
+                    result.provenance["head_sha"] = reviewed_head
+                    return result
+                tui.adapt_current_engine = stale_adapter
             await pilot.press("r")
             await pilot.pause()
             screen = app.screen
@@ -753,6 +791,7 @@ async def main() -> int:
             check("hidden" not in raw.classes, "[r] must reveal the secondary raw transcript")
             await pilot.press("q")
             await pilot.pause()
+            tui.adapt_current_engine = original_adapter
             check(app.screen is root_screen, "q must close ReviewScreen")
             return str(status.render()), set(status.classes), str(card.render())
 
@@ -775,6 +814,7 @@ async def main() -> int:
         'echo "agent log line"\n',
     )
     os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{landing_stub} @PROMPT"
+    os.environ["BLUEFIN_REVIEW_INSTANCE"] = "review-queue-pilot"
     app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -793,10 +833,16 @@ async def main() -> int:
         )
         await pilot.press("a")
         await pilot.pause()
+        check(
+            not isinstance(app.screen, tui.BatchPlanScreen),
+            "[a] must never open the batch gate — [A] is the only batch key",
+        )
+        await pilot.press("A")
+        await pilot.pause()
         gate = app.screen
         check(
             isinstance(gate, tui.BatchPlanScreen),
-            f"a selected batch must open the plan gate, got {type(gate).__name__}",
+            f"[A] on a selection must open the plan gate, got {type(gate).__name__}",
         )
         if isinstance(gate, tui.BatchPlanScreen):
             check(
@@ -827,6 +873,10 @@ async def main() -> int:
                 f"one agent must run for the whole batch, got {invocations}",
             )
             prompt_text = Path(task.prompt_path).read_text()
+            check(
+                task.task_id.endswith("-review-queue-pilot"),
+                f"the batch id must name its instance, got {task.task_id!r}",
+            )
             check(
                 all(stop.key in prompt_text for stop in task.stops),
                 "the agent brief must name every selected pull request",
@@ -866,15 +916,324 @@ async def main() -> int:
                 not isinstance(app.screen, tui.LandingScreen),
                 "escape must return to the review queue",
             )
-            await pilot.press("A")
+            await pilot.press("w")
             await pilot.pause()
             check(
                 isinstance(app.screen, tui.LandingScreen),
-                "[A] must reopen the live batch queue",
+                "[w] must reopen the live batch queue",
             )
             await pilot.press("q")
             await pilot.pause()
             check(not isinstance(app.screen, tui.LandingScreen), "q must return from LandingScreen")
+    del os.environ["BLUEFIN_REVIEW_INSTANCE"]
+    gh_log.write_text("")
+
+    # ── the batch queue paints every state, and never by colour alone ────
+    # Every state keeps its printed word and gains a shape-distinct glyph on
+    # a styled span; terminal states sit on a muted fill and each batch
+    # header is a filled state bar. A colourless read — the text alone —
+    # must still carry every fact, and a bold-words-only implementation must
+    # fail the background assertions.
+    os.environ["BLUEFIN_REVIEW_INSTANCE"] = "pilot-colours"
+    colour_task = tui.landing.new_task(
+        [
+            tui.Stop("projectbluefin/bluefinctl", 31, "review", "one"),
+            tui.Stop("projectbluefin/common", 7, "review", "two"),
+            tui.Stop("projectbluefin/dakota", 12, "review", "three"),
+            tui.Stop("projectbluefin/bluefin", 99, "review", "four"),
+        ],
+        "tester",
+    )
+    del os.environ["BLUEFIN_REVIEW_INSTANCE"]
+    Path(colour_task.status_path).write_text(
+        '{"pr": "projectbluefin/bluefinctl#31", "state": "merged", "note": "on :stable"}\n'
+        '{"pr": "projectbluefin/common#7", "state": "failed", "note": "publish workflow red"}\n'
+        '{"pr": "projectbluefin/dakota#12", "state": "awaiting-stable", "note": "watching the publish"}\n'
+        '{"state": "done", "note": "two landed, one failed"}\n'
+    )
+    colour_task.process = object()  # a live handle: the header reads running
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        app.landing_queue.append(colour_task)
+        await app.push_screen(tui.LandingScreen(app))
+        await pilot.pause()
+        screen = app.screen
+        check(
+            isinstance(screen, tui.LandingScreen),
+            f"the fabricated batch must open the batch queue, got {type(screen).__name__}",
+        )
+        if isinstance(screen, tui.LandingScreen):
+            screen.poll()
+            rows_widget = screen.query_one("#landing-rows", tui.Static)
+            rows = str(rows_widget.render())
+            for expected in (
+                f"batch {colour_task.task_id} — running",
+                # A running batch names its heartbeat: the age of the last
+                # report, so a stale wait is visible next to a healthy one
+                # (#291).
+                "last report",
+                "✓ merged",
+                "✗ failed",
+                "◆ awaiting-stable",
+                "◌ waiting",
+                "✔ done",
+                "publish workflow red",
+                "two landed, one failed",
+            ):
+                check(
+                    expected in rows,
+                    f"the batch queue must show {expected!r}, got {rows!r}",
+                )
+
+            def line_styles(fragment: str) -> list:
+                """The segment styles of the rendered line holding fragment."""
+                for y in range(rows_widget.region.height):
+                    strip = rows_widget.render_line(y)
+                    if fragment in "".join(segment.text for segment in strip):
+                        return [segment.style for segment in strip]
+                return []
+
+            from rich.color import Color
+
+            def theme_rgb(name: str):
+                return Color.parse(app.theme_variables[name]).get_truecolor()
+
+            base_rgb = theme_rgb("background")
+
+            def fills(fragment: str) -> list:
+                """Segment styles on fragment's line that sit on a real fill —
+                not the screen's base background, which every segment carries."""
+                return [
+                    style
+                    for style in line_styles(fragment)
+                    if style is not None
+                    and style.bgcolor is not None
+                    and style.bgcolor.get_truecolor() != base_rgb
+                ]
+
+            header_fills = fills(f"batch {colour_task.task_id} — running")
+            check(
+                any(
+                    style.bgcolor.get_truecolor() == theme_rgb("primary-muted")
+                    for style in header_fills
+                ),
+                "the running batch header must be a filled bar, got "
+                f"{header_fills!r}",
+            )
+            merged_fills = fills("✓ merged")
+            check(
+                any(
+                    style.bgcolor.get_truecolor() == theme_rgb("success-muted")
+                    and style.bold
+                    for style in merged_fills
+                ),
+                "the merged state must be bold on a muted fill, got "
+                f"{merged_fills!r}",
+            )
+            failed_fills = fills("✗ failed")
+            check(
+                any(
+                    style.bgcolor.get_truecolor() == theme_rgb("error-muted")
+                    and style.bold
+                    for style in failed_fills
+                ),
+                "the failed state must be bold on a muted fill, got "
+                f"{failed_fills!r}",
+            )
+        check(
+            rows_widget.styles.border_top[0] == "round",
+            "the batch list must carry a real border style, got "
+            f"{rows_widget.styles.border_top!r}",
+        )
+        top_edge = "".join(
+            segment.text
+            for strip in rows_widget.render_lines(
+                Region(0, 0, rows_widget.region.width, 1)
+            )
+            for segment in strip
+        )
+        check(
+            top_edge.startswith("╭") and "BATCHES" in top_edge,
+            f"the batch list must render a framed title edge, got {top_edge!r}",
+        )
+    for artifact in (
+        Path(colour_task.prompt_path),
+        Path(colour_task.status_path),
+    ):
+        artifact.unlink(missing_ok=True)
+    gh_log.write_text("")
+
+    # ── a hostile agent-reported state cannot break the batch queue ──────
+    # The state string is agent-sourced JSONL. An unknown state must render
+    # literally, escaped like every other agent string — never parsed as
+    # markup. Unescaped, "waiting[/][blink]OWNED" raises MarkupError in
+    # rows.update() and takes the whole screen down from inside poll().
+    os.environ["BLUEFIN_REVIEW_INSTANCE"] = "pilot-hostile"
+    hostile_task = tui.landing.new_task(
+        [tui.Stop("projectbluefin/bluefin", 42, "review", "hostile")],
+        "tester",
+    )
+    del os.environ["BLUEFIN_REVIEW_INSTANCE"]
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        app.landing_queue.append(hostile_task)
+        await app.push_screen(tui.LandingScreen(app))
+        await pilot.pause()
+        # The state arrives after mount, the way the agent's report does.
+        Path(hostile_task.status_path).write_text(
+            '{"pr": "projectbluefin/bluefin#42", "state": "waiting[/][blink]OWNED"}\n'
+        )
+        screen = app.screen
+        poll_error = None
+        if isinstance(screen, tui.LandingScreen):
+            try:
+                screen.poll()
+            except Exception as error:  # the check below reports it
+                poll_error = error
+        check(
+            poll_error is None,
+            "an unknown agent-reported state must not take the batch queue "
+            f"down, got {poll_error!r}",
+        )
+        if poll_error is None:
+            rows = str(screen.query_one("#landing-rows", tui.Static).render())
+            check(
+                "? waiting[/][blink]OWNED" in rows,
+                f"an unknown state must render literally, got {rows!r}",
+            )
+    for artifact in (
+        Path(hostile_task.prompt_path),
+        Path(hostile_task.status_path),
+    ):
+        artifact.unlink(missing_ok=True)
+    gh_log.write_text("")
+
+    # ── a relaunched dashboard restores a previous batch's failure ──────
+    # The landings directory persists on the host; the rows must show what
+    # it records at startup, or the failure markings are still lost on every
+    # relaunch (#281). A newer batch's verdict wins over an older one.
+    landings_dir = workdir / "state" / "bluefin-review" / "landings"
+    landings_dir.mkdir(parents=True, exist_ok=True)
+    for stale in landings_dir.iterdir():
+        stale.unlink()
+    older = landings_dir / "20260101-000000-review-queue.jsonl"
+    older.write_text(
+        '{"pr": "projectbluefin/bluefinctl#31", "state": "failed", "note": "stale first attempt"}\n'
+        '{"state": "done", "note": "first batch"}\n'
+    )
+    newer = landings_dir / "20260102-000000-review-queue.jsonl"
+    newer.write_text(
+        '{"pr": "projectbluefin/bluefinctl#31", "state": "failed", "note": "publish workflow red"}\n'
+        '{"state": "done", "note": "one batch, one failure"}\n'
+    )
+    # Fold order is mtime order, and the record is bounded to the retention
+    # window (#290): recent but distinctly ordered, or the prune pass would
+    # collect these fixtures as expired.
+    now = time.time()
+    os.utime(older, (now - 200, now - 200))
+    os.utime(newer, (now - 100, now - 100))
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        marked = {stop.key: stop for stop in app.stops}
+        check(
+            marked["projectbluefin/bluefinctl#31"].failure
+            == "failed: publish workflow red",
+            "a relaunch must restore the row's failure marking from the "
+            f"newest record, got {marked['projectbluefin/bluefinctl#31'].failure!r}",
+        )
+        check(
+            marked["projectbluefin/common#7"].failure == "",
+            "an unrelated row must stay unmarked",
+        )
+        check(
+            not marked["projectbluefin/bluefinctl#31"].selected,
+            "restoring a marking must not rebuild the batch selection",
+        )
+        row = app.row_markup(marked["projectbluefin/bluefinctl#31"])
+        check(
+            "DID NOT MERGE" in row,
+            f"the restored failure must render on the row, got {row!r}",
+        )
+    for stale in landings_dir.iterdir():
+        stale.unlink()
+    gh_log.write_text("")
+
+    # ── a manual success supersedes the restored failure (#290) ─────────
+    # The restored mark lives in the record, so only the record can retire
+    # it: clearing the row in memory lasted exactly one refresh. A success
+    # path writes a superseding event, and the next restore leaves the row
+    # clean. An ancient record is pruned rather than restored — the
+    # directory is durable, so it must also be bounded.
+    older.write_text(
+        '{"pr": "projectbluefin/bluefinctl#31", "state": "failed", "note": "publish workflow red"}\n'
+    )
+    os.utime(older, (now - 100, now - 100))
+    restored = tui.landing.persisted_events()
+    check(
+        restored["projectbluefin/bluefinctl#31"]["state"] == "failed",
+        f"the failure must be in the record, got {restored!r}",
+    )
+    tui.landing.record_event(
+        "projectbluefin/bluefinctl#31", "merged", "merged directly by @tester"
+    )
+    restored = tui.landing.persisted_events()
+    check(
+        restored["projectbluefin/bluefinctl#31"]["state"] == "merged",
+        "a manual success must supersede the persisted failure, "
+        f"got {restored['projectbluefin/bluefinctl#31']!r}",
+    )
+    ancient = landings_dir / "20260103-000000-review-queue.jsonl"
+    ancient.write_text(
+        '{"pr": "projectbluefin/bluefinctl#31", "state": "failed", "note": "ancient"}\n'
+    )
+    expired = now - tui.landing.LANDING_RETENTION_SECONDS - 60
+    os.utime(ancient, (expired, expired))
+    restored = tui.landing.persisted_events()
+    check(
+        not ancient.exists(),
+        "an expired record must be pruned, not kept",
+    )
+    check(
+        restored["projectbluefin/bluefinctl#31"]["state"] == "merged",
+        "a pruned record must not restore, "
+        f"got {restored['projectbluefin/bluefinctl#31']!r}",
+    )
+    for stale in landings_dir.iterdir():
+        stale.unlink()
+    gh_log.write_text("")
+
+    # ── batch ids never collide, even inside one second ──────────────────
+    # Two named dashboards share one state directory, so the instance name
+    # qualifies the id; two batches from one dashboard in the same second
+    # get a suffix. Either collision would overwrite a batch's files.
+    os.environ["BLUEFIN_REVIEW_INSTANCE"] = "pilot-instance"
+    first_task = tui.landing.new_task(
+        [tui.Stop("o/r", 1, "review", "one")], "tester"
+    )
+    second_task = tui.landing.new_task(
+        [tui.Stop("o/r", 2, "review", "two")], "tester"
+    )
+    del os.environ["BLUEFIN_REVIEW_INSTANCE"]
+    check(
+        first_task.task_id.endswith("-pilot-instance"),
+        f"the batch id must name its instance, got {first_task.task_id!r}",
+    )
+    check(
+        first_task.task_id != second_task.task_id,
+        f"same-second batches must not share an id, got {first_task.task_id!r} twice",
+    )
+    check(
+        first_task.prompt_path != second_task.prompt_path
+        and first_task.status_path != second_task.status_path,
+        "same-second batches must not share prompt or status files",
+    )
+    for stale in landings_dir.iterdir():
+        stale.unlink()
     gh_log.write_text("")
 
     # ── aborting the plan gate dispatches nothing ────────────────────────
@@ -889,7 +1248,7 @@ async def main() -> int:
         app.self_login = "castrojo"
         for stop in app.stops:
             stop.selected = True
-        app.action_merge()
+        app.action_land_batch()
         await pilot.pause()
         check(
             isinstance(app.screen, tui.BatchPlanScreen),
@@ -901,13 +1260,574 @@ async def main() -> int:
             not app.landing_queue and landing_log.read_text() == "",
             "escape must abort the batch without dispatching an agent",
         )
-        app.action_merge()
+        app.action_land_batch()
         await pilot.pause()
         check(isinstance(app.screen, tui.BatchPlanScreen), "BatchPlanScreen must activate")
         await pilot.press("q")
         await pilot.pause()
         check(not isinstance(app.screen, tui.BatchPlanScreen), "q must abort BatchPlanScreen")
     gh_log.write_text("")
+
+    # ── a selection is unmistakable on the row itself ──────────────────
+    # Colour is never the only carrier of a fact: a selected row carries a
+    # ● marker in its text AND a full-row background, so the batch the
+    # maintainer is building is visible without reading the status line.
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        queue = app.query_one("#queue", tui.ListView)
+        # The ListView cursor carries its own background, so the selection
+        # background can only be proven on a selected row the cursor has
+        # left: capture both reference backgrounds first.
+        cursor_bg = queue.children[0].styles.background
+        plain_bg = queue.children[1].styles.background
+        await pilot.press("b")
+        await pilot.press("down")
+        await pilot.pause()
+        check(
+            [s.selected for s in app.stops] == [True, False],
+            f"[b] must select only the highlighted row, got {[s.selected for s in app.stops]}",
+        )
+        first = str(queue.children[0].query(tui.Label).first().render())
+        second = str(queue.children[1].query(tui.Label).first().render())
+        check(
+            "●" in first and "●" not in second,
+            f"a selected row must carry the ● marker and an unselected row "
+            f"must not, got {first!r} / {second!r}",
+        )
+        selected_bg = queue.children[0].styles.background
+        check(
+            selected_bg != plain_bg and selected_bg != cursor_bg,
+            "a selected row must carry a full-row background, not "
+            "colour-only text",
+        )
+        await pilot.press("up")
+        await pilot.press("b")
+        await pilot.press("down")
+        await pilot.pause()
+        first = str(queue.children[0].query(tui.Label).first().render())
+        check(
+            "●" not in first,
+            f"deselecting must remove the marker, got {first!r}",
+        )
+        check(
+            queue.children[0].styles.background == plain_bg,
+            "deselecting must drop the full-row background",
+        )
+    gh_log.write_text("")
+
+    # ── A lands the batch; w watches it ────────────────────────────────
+    # The maintainer selects with [b] and reaches for capital A — "do them
+    # All". The stronger keystroke does the strong thing: A opens the batch
+    # plan gate. The read-only batch queue viewer lives on w.
+    landing_log.write_text("")
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        app.self_login = "castrojo"
+        notices: list[str] = []
+        real_notify = app.notify
+
+        def record(message, *args, **kwargs):
+            notices.append(str(message))
+            real_notify(message, *args, **kwargs)
+
+        app.notify = record
+        await pilot.press("A")
+        await pilot.pause()
+        check(
+            not isinstance(app.screen, tui.BatchPlanScreen)
+            and not isinstance(app.screen, tui.LandingScreen),
+            "[A] without a selection must open neither the gate nor the viewer",
+        )
+        check(
+            any("[b]" in n for n in notices),
+            f"[A] without a selection must say what selects, got {notices}",
+        )
+        await pilot.press("w")
+        await pilot.pause()
+        check(
+            not isinstance(app.screen, tui.LandingScreen),
+            "[w] before any dispatch must warn, not open an empty viewer",
+        )
+        await pilot.press("b")
+        await pilot.press("A")
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.BatchPlanScreen),
+            "[A] on a selection must open the batch plan gate, got "
+            f"{type(app.screen).__name__}",
+        )
+        await pilot.press("escape")
+        await pilot.pause()
+        check(
+            not app.landing_queue and landing_log.read_text() == "",
+            "escape from the [A] gate must dispatch nothing",
+)
+    gh_log.write_text("")
+
+    # ── a finished batch tells the maintainer ──────────────────────────
+    # "I can't tell when it's done." A completed batch announces itself:
+    # the notification carries the batch id and the per-state outcome, and
+    # the rows keep what the notification cannot outlive.
+    mixed_stub = write_stub(
+        workdir / "stub-landing-mixed",
+        'prompt=""\n'
+        'for arg in "$@"; do case "$arg" in *.prompt.md) prompt="$arg" ;; esac; done\n'
+        'status="${prompt%.prompt.md}.jsonl"\n'
+        'prs=$(grep -oE "[a-z]+/[a-z-]+#[0-9]+" "$prompt" | sort -u)\n'
+        'first=$(echo "$prs" | head -1); last=$(echo "$prs" | tail -1)\n'
+        'printf "{\\"pr\\": \\"%s\\", \\"state\\": \\"merged\\", \\"note\\": \\"green\\"}\\n" "$first" >>"$status"\n'
+        'printf "{\\"pr\\": \\"%s\\", \\"state\\": \\"failed\\", \\"note\\": \\"branch protection refused\\"}\\n" "$last" >>"$status"\n'
+        'printf "{\\"state\\": \\"done\\", \\"note\\": \\"one landed, one refused\\"}\\n" >>"$status"\n',
+    )
+    os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{mixed_stub} @PROMPT"
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        app.self_login = "castrojo"
+        notices: list[tuple[str, str]] = []
+        real_notify = app.notify
+
+        def record(message, *args, **kwargs):
+            notices.append((str(message), kwargs.get("severity", "information")))
+            real_notify(message, *args, **kwargs)
+
+        app.notify = record
+        for stop in app.stops:
+            stop.selected = True
+        app.action_land_batch()
+        await pilot.pause()
+        gate = app.screen
+        check(isinstance(gate, tui.BatchPlanScreen), "the batch must gate")
+        await pilot.press("enter")
+        task = gate.plan
+        for _ in range(400):
+            if task.returncode is not None and any(
+                "finished" in message for message, _ in notices
+            ):
+                break
+            await pilot.pause(0.05)
+        expected = f"batch {task.task_id} finished: 1 merged, 1 failed"
+        check(
+            any(expected in message for message, _ in notices),
+            f"a finished batch must notify its outcome, want {expected!r} "
+            f"in {notices}",
+        )
+        check(
+            any(
+                expected in message and severity == "error"
+                for message, severity in notices
+            ),
+            "a batch carrying a failure must notify at error severity, "
+            f"got {notices}",
+        )
+        for _ in range(200):
+            if not app.stops[0].selected and app.stops[1].selected:
+                break
+            await pilot.pause(0.05)
+        check(
+            not app.stops[0].selected and not app.stops[0].failure,
+            "a merged pull request leaves the batch",
+        )
+        check(
+            app.stops[1].selected and "failed" in app.stops[1].failure,
+            "a failed pull request stays selected with its reason — the "
+            "notification does not outlive the row",
+        )
+        # The outcome also persists where a toast cannot: the status line
+        # keeps the last batch's result until the next dispatch or refresh.
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check(
+            expected in status,
+            f"the status line must keep the batch outcome, got {status!r}",
+        )
+        await pilot.press("R")
+        for _ in range(200):
+            status = str(app.query_one("#status-bar", tui.Static).render())
+            if expected not in status and len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check(
+            expected not in status,
+            f"a refresh must clear the last-batch outcome, got {status!r}",
+        )
+    gh_log.write_text("")
+
+    # ── an agent that dies mid-batch says so ───────────────────────────
+    # Exiting without the task-level done event used to be
+    # indistinguishable from still working: the row silently kept its last
+    # mark. It is its own surfaced state now.
+    died_stub = write_stub(
+        workdir / "stub-landing-died",
+        'prompt=""\n'
+        'for arg in "$@"; do case "$arg" in *.prompt.md) prompt="$arg" ;; esac; done\n'
+        'status="${prompt%.prompt.md}.jsonl"\n'
+        'first=$(grep -oE "[a-z]+/[a-z-]+#[0-9]+" "$prompt" | sort -u | head -1)\n'
+        'printf "{\\"pr\\": \\"%s\\", \\"state\\": \\"fixing\\", \\"note\\": \\"retrying CI\\"}\\n" "$first" >>"$status"\n'
+        'exit 1\n',
+    )
+    os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{died_stub} @PROMPT"
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        app.self_login = "castrojo"
+        notices = []
+        real_notify = app.notify
+
+        def record(message, *args, **kwargs):
+            notices.append((str(message), kwargs.get("severity", "information")))
+            real_notify(message, *args, **kwargs)
+
+        app.notify = record
+        for stop in app.stops:
+            stop.selected = True
+        app.action_land_batch()
+        await pilot.pause()
+        gate = app.screen
+        check(isinstance(gate, tui.BatchPlanScreen), "the batch must gate")
+        await pilot.press("enter")
+        task = gate.plan
+        for _ in range(400):
+            if task.returncode is not None and any(
+                "without reporting done" in message for message, _ in notices
+            ):
+                break
+            await pilot.pause(0.05)
+        check(
+            any(
+                f"batch {task.task_id}" in message
+                and "without reporting done" in message
+                and severity == "error"
+                for message, severity in notices
+            ),
+            "a batch whose agent exits without the done event must say so "
+            f"at error severity, got {notices}",
+        )
+        for _ in range(200):
+            if all("died mid-batch" in s.failure for s in app.stops):
+                break
+            await pilot.pause(0.05)
+        check(
+            all(s.selected for s in app.stops),
+            "an unfinished batch keeps every pull request selected",
+        )
+        check(
+            all("died mid-batch" in s.failure for s in app.stops),
+            "each unfinished pull request must be marked distinguishable "
+            f"from a reported state, got {[s.failure for s in app.stops]}",
+        )
+        check(
+            "fixing" in app.stops[0].failure,
+            "the mark must keep the agent's last reported state, got "
+            f"{app.stops[0].failure!r}",
+        )
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check(
+            "without reporting done" in status,
+            f"the status line must keep the dead-agent outcome, got {status!r}",
+        )
+    gh_log.write_text("")
+
+    # ── done with a missing outcome is a gap, not a dead agent ──────────
+    # A batch that writes the task-level done event but never carried one
+    # pull request to an outcome must not cry "died mid-batch" — the agent
+    # finished; its report has a hole, and the hole is what is marked.
+    gap_stub = write_stub(
+        workdir / "stub-landing-gap",
+        'prompt=""\n'
+        'for arg in "$@"; do case "$arg" in *.prompt.md) prompt="$arg" ;; esac; done\n'
+        'status="${prompt%.prompt.md}.jsonl"\n'
+        'first=$(grep -oE "[a-z]+/[a-z-]+#[0-9]+" "$prompt" | sort -u | head -1)\n'
+        'printf "{\\"pr\\": \\"%s\\", \\"state\\": \\"merged\\", \\"note\\": \\"green\\"}\\n" "$first" >>"$status"\n'
+        'printf "{\\"state\\": \\"done\\", \\"note\\": \\"landed what I saw\\"}\\n" >>"$status"\n',
+    )
+    os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{gap_stub} @PROMPT"
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        app.self_login = "castrojo"
+        notices = []
+        real_notify = app.notify
+
+        def record(message, *args, **kwargs):
+            notices.append((str(message), kwargs.get("severity", "information")))
+            real_notify(message, *args, **kwargs)
+
+        app.notify = record
+        for stop in app.stops:
+            stop.selected = True
+        app.action_land_batch()
+        await pilot.pause()
+        gate = app.screen
+        check(isinstance(gate, tui.BatchPlanScreen), "the batch must gate")
+        await pilot.press("enter")
+        task = gate.plan
+        expected = f"batch {task.task_id} finished: 1 merged, 1 no outcome"
+        for _ in range(400):
+            if task.returncode is not None and any(
+                expected in message for message, _ in notices
+            ):
+                break
+            await pilot.pause(0.05)
+        check(
+            any(expected in message for message, _ in notices),
+            f"a done batch with a missing outcome must say so, want "
+            f"{expected!r} in {notices}",
+        )
+        check(
+            all(", 0 " not in message for message, _ in notices),
+            "the summary must count only states that occurred, got "
+            f"{notices}",
+        )
+        check(
+            all(
+                "without reporting done" not in message
+                for message, _ in notices
+            ),
+            "a batch that wrote done must not be reported as a dead agent, "
+            f"got {notices}",
+        )
+        for _ in range(200):
+            if app.stops[1].failure:
+                break
+            await pilot.pause(0.05)
+        check(
+            app.stops[1].failure.startswith("no outcome reported"),
+            "the out-of-report pull request must be marked as a reporting "
+            f"gap, got {app.stops[1].failure!r}",
+        )
+        check(
+            all("died mid-batch" not in s.failure for s in app.stops),
+            "no row may claim a dead agent when the agent reported done, "
+            f"got {[s.failure for s in app.stops]}",
+        )
+        check(
+            app.stops[1].selected,
+            "the out-of-report pull request stays in the batch",
+        )
+    gh_log.write_text("")
+
+    # ── a pr-less line is not the done event ────────────────────────────
+    # parse_status files every line lacking "pr" under the task key, so a
+    # truthiness test lets one malformed tail line pass for done. Only
+    # {"state": "done"} closes a report; anything less is a dead agent.
+    tail_stub = write_stub(
+        workdir / "stub-landing-tail",
+        'prompt=""\n'
+        'for arg in "$@"; do case "$arg" in *.prompt.md) prompt="$arg" ;; esac; done\n'
+        'status="${prompt%.prompt.md}.jsonl"\n'
+        'grep -oE "[a-z]+/[a-z-]+#[0-9]+" "$prompt" | sort -u | while read -r pr; do\n'
+        '  printf "{\\"pr\\": \\"%s\\", \\"state\\": \\"merged\\", \\"note\\": \\"green\\"}\\n" "$pr" >>"$status"\n'
+        'done\n'
+        'printf "{\\"note\\": \\"unstructured tail\\"}\\n" >>"$status"\n',
+    )
+    os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{tail_stub} @PROMPT"
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        app.self_login = "castrojo"
+        notices = []
+        real_notify = app.notify
+
+        def record(message, *args, **kwargs):
+            notices.append((str(message), kwargs.get("severity", "information")))
+            real_notify(message, *args, **kwargs)
+
+        app.notify = record
+        for stop in app.stops:
+            stop.selected = True
+        app.action_land_batch()
+        await pilot.pause()
+        gate = app.screen
+        check(isinstance(gate, tui.BatchPlanScreen), "the batch must gate")
+        await pilot.press("enter")
+        task = gate.plan
+        for _ in range(400):
+            if task.returncode is not None and any(
+                f"batch {task.task_id}" in message for message, _ in notices
+            ):
+                break
+            await pilot.pause(0.05)
+        check(
+            any(
+                f"batch {task.task_id}" in message
+                and "without reporting done" in message
+                and severity == "error"
+                for message, severity in notices
+            ),
+            "a malformed pr-less line must not pass for the done event, "
+            f"got {notices}",
+        )
+        check(
+            all("finished" not in message for message, _ in notices),
+            f"a report without done must never read as finished, got {notices}",
+        )
+    gh_log.write_text("")
+
+    # ── the summary counts only what occurred ────────────────────────────
+    # An all-blocked batch reads "finished: 2 blocked" — not a litter of
+    # zero counts for states nothing reached.
+    blocked_stub = write_stub(
+        workdir / "stub-landing-blocked",
+        'prompt=""\n'
+        'for arg in "$@"; do case "$arg" in *.prompt.md) prompt="$arg" ;; esac; done\n'
+        'status="${prompt%.prompt.md}.jsonl"\n'
+        'grep -oE "[a-z]+/[a-z-]+#[0-9]+" "$prompt" | sort -u | while read -r pr; do\n'
+        '  printf "{\\"pr\\": \\"%s\\", \\"state\\": \\"blocked\\", \\"note\\": \\"draft\\"}\\n" "$pr" >>"$status"\n'
+        'done\n'
+        'printf "{\\"state\\": \\"done\\", \\"note\\": \\"all blocked\\"}\\n" >>"$status"\n',
+    )
+    os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{blocked_stub} @PROMPT"
+    app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if len(app.stops) == 2:
+                break
+            await pilot.pause(0.05)
+        app.self_login = "castrojo"
+        notices = []
+        real_notify = app.notify
+
+        def record(message, *args, **kwargs):
+            notices.append((str(message), kwargs.get("severity", "information")))
+            real_notify(message, *args, **kwargs)
+
+        app.notify = record
+        for stop in app.stops:
+            stop.selected = True
+        app.action_land_batch()
+        await pilot.pause()
+        gate = app.screen
+        await pilot.press("enter")
+        task = gate.plan
+        expected = f"batch {task.task_id} finished: 2 blocked"
+        for _ in range(400):
+            if task.returncode is not None and any(
+                f"batch {task.task_id}" in message for message, _ in notices
+            ):
+                break
+            await pilot.pause(0.05)
+        check(
+            any(expected in message for message, _ in notices),
+            f"an all-blocked batch must say exactly that, want {expected!r} "
+            f"in {notices}",
+        )
+    gh_log.write_text("")
+    # ── the landing brief covers repositories with no image pipeline ────
+    # "Done is :stable" can never resolve where nothing publishes an image
+    # (observed: projectbluefin/bluespeed, a config/quadlets repository —
+    # a squash-merged PR sat marked failed). The brief must have the agent
+    # detect the missing pipeline before merging and treat the GitHub
+    # merge itself as done there — without the packages API, whose
+    # read:packages scope the shipped token lacks and whose orgs endpoint
+    # 404s on user-owned repositories (a false "no package").
+    probe = tui.landing.new_task(
+        [SimpleNamespace(key="projectbluefin/bluespeed#63", title="chore: bump digest")],
+        "castrojo",
+    )
+    brief = " ".join(Path(probe.prompt_path).read_text().split())
+    check(
+        "no publish workflow" in brief and "no image package" in brief,
+        "the brief must have the agent detect a missing publish workflow "
+        "and image package",
+    )
+    check(
+        "BEFORE merging" in brief,
+        "the pipeline check must happen before the merge, not after it",
+    )
+    check(
+        "the GitHub merge itself is done" in brief,
+        "the brief must define done as the GitHub merge when no image "
+        "pipeline exists",
+    )
+    check(
+        "unless BOTH signals are absent" in brief,
+        "the no-pipeline path must require both signals absent — one "
+        "signal alone never skips :stable verification",
+    )
+    check(
+        "token mint is denied" in brief and "401/403" in brief,
+        "the registry signal must be a denied anonymous token mint or "
+        "a /tags/list 401/403 — ghcr never 404s a missing package, so a "
+        "404-based test never fires (bluespeed proved it)",
+    )
+    check(
+        "PRIVATE package" in brief and "ambiguous" in brief,
+        "the brief must name the 403/private-package ambiguity and the "
+        "workflow conjunction that covers it",
+    )
+    check(
+        "not an error to retry" in brief,
+        "a denied mint is the negative signal itself — the brief must "
+        "say so, since curl -fsSL exits nonzero on it",
+    )
+    check(
+        "package_type=container" not in brief,
+        "the detection must not call the packages API",
+    )
+    check(
+        ":stable" in brief and "awaiting-stable" in brief,
+        "the brief must keep the :stable definition where a pipeline exists",
+    )
+
+    # On a merge-queue repository the merge completes after `gh pr merge`
+    # returns (common#1008: the agent watched a merge_group gate run for 20
+    # minutes on an already-merged pull request). The brief must teach the
+    # accept-then-poll path and the push-event publish run.
+    check(
+        "accepted by merge queue" in brief and "merge_group" in brief,
+        "the brief must teach the merge-queue accept, and never watching "
+        "a merge_group run",
+    )
+    check(
+        "until it reads MERGED" in brief,
+        "the merge-queue wait must poll the pull request state",
+    )
+    check(
+        "names its target and timeout" in brief,
+        "every wait-state note must name its target and timeout",
+    )
+
+    # common#1008 published successfully as `common:latest` and was
+    # reported blocked because common carries no `:stable` tag — the
+    # release tag is the repository's fact, never the brief's assumption,
+    # and blocked/failed is for a publish nothing can evidence at all.
+    check(
+        "is a fact about the repository" in brief and "`latest`" in brief,
+        "the brief must discover the release tag, not assume :stable",
+    )
+    check(
+        "no publication of the merge commit can be evidenced" in brief,
+        "the brief must accept the publish it can prove and fail only "
+        "when none can be evidenced",
+    )
 
     # ── merging without lgtm is a maintainer power ───────────────────────
     # lgtm is an opt-in to Hive's automation, not a toll on merging: a
@@ -997,7 +1917,8 @@ async def main() -> int:
         def __call__(self, path):
             with open(hive_calls, "a") as sink:
                 sink.write(path + "\n")
-            return self.status if path.endswith("status") else self.contributors
+            data = self.status if path.endswith("status") else self.contributors
+            return tui.hive_api.Result(True, "ok", "online", data)
 
     real_hive_get = tui.hive_get
     real_base = tui.hive_api_base
@@ -1076,19 +1997,31 @@ async def main() -> int:
             )
 
         # An unreachable hub degrades to a plain statement, never a crash.
-        tui.hive_get = lambda path: {}
-        app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            for _ in range(200):
-                if app.hive_state:
-                    break
-                await pilot.pause(0.05)
-            check(
-                app.hive_state == "unreachable",
-                f"an unreachable hub must say so, got {app.hive_state!r}",
+        hive_failure_states = {
+            "authentication token missing": "authentication token missing",
+            "network error": "network error",
+            "authentication rejected (401)": "authentication rejected (401)",
+            "authorization rejected (403)": "authorization rejected (403)",
+            "API routing redirected (302)": "API routing redirected (302)",
+            "malformed API response": "malformed API response",
+            "Hive server error (503)": "Hive server error (503)",
+        }
+        for message, expected_state in hive_failure_states.items():
+            tui.hive_get = lambda path, message=message: tui.hive_api.Result(
+                False, "test", message, {}
             )
-            check(app.stops, "an unreachable hub must not empty the queue")
+            app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                for _ in range(200):
+                    if app.hive_state:
+                        break
+                    await pilot.pause(0.05)
+                check(
+                    app.hive_state == expected_state,
+                    f"Hive failure must be actionable, got {app.hive_state!r}",
+                )
+                check(app.stops, "a Hive failure must not empty the queue")
 
         # No hub configured at all is its own honest answer.
         tui.hive_api_base = lambda: ""
@@ -1617,20 +2550,21 @@ async def main() -> int:
         check(tui.ACTIVE_BACKEND == unavailable_backend,
               "unavailable Codex pilot must restore the prior backend")
 
-    # Goose is the selected backend by default, but it does not draft bodies.
-    # It must degrade without invoking Codex or changing manual prose.
+    # Goose is the selected backend by default and drafts bodies directly.
     original_backend = tui.ACTIVE_BACKEND
-    original_draft = tui.CodexHarness.draft
-    original_probe = tui.CodexHarness.probe
-    codex_calls = []
+    original_goose_draft = tui.GooseHarness.draft
+    goose_calls = []
 
-    def unexpected_codex(self, request):
-        codex_calls.append(request)
-        raise AssertionError("Goose body drafting must not invoke Codex")
+    def goose_draft(self, request):
+        goose_calls.append(request)
+        return SimpleNamespace(
+            state=tui.DraftState.COMPLETE,
+            markdown="generated Goose body",
+            provenance={"backend": "goose", "model": self.model, "effort": self.effort},
+        )
 
     tui.ACTIVE_BACKEND = "goose"
-    tui.CodexHarness.draft = unexpected_codex
-    tui.CodexHarness.probe = classmethod(lambda cls: tui.Availability.READY)
+    tui.GooseHarness.draft = goose_draft
     try:
         app = tui.ReviewDashboard(tui.QueueFilters(action="", url=queue_file.as_uri()))
         async with app.run_test() as pilot:
@@ -1654,12 +2588,9 @@ async def main() -> int:
             editor.text = "manual Goose body"
             app.screen.action_generate()
             await pilot.pause()
-            check(editor.text == "manual Goose body",
-                  "unsupported Goose drafting must preserve the manual review body")
-            check(any("unsupported" in notification.message.lower()
-                      for notification in app._notifications),
-                  "unsupported Goose drafting must show a degraded message")
-            check(not codex_calls, "Goose drafting must never invoke Codex")
+            check(editor.text == "generated Goose body",
+                  "Goose drafting must use the selected drafting capability")
+            check(len(goose_calls) == 1, "Goose drafting must be invoked directly")
             editor.text = "x" * 4096
             app.screen.action_preview()
             await pilot.pause()
@@ -1677,8 +2608,7 @@ async def main() -> int:
                   "an oversized body must not create a temporary file")
     finally:
         tui.ACTIVE_BACKEND = original_backend
-        tui.CodexHarness.probe = original_probe
-        tui.CodexHarness.draft = original_draft
+        tui.GooseHarness.draft = original_goose_draft
 
     # A verdict that is not an approval has to say why.
     app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
@@ -1887,7 +2817,7 @@ async def main() -> int:
             check(
                 len(stop.failure) > 200
                 and stop.failure_command.endswith(
-                    "https://hive.example.test/api/prs/projectbluefin/bluefinctl/31/queue-automerge"
+                    "https://hive.example.test/api/v1/prs/projectbluefin/bluefinctl/31/queue-automerge"
                 )
                 and "LAST MUTATION FAILURE" in details
                 and stop.failure in details,
@@ -1952,9 +2882,10 @@ async def main() -> int:
         if isinstance(app.screen, tui.ConfirmMutation):
             check(
                 len(app.screen.commands) == 1
-                and app.screen.commands[0][:2] == ["sh", "-c"]
+                and app.screen.commands[0][1] == str(hive_api_stub)
+                and app.screen.commands[0][2] == "queue"
                 and app.screen.commands[0][-1].endswith(
-                    "/api/prs/projectbluefin/bluefinctl/31/queue-automerge"
+                    "/api/v1/prs/projectbluefin/bluefinctl/31/queue-automerge"
                 ),
                 f"queueing must show one Hive request, got {app.screen.commands}",
             )
@@ -2246,6 +3177,96 @@ async def main() -> int:
         tui.mechanical_reason(bot, {}) is None,
         "MECHANICAL must require live evidence, never absence of it",
     )
+
+    # GitHub may return multiple runs for one check context at the exact head.
+    # The current run is authoritative; a cancelled predecessor must not make
+    # clean live evidence look failed or appear twice in review verification.
+    superseded = json.loads(
+        (FIXTURE_DIR / "superseded-check-rollup.json").read_text()
+    )
+    check(
+        tui.effective_check_state("unknown", superseded) == "success",
+        "a successful current run must supersede a cancelled older run",
+    )
+    check(
+        tui.live_review_context(superseded)["ci"] == "success",
+        "review context must agree with the exact-head check rollup",
+    )
+    verification = tui.live_review_verification(superseded)
+    check(
+        [record["name"] for record in verification]
+        == [
+            "E2E smoke",
+            "validate-release-notes",
+            "Check PR base branch",
+            "validate",
+            "Unit tests",
+        ],
+        "review verification must order one authoritative record per stable context",
+    )
+    status_contexts = {
+        "statusCheckRollup": [
+            {
+                "__typename": "StatusContext",
+                "context": "ci/vendor",
+                "state": "FAILURE",
+                "startedAt": "2026-08-10T00:28:00Z",
+            },
+            {
+                "__typename": "StatusContext",
+                "context": "ci/vendor",
+                "state": "SUCCESS",
+                "startedAt": "2026-08-10T00:29:00Z",
+            },
+        ]
+    }
+    check(
+        tui.effective_check_state("unknown", status_contexts) == "success"
+        and len(tui.authoritative_checks(status_contexts)) == 1,
+        "a newer commit status must supersede the same stable status context",
+    )
+
+    app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app.stops:
+                break
+            await pilot.pause(0.05)
+        stop = app.stops[0]
+        stop.live = superseded
+        app.render_evidence(stop)
+        details = str(app.query_one("#details", tui.Static).render())
+        check(
+            "checks   5 ok, 0 failed, 0 cancelled, 0 pending" in details
+            and "MERGEABLE / CLEAN" in details,
+            "the dashboard must render exact-head authoritative checks and merge state",
+        )
+        current_states = json.loads(json.dumps(superseded))
+        current_states["mergeStateStatus"] = "BLOCKED"
+        current_states["statusCheckRollup"][2]["conclusion"] = None
+        current_states["statusCheckRollup"][2]["status"] = "IN_PROGRESS"
+        current_states["statusCheckRollup"][5]["conclusion"] = "FAILURE"
+        current_states["statusCheckRollup"][7]["conclusion"] = "CANCELLED"
+        stop.live = current_states
+        app.render_evidence(stop)
+        details = str(app.query_one("#details", tui.Static).render())
+        check(
+            "checks   2 ok, 1 failed, 1 cancelled, 1 pending" in details
+            and "MERGEABLE / BLOCKED" in details,
+            "current failures, cancellations, pending checks, and merge blockers must stay distinct",
+        )
+        missing_required = {
+            "headRefOid": superseded["headRefOid"],
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "BLOCKED",
+            "statusCheckRollup": [],
+        }
+        check(
+            tui.live_review_context(missing_required)["ci"] == "unknown"
+            and tui.live_review_context(missing_required)["merge_state"] == "BLOCKED",
+            "missing required contexts must remain unknown beside GitHub's blocked merge state",
+        )
     check(
         tui.mechanical_reason(
             "castrojo", live_shape(author={"login": "castrojo"})
@@ -2606,6 +3627,11 @@ async def main() -> int:
         f"the review must call 'pr <repo> <number>', got {invocations[-1:]}",
     )
     for expected in (
+        "what changed  fix: ci.yml add permissions block",
+        "risk/impact  No evidenced review risk.",
+        "confidence  CI FAILED · MERGEABLE · head CURRENT 0123456789ab",
+        "findings  No evidenced findings.",
+        "next action  Review the evidence; wait for green CI before landing.",
         "No evidenced findings",
         "checks  4 verified / 1 unverified",
         "overlap 1 duplicate / 2 shared-file hazard",
@@ -2623,6 +3649,10 @@ async def main() -> int:
     check("COMPLETE" in text, f"a structured findings run must complete, got {text!r}")
     for expected in (
         "FINDINGS",
+        "what changed  fix: ci.yml add permissions block",
+        "risk/impact  HIGH risk · 2 actionable findings",
+        "confidence  CI FAILED · MERGEABLE · head CURRENT 0123456789ab",
+        "next action  Request changes or comment on the cited findings.",
         "critical:0  high:1  medium:1  low:0",
         "image/entrypoint.sh:87",
         "SIGTERM [signal] no longer reaches",
@@ -2634,7 +3664,23 @@ async def main() -> int:
     text, classes, card = await run_review(0, "0 findings")
     check("UNPARSABLE" in text, f"unstructured exit 0 must be UNPARSABLE, got {text!r}")
     check("incomplete" in classes, f"unparsable output must use warning styling, got {classes}")
-    check("No clean decision" in card, f"unparsable output must direct raw inspection, got {card!r}")
+    check(
+        "next action  Open diagnostics and rerun the review." in card,
+        f"unparsable output must direct diagnostics, got {card!r}",
+    )
+
+    text, classes, card = await run_review(
+        0, clean_output, reviewed_head="a" * 40
+    )
+    check("STALE" in text, f"a mismatched reviewed head must report STALE, got {text!r}")
+    check(
+        "stale" in classes and "#review-status.stale" in tui.ReviewDashboard.CSS,
+        f"a stale review must apply its warning style rule, got {classes}",
+    )
+    check(
+        "next action  Rerun the review on the current head." in card,
+        f"a stale review must direct a rerun, got {card!r}",
+    )
 
     # ── the regression that started this: a review whose checks returned no
     # verdict must never read as clean ───────────────────────────────────
@@ -2693,7 +3739,8 @@ async def main() -> int:
             check(
                 app.screen.expected == "31"
                 and len(app.screen.commands) == 1
-                and app.screen.commands[0][:2] == ["sh", "-c"]
+                and app.screen.commands[0][1] == str(hive_api_stub)
+                and app.screen.commands[0][2] == "queue"
                 and app.screen.commands[0][-1].endswith("/queue-automerge"),
                 f"the card must preserve the queue action, got {app.screen.commands}",
             )
@@ -2977,7 +4024,7 @@ async def main() -> int:
     outcomes = [r["outcome"] for r in records if r.get("action") == "review"]
     check(
         outcomes == [
-            "complete", "complete", "incomplete", "incomplete", "failed",
+            "complete", "complete", "incomplete", "stale", "incomplete", "failed",
             "complete", "incomplete", "complete", "stopped", "stopped",
             "complete", "error",
         ],

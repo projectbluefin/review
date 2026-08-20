@@ -2,6 +2,7 @@
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -494,13 +495,113 @@ class HarnessContract(unittest.TestCase):
         adapter = CodexHarness(availability=Availability.READY)
         self.assertTrue(adapter.process_group_cancellation)
 
-    def test_drafting_is_explicit_and_goose_does_not_fallback(self):
+    def test_drafting_is_explicit_for_each_selected_harness(self):
         self.assertTrue(CodexHarness().capabilities.body_drafting)
-        self.assertFalse(GooseHarness().capabilities.body_drafting)
+        self.assertTrue(GooseHarness().capabilities.body_drafting)
         request = DraftRequest(self.binding, "approve", self._evidence(), {"title": "A PR"})
-        with self.assertRaises(RuntimeError) as error:
-            GooseHarness().draft(request)
-        self.assertIn("UNSUPPORTED_CAPABILITY", str(error.exception))
+        command = GooseHarness().draft_command(request, "/tmp/review-draft-prompt")
+        self.assertEqual(command, [
+            "goose", "run", "--no-session", "-i", "/tmp/review-draft-prompt",
+        ])
+
+    def test_goose_draft_uses_goose_model_and_removes_prompt_and_github_tokens(self):
+        request = DraftRequest(self.binding, "comment", self._evidence(), {"title": "A PR"})
+        captured = {}
+
+        class Process:
+            pid = 123
+            stdout = "Reviewed."
+            stderr = ""
+            returncode = 0
+
+            def communicate(self):
+                return self.stdout, self.stderr
+
+        def run(command, **kwargs):
+            prompt_path = command[-1]
+            captured.update(command=command, prompt_path=prompt_path,
+                            prompt=Path(prompt_path).read_text(), **kwargs)
+            return Process()
+
+        adapter = GooseHarness(
+            availability=Availability.READY, model="gpt-goose", effort="max"
+        )
+        with patch.dict(os.environ, {
+            "GH_TOKEN": "secret", "GITHUB_TOKEN": "secret",
+            "REVIEW_GH_TOKEN": "secret",
+        }), patch("harness.goose.subprocess.Popen", side_effect=run):
+            result = adapter.draft(request)
+        self.assertEqual(result.state, DraftState.COMPLETE)
+        self.assertEqual(result.markdown, "Reviewed.")
+        self.assertEqual(result.provenance["backend"], "goose")
+        self.assertEqual(result.provenance["model"], "gpt-goose")
+        self.assertEqual(result.provenance["effort"], "max")
+        self.assertEqual(captured["command"][:4], [
+            "goose", "run", "--no-session", "-i",
+        ])
+        self.assertIn("verdict comment", captured["prompt"])
+        self.assertIn("Do not perform another code review", captured["prompt"])
+        self.assertNotIn("GH_TOKEN", captured["env"])
+        self.assertNotIn("GITHUB_TOKEN", captured["env"])
+        self.assertNotIn("REVIEW_GH_TOKEN", captured["env"])
+        self.assertEqual(captured["env"]["GOOSE_MODEL"], "gpt-goose")
+        self.assertEqual(captured["env"]["GOOSE_THINKING_EFFORT"], "max")
+        self.assertFalse(Path(captured["prompt_path"]).exists())
+
+    def test_goose_draft_cancellation_terminates_process_group(self):
+        request = DraftRequest(self.binding, "comment", self._evidence(), {})
+        captured = {}
+
+        class Process:
+            pid = 123
+            returncode = -signal.SIGTERM
+
+            def communicate(self):
+                captured["handler"](signal.SIGTERM, None)
+                return "", ""
+
+            def wait(self):
+                captured["waited"] = True
+
+        def install(signum, handler):
+            captured["handler"] = handler
+            return signal.SIG_DFL
+
+        with patch("harness.goose.subprocess.Popen", return_value=Process()), \
+             patch("harness.goose.signal.signal", side_effect=install), \
+             patch("harness.goose.os.killpg") as killpg:
+            result = GooseHarness(availability=Availability.READY).draft(request)
+        self.assertEqual(result.state, DraftState.FAILED)
+        killpg.assert_called_once_with(123, signal.SIGTERM)
+        self.assertTrue(captured["waited"])
+
+    def test_goose_draft_launch_failure_is_bounded_and_provenanced(self):
+        request = DraftRequest(self.binding, "comment", self._evidence(), {})
+        with patch(
+            "harness.goose.subprocess.Popen",
+            side_effect=OSError("goose launch failed"),
+        ):
+            result = GooseHarness(availability=Availability.READY).draft(request)
+        self.assertEqual(result.state, DraftState.FAILED)
+        self.assertEqual(result.provenance["backend"], "goose")
+        self.assertIn("goose launch failed", "\n".join(result.raw_evidence))
+        self.assertLessEqual(len(result.raw_evidence), 400)
+
+    def test_goose_draft_runtime_failure_is_bounded_and_provenanced(self):
+        request = DraftRequest(self.binding, "comment", self._evidence(), {})
+
+        class Process:
+            pid = 123
+
+            def communicate(self):
+                raise subprocess.SubprocessError("goose runtime failed")
+
+        with patch("harness.goose.subprocess.Popen", return_value=Process()):
+            result = GooseHarness(availability=Availability.READY).draft(request)
+        self.assertEqual(result.state, DraftState.FAILED)
+        self.assertEqual(result.provenance["backend"], "goose")
+        self.assertIn("goose runtime failed", "\n".join(result.raw_evidence))
+        self.assertLessEqual(len(result.raw_evidence), 400)
 
     def test_codex_draft_strips_github_tokens_from_subprocess_environment(self):
         request = DraftRequest(self.binding, "approve", self._evidence(), {"title": "A PR"})

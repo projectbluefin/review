@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import time
 from dataclasses import dataclass, field
@@ -34,9 +35,13 @@ DEFAULT_LANDING_COMMAND = "goose run --no-session -i @PROMPT"
 # "blocked" and "failed" differ: blocked means the rules forbid landing
 # (draft, failing required checks, no permission); failed means the attempt
 # itself errored. Both come back to the batch selected, with the note.
-# A GitHub merge is not "done": done is the merged commit published on the
-# repository's :stable image tag. "merged" is only reported once :stable
-# carries the change.
+# "Done" depends on the repository: with a publish pipeline it is the
+# merged commit published under the repository's release tag (the factory
+# convention is :stable; a repository publishing only :latest proves it
+# there), and "merged" is only reported once the tag carries the change;
+# with no publish workflow and no image package the GitHub merge itself
+# is done. The brief has the agent detect which kind of repository it is
+# landing before it merges.
 PR_STATES = (
     "diagnosing",
     "fixing",
@@ -85,8 +90,22 @@ class LandingTask:
 
 def new_task(stops: list, login: str) -> LandingTask:
     """A task with its prompt, status, and log paths laid out."""
-    task_id = time.strftime("%Y%m%d-%H%M%S")
     directory = landing_state_dir()
+    # A bare one-second stamp collides for two named dashboards sharing the
+    # one state directory — REVIEW_QUEUE_NAME exists precisely so both can
+    # run at once — so the instance name rides in the id, which also makes
+    # the record attributable. The suffix covers same-second batches from a
+    # single dashboard.
+    instance = re.sub(
+        r"[^A-Za-z0-9_.-]+", "-", os.environ.get("BLUEFIN_REVIEW_INSTANCE", "")
+    ).strip("-.")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    base = f"{stamp}-{instance}" if instance else stamp
+    task_id = base
+    suffix = 2
+    while os.path.exists(os.path.join(directory, f"{task_id}.prompt.md")):
+        task_id = f"{base}-{suffix}"
+        suffix += 1
     task = LandingTask(
         task_id=task_id,
         stops=list(stops),
@@ -102,6 +121,8 @@ def new_task(stops: list, login: str) -> LandingTask:
     return task
 
 
+# fsdk-containers#164 ships skopeo in the base; it deletes the anonymous
+# registry check in step 5 below.
 def landing_prompt(task: LandingTask) -> str:
     """The batch brief. The agent acts on the maintainer's confirmed
     selection; the rules it may not cross are stated in it, not assumed."""
@@ -126,15 +147,73 @@ For each pull request, in order:
    `gh pr review --approve --body "Approved by @{task.login} for Hive auto-merge on green CI."`
    then squash-merge: `gh pr merge --squash`. If GitHub refuses (branch
    protection, review requirements), do not force anything — add the `lgtm`
-   label instead and move on.
-5. A GitHub merge is not done. Done is the merged commit published on the
-   image's `:stable` tag: report `awaiting-stable` right after merging, then
-   watch the repository's publish workflow for the merge commit and verify
-   the `:stable` tag moved onto it (the image's
-   `org.opencontainers.image.revision` label is the commit — `skopeo inspect
-   docker://<image>:stable`). Only when `:stable` carries the change, report
-   `merged`. If the publish fails, that failure is the deliverable: report
-   `failed` with the evidence.
+   label instead and move on. GitHub computes mergeability asynchronously,
+   so `mergeable: UNKNOWN` is a cache-warming placeholder, never a verdict:
+   re-query with backoff (about every 10 seconds for up to a minute, and
+   name the wait in your note) until GitHub commits to an answer, and only
+   act on the computed state. Never report `blocked` on UNKNOWN alone —
+   a maintainer can act on a computed state, not on a placeholder.
+5. Done depends on whether this repository publishes an image, so check
+   BEFORE merging — never discover it after. Treat the repository as
+   publishing an image unless BOTH signals are absent: no workflow under
+   `.github/workflows` pushes to the registry (its YAML names `ghcr.io`),
+   and the package `ghcr.io/<owner>/<repo>` is not anonymously readable.
+   ghcr never 404s a missing package: the anonymous token mint is denied
+   (403 DENIED) for one, and `/tags/list` answers 401/403 — a 404 is only
+   ever a missing REF inside an existing package. The mint command below
+   (`curl -fsSL`) exits nonzero on a denied mint: that denial IS the
+   negative signal, not an error to retry. A 403 alone is ambiguous with
+   a PRIVATE package no anonymous caller can see; the mandatory
+   conjunction with the workflow signal covers that case — a repository
+   whose workflow publishes still takes the publish path. Only when both
+   are absent, the GitHub merge itself is done: report `merged` right after
+   merging, with a note like "no publish workflow, no image package — the
+   merge is the deliverable". Never take that path on one signal alone.
+
+   `gh pr merge` may answer "accepted by merge queue": the merge completes
+   later, on the queue's terms. Never `gh run watch` the merge_group gate
+   run — the pull request can be merged while that run still goes. Poll
+   `gh pr view --json state` until it reads MERGED, and verify the merge
+   commit's push-event publish run: on main the publish workflow triggers
+   on `push`, never `merge_group`.
+
+   A GitHub merge is otherwise not done. Done is the merged commit
+   published under the repository's release tag — and which tag that is
+   is a fact about the repository, never an assumption: the factory
+   convention is `:stable`, but a repository that publishes only `latest`
+   (projectbluefin/common is one) proves its publish there. Report
+   `awaiting-stable` right after merging, then watch the repository's
+   publish workflow for the merge commit (the push-event run). The image
+   ships no registry client and needs none — ghcr.io serves public
+   packages anonymously, whether the repository's owner is an org or a
+   user. Mint a pull token:
+
+   tok=$(curl -fsSL "https://ghcr.io/token?scope=repository:<org>/<image>:pull" | jq -r .token)
+
+   then HEAD `https://ghcr.io/v2/<org>/<image>/manifests/<ref>` with
+   `Authorization: Bearer $tok` and read the `docker-content-digest` header.
+   ghcr content-negotiates strictly: the `Accept` header must name the OCI
+   index AND manifest media types
+   (`application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json`),
+   or a ref that exists answers 404. `/tags/list` with the same token
+   lists the package's tags — paginated at 100, so follow the
+   `Link: rel="next"` cursor (`?last=<tag>`) until you have them all — and
+   names the release tag up front. The publish tags every build with the
+   commit — `sha-<commit>` on the index here, arch-suffixed
+   `sha-<commit>-amd64`/`-arm64` on its children, the bare commit
+   elsewhere; they are not necessarily on the first page. The release tag
+   carries the merge when a tag containing the commit resolves to the
+   release tag's digest or, for a multi-arch index, to one of its
+   children (GET the release tag with the index Accept and read
+   `.manifests[].digest`). A commit-tagged image with no moving release
+   tag is itself a proven publish. Only then report `merged`, naming the
+   evidence. If the publish fails — or no publication of the merge commit
+   can be evidenced at all — that is the deliverable: report `failed`
+   with the evidence.
+
+   Every wait-state note names its target and timeout: `waiting-ci` names
+   the run and when you give up, `merging` names the merge-queue wait and
+   when you give up, `awaiting-stable` names the tag and when you give up.
 6. Never merge a draft, never merge with failing required checks, never pass
    `--admin` or any flag that bypasses branch protection, never force-push.
    A pull request the rules cannot land is reported, not forced.
@@ -160,6 +239,21 @@ def landing_command(task: LandingTask) -> list[str]:
     ]
 
 
+def report_age(path: str) -> str:
+    """How long since the agent last appended to its report. The status
+    file's mtime is the heartbeat: every reported event rewrites it, so a
+    stale mtime is the only difference a healthy 20-minute CI wait and a
+    dead agent have (#291)."""
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return "no report yet"
+    seconds = max(0, int(time.time() - mtime))
+    if seconds < 90:
+        return f"last report {seconds}s ago"
+    return f"last report {seconds // 60}m ago"
+
+
 def parse_status(path: str) -> dict[str, dict]:
     """The latest event per pull request, plus the task-level "done" event
     under the "" key. A half-written final line is skipped, not fatal."""
@@ -179,4 +273,69 @@ def parse_status(path: str) -> dict[str, dict]:
                 latest[str(event.get("pr", ""))] = event
     except OSError:
         pass
+    return latest
+
+
+# The record is durable, so it is also bounded: batch files older than
+# this are pruned on read, or the state directory grows without bound
+# (#290). A week covers a review queue's memory — a pull request older
+# than that has left the snapshot anyway.
+LANDING_RETENTION_SECONDS = 7 * 24 * 60 * 60
+
+
+def prune_landings(root: str, now: float | None = None) -> None:
+    """Delete batch files past the retention window. Best-effort: a file
+    that cannot be stat'd or removed is left for the next pass."""
+    cutoff = (time.time() if now is None else now) - LANDING_RETENTION_SECONDS
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(root, name)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.unlink(path)
+        except OSError:
+            continue
+
+
+def record_event(key: str, state: str, note: str) -> None:
+    """Supersede a persisted outcome from outside a batch. A manual
+    success — a re-queue, a direct merge — clears the row's marking in
+    memory only; unless the record says so too, the next refresh folds
+    the stale failure back onto it (#290). One appended line in a file
+    whose mtime is now wins the fold. Best-effort: a state-directory
+    problem must not break the mutation that just succeeded."""
+    try:
+        path = os.path.join(landing_state_dir(), "manual.jsonl")
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps({"pr": key, "state": state, "note": note}) + "\n"
+            )
+    except OSError:
+        pass
+
+
+def persisted_events(directory: str | None = None) -> dict[str, dict]:
+    """The latest event per pull request across every recorded batch, so a
+    relaunched dashboard can fold a previous run's outcomes back onto the
+    rows (#281). Files fold oldest first by mtime, so newer batches win;
+    the task-level "" key is not a pull request and is dropped."""
+    root = directory or landing_state_dir()
+    prune_landings(root)
+    try:
+        paths = [
+            os.path.join(root, name)
+            for name in os.listdir(root)
+            if name.endswith(".jsonl")
+        ]
+        paths.sort(key=lambda path: (os.path.getmtime(path), path))
+    except OSError:
+        return {}
+    latest: dict[str, dict] = {}
+    for path in paths:
+        for key, event in parse_status(path).items():
+            if key:
+                latest[key] = event
     return latest

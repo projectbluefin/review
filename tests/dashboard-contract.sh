@@ -14,6 +14,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tui="$repo_root/image/tui/bluefin_review_tui.py"
 
+python3 "$repo_root/tests/hive_api_contract.py"
+
 fail() {
   echo "FAIL: $1" >&2
   exit 1
@@ -89,6 +91,18 @@ grep -q 'awaiting-stable' "$landing_py" ||
   fail "a merge is not done until :stable carries the change"
 grep -q ':stable' "$landing_py" ||
   fail "the landing brief must define done as :stable published"
+# The image ships no registry inspector until fsdk-containers#164 lands in
+# the base, so neither the brief nor the skills may instruct one.
+for doc in "$landing_py" \
+  "$repo_root/docs/skills/review-dashboard.md" \
+  "$repo_root/docs/skills/image-build.md"; do
+  grep -q 'skopeo inspect' "$doc" &&
+    fail "$(basename "$doc") must not instruct skopeo; the image does not ship it (fsdk-containers#164)"
+done
+# The brief's verification is the anonymous ghcr flow: no token scope, no
+# org/user endpoint split, index children count as carrying a tag.
+grep -q 'ghcr.io/token' "$landing_py" ||
+  fail "the landing brief must verify :stable through the anonymous ghcr token flow"
 
 # The gate is the typed pull request number: no y/yes, no timeout.
 grep -q 'class ConfirmMutation' "$tui" || fail "the ConfirmMutation gate must exist"
@@ -111,7 +125,7 @@ grep -q '\[b\]p\[/b\]' "$tui" &&
 # Queueing goes through Hive's authenticated mutation endpoint. Hive owns the
 # App-authored exact-head approval and queue label; a human gh review cannot
 # satisfy the governor's authorship contract (#247).
-grep -q '/api/prs/{owner}/{repository}/{stop.number}/queue-automerge' "$tui" ||
+grep -q '/api/v1/prs/{owner}/{repository}/{stop.number}/queue-automerge' "$tui" ||
   fail "queueing must call Hive's queue-automerge endpoint"
 grep -q 'QUEUE_LABEL = "lgtm"' "$tui" ||
   fail "the sweep's label must still be lgtm"

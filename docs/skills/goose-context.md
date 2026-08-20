@@ -22,13 +22,14 @@ metadata:
 Maintainer reviews use Goose as the `goose` entry in the shared harness
 registry. The adapter owns readiness, exact-head invocation, streaming,
 cancellation, redacted evidence, and structured `ReviewResult` conversion;
-body drafting is explicitly unsupported and never falls back to another
-harness.
+body drafting uses Goose's bounded one-shot command and never falls back to
+another harness.
 
 Readiness uses Goose's documented non-secret `goose info --check` surface and
 requires a Goose/provider-ready response, not only exit 0. An absent
 executable is reported separately from a present executable whose provider
-check fails; review invocation is refused until that check succeeds.
+check fails; review and body-drafting invocations are refused until that
+check succeeds.
 
 ## When to Use
 

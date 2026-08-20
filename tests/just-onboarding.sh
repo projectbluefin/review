@@ -298,7 +298,7 @@ run_recipe() {
       -u REVIEW_NON_INTERACTIVE -u GOOSE_INSTALLED \
       -u REVIEW_CONTAINER_NAME -u REVIEW_DETACH \
       -u REVIEW_HIVE -u REVIEW_CONTRIBUTOR_IMAGE \
-      -u REVIEW_QUEUE_NAME \
+      -u REVIEW_QUEUE_NAME -u XDG_STATE_HOME \
       HOME="$home" PATH="$fake_bin:/usr/bin:/bin" TMPDIR="$tmp_root" \
       XDG_RUNTIME_DIR="$tmp_root" \
       GUM_LOG="$gum_log" RUNNER_LOG="$runner_log" \
@@ -519,6 +519,25 @@ assert_not_contains "contributor.env" "$OUT"
 assert_file_not_contains "/home/dev/.codex/auth.json" "$runner_log"
 assert_contains "starting the maintainer review dashboard (no Hive)" "$OUT"
 
+begin "review-queue: the dashboard state directory persists on the host"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
+# Landing batches, their failure reasons, and the action trace are the only
+# durable record of what the landing agent did; the reclaim-by-replace
+# relaunch must not wipe them (#281).
+assert_file_contains "--volume ${home}/.local/state/bluefin-review:/home/dev/.local/state/bluefin-review:rw,z" "$runner_log"
+assert_file_exists "${home}/.local/state/bluefin-review"
+# The instance name rides into the container so two named dashboards sharing
+# the state directory mint distinct batch ids.
+assert_file_contains "--env BLUEFIN_REVIEW_INSTANCE" "$runner_log"
+
+begin "review-queue: XDG_STATE_HOME relocates the dashboard state mount"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  XDG_STATE_HOME="$scratch/xdg"
+assert_file_contains "--volume ${scratch}/xdg/bluefin-review:/home/dev/.local/state/bluefin-review:rw,z" "$runner_log"
+assert_file_exists "${scratch}/xdg/bluefin-review"
+
 begin "review-queue: explicit Codex selection reaches the shipped dashboard"
 reset_logs
 mv "$home/.config/goose/config.yaml" "$home/.config/goose/config.yaml.saved"
@@ -653,6 +672,9 @@ assert_file_contains "ghcr.io/projectbluefin/review" "$runner_log"
 assert_file_not_contains " -d " "$runner_log"
 assert_file_not_contains "--detach" "$runner_log"
 assert_file_not_contains "--env-file" "$runner_log"
+# The dashboard state mount belongs to review-queue alone; the contributor
+# worker's record flows through Hive, so no bluefin-review state persists.
+assert_file_not_contains "bluefin-review" "$runner_log"
 assert_file_not_contains ":/config" "$runner_log"
 assert_file_not_contains "/workspace" "$runner_log"
 assert_file_not_contains "qemu" "$runner_log"
@@ -813,43 +835,45 @@ reset_logs
 default_hive_backup="$scratch/contributor.default.env"
 cp "$home/.config/hive/contributor.env" "$default_hive_backup"
 rm "$home/.config/hive/contributor.env"
-cat >"$home/.config/hive/contributor.review.env" <<'EOF'
+# The launcher derives the registration name from the checkout's directory
+# basename (git rev-parse --show-toplevel), so this scenario must too: a
+# worktree named anything but 'review' selects contributor.<basename>.env.
+repo_registration="${repo_root##*/}"
+cat >"$home/.config/hive/contributor.${repo_registration}.env" <<'EOF'
 HIVE_REGISTRATION_TOKEN=named-secret-token
 HIVE_HUB=wss://named-hive.invalid/contribute
 CONTRIBUTOR_ID=test-contributor-named
 CONTRIBUTOR_USERNAME=test-user
 AGENT_BACKEND=goose
 EOF
-chmod 600 "$home/.config/hive/contributor.review.env"
-named_hive_hash="$(sha256sum "$home/.config/hive/contributor.review.env")"
-named_hive_mode="$(stat -c '%a' "$home/.config/hive/contributor.review.env")"
-named_hive_uid="$(stat -c '%u' "$home/.config/hive/contributor.review.env")"
-named_hive_gid="$(stat -c '%g' "$home/.config/hive/contributor.review.env")"
-# The tests run with the review repository as cwd, so the repo-derived
-# registration name is 'review'.
+chmod 600 "$home/.config/hive/contributor.${repo_registration}.env"
+named_hive_hash="$(sha256sum "$home/.config/hive/contributor.${repo_registration}.env")"
+named_hive_mode="$(stat -c '%a' "$home/.config/hive/contributor.${repo_registration}.env")"
+named_hive_uid="$(stat -c '%u' "$home/.config/hive/contributor.${repo_registration}.env")"
+named_hive_gid="$(stat -c '%g' "$home/.config/hive/contributor.${repo_registration}.env")"
 run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test
-assert_file_contains "--volume ${home}/.config/hive/contributor.review.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
+assert_file_contains "--volume ${home}/.config/hive/contributor.${repo_registration}.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
 assert_file_not_exists "$home/.config/hive/contributor.env"
-assert_eq "$(sha256sum "$home/.config/hive/contributor.review.env")" "$named_hive_hash" "selected Hive registration content changed during launch construction"
-assert_eq "$(stat -c '%a' "$home/.config/hive/contributor.review.env")" "$named_hive_mode" "selected Hive registration mode changed during launch construction"
-assert_eq "$(stat -c '%u' "$home/.config/hive/contributor.review.env")" "$named_hive_uid" "selected Hive registration uid changed during launch construction"
-assert_eq "$(stat -c '%g' "$home/.config/hive/contributor.review.env")" "$named_hive_gid" "selected Hive registration gid changed during launch construction"
+assert_eq "$(sha256sum "$home/.config/hive/contributor.${repo_registration}.env")" "$named_hive_hash" "selected Hive registration content changed during launch construction"
+assert_eq "$(stat -c '%a' "$home/.config/hive/contributor.${repo_registration}.env")" "$named_hive_mode" "selected Hive registration mode changed during launch construction"
+assert_eq "$(stat -c '%u' "$home/.config/hive/contributor.${repo_registration}.env")" "$named_hive_uid" "selected Hive registration uid changed during launch construction"
+assert_eq "$(stat -c '%g' "$home/.config/hive/contributor.${repo_registration}.env")" "$named_hive_gid" "selected Hive registration gid changed during launch construction"
 # The named launch must not require, create, or mutate the default (#143).
 assert_file_not_contains "--volume ${home}/.config/hive:/home/dev/.config/hive" "$runner_log"
-assert_contains "hive: wss://named-hive.invalid/contribute (registration 'review')" "$OUT"
+assert_contains "hive: wss://named-hive.invalid/contribute (registration '${repo_registration}')" "$OUT"
 assert_not_contains "super-secret-registration-token" "$OUT"
 assert_not_contains "named-secret-token" "$OUT"
 assert_file_not_contains "named-secret-token" "$runner_log"
 reset_logs
 run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test REVIEW_CONTAINER_NAME=review-container-2
 assert_file_contains "--replace --name review-container-2 " "$runner_log"
-assert_file_contains "--volume ${home}/.config/hive/contributor.review.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
+assert_file_contains "--volume ${home}/.config/hive/contributor.${repo_registration}.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
 assert_file_not_exists "$home/.config/hive/contributor.env"
-assert_eq "$(sha256sum "$home/.config/hive/contributor.review.env")" "$named_hive_hash" "selected Hive registration content changed during concurrent launch construction"
-assert_eq "$(stat -c '%a' "$home/.config/hive/contributor.review.env")" "$named_hive_mode" "selected Hive registration mode changed during concurrent launch construction"
-assert_eq "$(stat -c '%u' "$home/.config/hive/contributor.review.env")" "$named_hive_uid" "selected Hive registration uid changed during concurrent launch construction"
-assert_eq "$(stat -c '%g' "$home/.config/hive/contributor.review.env")" "$named_hive_gid" "selected Hive registration gid changed during concurrent launch construction"
-rm -f "$home/.config/hive/contributor.review.env"
+assert_eq "$(sha256sum "$home/.config/hive/contributor.${repo_registration}.env")" "$named_hive_hash" "selected Hive registration content changed during concurrent launch construction"
+assert_eq "$(stat -c '%a' "$home/.config/hive/contributor.${repo_registration}.env")" "$named_hive_mode" "selected Hive registration mode changed during concurrent launch construction"
+assert_eq "$(stat -c '%u' "$home/.config/hive/contributor.${repo_registration}.env")" "$named_hive_uid" "selected Hive registration uid changed during concurrent launch construction"
+assert_eq "$(stat -c '%g' "$home/.config/hive/contributor.${repo_registration}.env")" "$named_hive_gid" "selected Hive registration gid changed during concurrent launch construction"
+rm -f "$home/.config/hive/contributor.${repo_registration}.env"
 cp "$default_hive_backup" "$home/.config/hive/contributor.env"
 
 begin "hive selection: no repo registration falls back to the default and says so"

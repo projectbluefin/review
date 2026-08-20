@@ -1,10 +1,12 @@
 """Goose review adapter for the shared harness contract."""
 
+import json
 import os
 import re
 import signal
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -35,7 +37,7 @@ class GooseHarness:
         binary_readiness=True, auth_preflight=True, invocation=True,
         exact_binding=True, model_effort=True, steering=True,
         streaming=True, cancellation=True, result_conversion=True,
-        provenance=True, body_drafting=False,
+        provenance=True, body_drafting=True,
     )
     process_group_cancellation = True
     _process: subprocess.Popen | None = field(default=None, init=False, repr=False)
@@ -184,5 +186,112 @@ class GooseHarness:
             else Availability.UNAVAILABLE_AUTH
         )
 
+    def validate_draft(self, request: DraftRequest) -> DraftResult:
+        return DraftResult(DraftState.COMPLETE, provenance={
+            "backend": self.name, "model": self.model, "effort": self.effort,
+            "repository": f"{request.binding.owner}/{request.binding.repository}",
+            "pull_request": request.binding.pull_request_number,
+            "base_sha": request.binding.base_sha, "head_sha": request.binding.head_sha,
+        })
+
+    def draft_prompt(self, request: DraftRequest) -> str:
+        self.validate_draft(request)
+        evidence = json.dumps(
+            {"result": request.evidence.to_dict(), "live": dict(request.live_facts)},
+            sort_keys=True, separators=(",", ":"),
+        )
+        return (
+            f"Draft one concise Markdown review body for verdict {request.verdict}. "
+            f"Use only this bounded evidence: {evidence} "
+            "Do not perform another code review. Do not discover or invent findings. "
+            "Do not mutate GitHub, submit a review, or change repository state. "
+            "Return only Markdown text, at most 4096 characters."
+        )
+
+    def draft_command(self, request: DraftRequest, prompt_path: str) -> list[str]:
+        self.validate_draft(request)
+        return [self.executable, "run", "--no-session", "-i", prompt_path]
+
+    def convert_draft(self, payload: str, request: DraftRequest,
+                      exit_code: int = 0) -> DraftResult:
+        self.validate_draft(request)
+        raw = tuple(self._bounded_draft_raw(payload)) if isinstance(payload, str) else ()
+        provenance = {
+            "backend": self.name, "model": self.model, "effort": self.effort,
+            "repository": f"{request.binding.owner}/{request.binding.repository}",
+            "pull_request": request.binding.pull_request_number,
+            "base_sha": request.binding.base_sha, "head_sha": request.binding.head_sha,
+        }
+        if (
+            exit_code != 0 or not isinstance(payload, str)
+            or not payload.strip() or len(payload) > 4096
+        ):
+            return DraftResult(
+                DraftState.FAILED,
+                provenance={key: provenance[key] for key in ("backend", "model", "effort")},
+                raw_evidence=raw,
+            )
+        return DraftResult(DraftState.COMPLETE, payload.strip(), provenance, raw)
+
+    def _bounded_draft_raw(self, payload: str) -> list[str]:
+        lines = []
+        chars = 0
+        for line in self._redact(payload).splitlines():
+            if len(lines) == 400 or chars + len(line) > 120_000:
+                break
+            lines.append(line)
+            chars += len(line)
+        return lines
+
     def draft(self, request: DraftRequest) -> DraftResult:
-        raise RuntimeError(f"{self.name} unavailable: UNSUPPORTED_CAPABILITY")
+        if self.availability is not Availability.READY:
+            raise RuntimeError(f"{self.name} unavailable: {self.availability.value}")
+        environment = dict(os.environ)
+        for key in ("GH_TOKEN", "GITHUB_TOKEN", "REVIEW_GH_TOKEN"):
+            environment.pop(key, None)
+        environment["GOOSE_MODEL"] = self.model
+        environment["GOOSE_THINKING_EFFORT"] = self.effort
+        prompt_path = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", prefix="bluefin-review-draft-",
+                suffix=".md", delete=False,
+            ) as prompt_file:
+                prompt_file.write(self.draft_prompt(request))
+                prompt_path = prompt_file.name
+            try:
+                process = subprocess.Popen(
+                    self.draft_command(request, prompt_path),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, env=environment, start_new_session=True,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                return self.convert_draft(str(exc), request, 1)
+            self._process = process
+            previous = {}
+
+            def stop(_signum, _frame):
+                self.cancel(process)
+
+            try:
+                previous = {
+                    signal.SIGTERM: signal.signal(signal.SIGTERM, stop),
+                    signal.SIGINT: signal.signal(signal.SIGINT, stop),
+                }
+                stdout, stderr = process.communicate()
+            except (OSError, subprocess.SubprocessError) as exc:
+                return self.convert_draft(str(exc), request, 1)
+            finally:
+                for signum, handler in previous.items():
+                    signal.signal(signum, handler)
+                self._process = None
+            payload = stdout
+            if process.returncode != 0 and stderr:
+                payload = f"{payload}\n{stderr}".strip()
+            return self.convert_draft(payload, request, process.returncode)
+        finally:
+            if prompt_path:
+                try:
+                    os.unlink(prompt_path)
+                except FileNotFoundError:
+                    pass
