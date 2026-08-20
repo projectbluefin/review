@@ -527,6 +527,16 @@ run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
 # relaunch must not wipe them (#281).
 assert_file_contains "--volume ${home}/.local/state/bluefin-review:/home/dev/.local/state/bluefin-review:rw,z" "$runner_log"
 assert_file_exists "${home}/.local/state/bluefin-review"
+# The instance name rides into the container so two named dashboards sharing
+# the state directory mint distinct batch ids.
+assert_file_contains "--env BLUEFIN_REVIEW_INSTANCE" "$runner_log"
+
+begin "review-queue: XDG_STATE_HOME relocates the dashboard state mount"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  XDG_STATE_HOME="$scratch/xdg"
+assert_file_contains "--volume ${scratch}/xdg/bluefin-review:/home/dev/.local/state/bluefin-review:rw,z" "$runner_log"
+assert_file_exists "${scratch}/xdg/bluefin-review"
 
 begin "review-queue: explicit Codex selection reaches the shipped dashboard"
 reset_logs
@@ -662,6 +672,9 @@ assert_file_contains "ghcr.io/projectbluefin/review" "$runner_log"
 assert_file_not_contains " -d " "$runner_log"
 assert_file_not_contains "--detach" "$runner_log"
 assert_file_not_contains "--env-file" "$runner_log"
+# The dashboard state mount belongs to review-queue alone; the contributor
+# worker's record flows through Hive, so no bluefin-review state persists.
+assert_file_not_contains "bluefin-review" "$runner_log"
 assert_file_not_contains ":/config" "$runner_log"
 assert_file_not_contains "/workspace" "$runner_log"
 assert_file_not_contains "qemu" "$runner_log"

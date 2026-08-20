@@ -1037,6 +1037,11 @@ review-queue *queue_args:
     QUEUE_STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-review"
     mkdir -p "$QUEUE_STATE_DIR"
     CONTAINER_ARGS+=(--volume "${QUEUE_STATE_DIR}:/home/dev/.local/state/bluefin-review:rw,z")
+    # The instance name qualifies each landing batch id: two named dashboards
+    # share the state directory, and a bare timestamp id would let their
+    # batches overwrite each other's prompt, status, and log.
+    export BLUEFIN_REVIEW_INSTANCE="$CONTAINER_NAME"
+    CONTAINER_ARGS+=(--env BLUEFIN_REVIEW_INSTANCE)
     if [[ "$REVIEW_BACKEND" != codex ]]; then
       [[ -n "$GOOSE_PROVIDER" ]] && CONTAINER_ARGS+=(--env "GOOSE_PROVIDER=${GOOSE_PROVIDER}")
       [[ -n "$GOOSE_MODEL" ]] && CONTAINER_ARGS+=(--env "GOOSE_MODEL=${GOOSE_MODEL}")

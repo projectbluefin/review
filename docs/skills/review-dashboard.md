@@ -1,7 +1,7 @@
 ---
 name: review-dashboard
-version: "1.5"
-last_updated: 2026-08-18
+version: "1.6"
+last_updated: 2026-08-20
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
 entry_point: docs/skills/review-dashboard.md
@@ -268,6 +268,18 @@ state, the agent log tail, and Hive stats. Never scrape agent prose for
 status. When a task finishes, `landing_finished` folds the report onto the
 rows: merged leaves the batch; blocked, failed, and awaiting-stable stays
 selected with the agent's reason — the same rule as every other failure.
+
+The record outlives the run: the launcher mounts the state directory from
+the host, and `restore_landing_marks` folds the newest persisted outcome
+(`landing.persisted_events`, oldest file first) back onto matching rows
+whenever the queue (re)builds them — a relaunch shows the failure marking
+again instead of reverting to un-reviewed (#281). Only the marking is
+restored; rebuilding a batch selection stays the maintainer's. Each task id
+carries the instance name (`BLUEFIN_REVIEW_INSTANCE`, set by the launcher
+from the container name) because named dashboards share the one state
+directory — a bare one-second stamp would let two of them overwrite each
+other's files, and the name makes the record attributable. Same-second
+batches from one dashboard get a numeric suffix.
 
 **Done is `:stable`, not the merge.** A GitHub merge only starts the
 publish pipeline; the batch item is landed when the image's `:stable` tag

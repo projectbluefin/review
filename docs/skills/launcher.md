@@ -1,7 +1,7 @@
 ---
 name: launcher
-version: "3.2"
-last_updated: 2026-08-19
+version: "3.3"
+last_updated: 2026-08-20
 id: launcher
 one_line_purpose: Change review just recipes without breaking the launch contract.
 entry_point: docs/skills/launcher.md
@@ -79,9 +79,13 @@ Goose, or image build skill documents.
    `${XDG_STATE_HOME:-~/.local/state}/bluefin-review` from the host at the
    container's XDG state path with `rw,z` (#281). One shared directory
    across instance names: the queue it records is the same whichever name
-   runs, and `:z` keeps it writable for concurrent named dashboards. The
-   dashboard writes it; the launcher creates the directory and mounts it,
-   nothing more.
+   runs, and `:z` keeps it writable for concurrent named dashboards. Sharing
+   it is safe because the recipe also passes the container name in as
+   `BLUEFIN_REVIEW_INSTANCE`, and the dashboard qualifies every batch id
+   with it — two dashboards' batches cannot overwrite each other's files.
+   The dashboard writes the directory; the launcher creates and mounts it,
+   nothing more. `review-container` mounts no state: the worker's record
+   flows through Hive.
    An explicitly set `BLUEFIN_REVIEW_BACKEND` is validated as `goose` or
    `codex` and forwarded only to this recipe. Unset preserves the dashboard's
    default; explicit Codex preselects the existing takeoff panel but never
