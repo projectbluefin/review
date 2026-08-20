@@ -1796,8 +1796,9 @@ class ReviewDashboard(App):
     #status-bar { height: 1; background: $panel; color: cyan; }
     #queue-pane { width: 45%; border: solid $secondary; }
     #right-pane { width: 55%; }
-    #details { height: 60%; border: solid $secondary; padding: 0 1; }
-    #context { height: 40%; border: solid $secondary; padding: 0 1; }
+    #details-pane { height: 60%; border: solid $secondary; padding: 0 1; }
+    #context-pane { height: 40%; border: solid $secondary; padding: 0 1; }
+    #details, #context { height: auto; }
     #confirm-box {
         border: heavy magenta; background: $surface;
         width: 80%; height: auto; padding: 1 2; margin: 4 4;
@@ -1874,8 +1875,16 @@ class ReviewDashboard(App):
             with Vertical(id="queue-pane"):
                 yield ListView(id="queue")
             with Vertical(id="right-pane"):
-                yield Static("", id="details")
-                yield Static("", id="context")
+                # The evidence panes are scroll containers, not bare
+                # Statics: a Static clips content it cannot fit and is not
+                # focusable, so evidence taller than the pane was simply
+                # unreachable, and h/l could never land on it. A
+                # ScrollableContainer takes focus, so pane movement reaches
+                # it and its own keys scroll it.
+                with ScrollableContainer(id="details-pane"):
+                    yield Static("", id="details")
+                with ScrollableContainer(id="context-pane"):
+                    yield Static("", id="context")
         yield Input(
             placeholder="[/] steer the review of the highlighted PR — "
             "enter runs it, esc returns to the queue",

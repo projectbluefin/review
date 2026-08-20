@@ -2990,10 +2990,45 @@ async def main() -> int:
         app.query_one("#queue", tui.ListView).focus()
         app.post_message(Key("l", "l"))
         await pilot.pause()
+        # The evidence panes are focusable scroll containers, so pane
+        # movement reaches them in DOM order before the steering box.
         check(
-            app.focused is app.query_one("#steer", tui.Input),
-            "lowercase l must move focus through Textual's screen API",
+            app.focused is app.query_one("#details-pane"),
+            f"lowercase l must reach the details pane, got {app.focused}",
         )
+        app.post_message(Key("l", "l"))
+        await pilot.pause()
+        check(
+            app.focused is app.query_one("#context-pane"),
+            f"a second l must reach the context pane, got {app.focused}",
+        )
+
+        # Evidence taller than the pane is reachable: the focused pane
+        # scrolls, and the queue selection does not move.
+        app.query_one("#details", tui.Static).update(
+            "\n".join(f"evidence line {n}" for n in range(200))
+        )
+        app.query_one("#details-pane").focus()
+        await pilot.pause()
+        await pilot.pause()
+        index_before = app.query_one("#queue", tui.ListView).index
+        await pilot.press("pagedown")
+        await pilot.pause()
+        check(
+            app.query_one("#details-pane").scroll_offset.y > 0,
+            "a focused evidence pane must scroll its content",
+        )
+        check(
+            app.query_one("#queue", tui.ListView).index == index_before,
+            "scrolling a pane must not move the queue selection",
+        )
+        await pilot.press("home")
+        await pilot.pause()
+        check(
+            app.query_one("#details-pane").scroll_offset.y == 0,
+            "home must return the pane to the top",
+        )
+        app.query_one("#queue", tui.ListView).focus()
         app.query_one("#queue", tui.ListView).focus()
         app.action_pane_next = lambda: (_ for _ in ()).throw(RuntimeError("injected pane failure"))
         app.post_message(Key("l", "l"))

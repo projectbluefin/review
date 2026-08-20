@@ -92,7 +92,10 @@ adapters. `ReviewStateView` owns the lifecycle states `READY`, `RUNNING`,
 
 Terminal-normalized Shift-L may arrive as lowercase key identity plus uppercase
 character. The dashboard dispatches that event to ordinary review and keeps
-lowercase `l` pane movement on the active `Screen` focus API. Review and
+lowercase `l` pane movement on the active `Screen` focus API. The two
+right-hand evidence panes are focusable `ScrollableContainer`s wrapping the
+`#details`/`#context` Statics, so `h`/`l` reach them and evidence taller
+than the pane scrolls instead of clipping. Review and
 comment editor shortcuts are priority bindings, with literal hints and buttons
 that call the same actions. Review submission remains exact-body preview then
 the typed-number gate; comments use the same preview-before-gate sequence.
