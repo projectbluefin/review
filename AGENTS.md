@@ -52,6 +52,13 @@ not skip, reorder, prioritize, or decline a Hive assignment mid-protocol. The
 one sanctioned filter is own-work exclusion on the maintainer-facing queue
 view — a reviewer never receives their own authored pull requests to review.
 
+The ghost lab is the maintainer's local lab. Nothing in this repository may
+require it, gate on it, or block a landing on it: a review decision that
+depends on the lab being reachable is wrong by construction. When a check
+backed by the lab cannot run, the deliverable it would have validated is
+verified from published registry evidence instead, and the absence of that
+evidence is reported as a finding, never as a blocked pull request.
+
 The work the appliance produces for other repositories is toil reduction for
 under-maintained projects, not feature work: agents repair what is broken and
 finish what a project already decided to do, and size every change to be

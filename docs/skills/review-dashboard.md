@@ -368,7 +368,25 @@ target and timeout. GitHub computes mergeability asynchronously, so a
 `mergeable: UNKNOWN` answer is a cache-warming placeholder: the brief has
 the agent re-query with backoff for up to a minute and act only on the
 computed state — `blocked` on UNKNOWN alone reports nothing a maintainer
-can act on (#294).
+can act on (#294). Publish detection also has a change-level edge: a
+publish workflow can be path-filtered, scheduled, or manual, so a merge
+that touches none of its triggers owes no publication — the brief has
+the agent prove the filter from the workflow YAML and the merge commit's
+file list and report the merge itself as the deliverable, never `failed`
+for a publication the repository never promised. Above all of these
+stands one policy: the ghost lab is the maintainer's local lab and is
+never part of a landing decision — no pull request may ever report
+`blocked` on a ghost-lab check; its absence or failure only moves the
+verification to ghcr evidence. The same holds for a required check that
+fails without
+testing the pull request: when the external service the check drives — a
+lab endpoint, a runner pool — is unreachable, that is infrastructure
+unavailability, not a defect, and never `blocked` on its own. The brief
+has the agent prove the distinction in the check's logs, verify the
+check's deliverable in ghcr instead (the head's `sha-<head>` image is the
+substitute evidence), and continue the normal path — approve and merge,
+or the `lgtm` label with the evidence named when branch protection
+refuses with the check still red. Merging around it stays forbidden.
 - **The completed card reuses those paths.** `L`, `a`, `m`, and `u` return to
   the queue's existing handlers, so permissions, live-head checks, exact
   commands, and typed-number confirmation remain the authority boundary.

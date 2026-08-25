@@ -153,6 +153,23 @@ For each pull request, in order:
    name the wait in your note) until GitHub commits to an answer, and only
    act on the computed state. Never report `blocked` on UNKNOWN alone —
    a maintainer can act on a computed state, not on a placeholder.
+   A required check can also fail without ever testing the pull request:
+   the external service the check drives — a lab endpoint, a runner pool —
+   is unreachable. That is infrastructure unavailability, not a defect in
+   the pull request, and it is never `blocked` on its own. The ghost lab
+   is the maintainer's local lab: it is never part of a landing decision,
+   and no pull request may ever block on a ghost-lab check — its absence
+   or failure only means its deliverable gets verified in ghcr instead.
+   Prove the
+   distinction in the check's logs (endpoint unreachable, not failing
+   tests), then verify the check's deliverable in ghcr instead: the pull
+   request head's built image published under its `sha-<head>` tag is the
+   substitute evidence, gathered through the anonymous flow in step 5.
+   Then continue the normal path — approve and squash-merge; when branch
+   protection refuses with the check still red, add the `lgtm` label, name
+   the unreachability and the ghcr evidence in your note, and move on.
+   What you may never do is merge around it: no `--admin`, no bypass, and
+   no reclassifying the check as unrequired.
 5. Done depends on whether this repository publishes an image, so check
    BEFORE merging — never discover it after. Treat the repository as
    publishing an image unless BOTH signals are absent: no workflow under
@@ -210,6 +227,15 @@ For each pull request, in order:
    evidence. If the publish fails — or no publication of the merge commit
    can be evidenced at all — that is the deliverable: report `failed`
    with the evidence.
+
+   One refinement before any of that: a publish workflow can be
+   conditional — path-filtered (`paths:` under its `push:` trigger),
+   scheduled, or manual. When the merge commit's diff touches none of the
+   workflow's triggers, no publication of it exists to evidence, and none
+   is owed: the merge is the deliverable. Prove the condition from the
+   workflow YAML and the merge commit's file list, then report `merged`
+   with a note naming the filter — never `failed` for a publication the
+   repository never promised.
 
    Every wait-state note names its target and timeout: `waiting-ci` names
    the run and when you give up, `merging` names the merge-queue wait and

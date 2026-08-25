@@ -103,6 +103,27 @@ done
 # org/user endpoint split, index children count as carrying a tag.
 grep -q 'ghcr.io/token' "$landing_py" ||
   fail "the landing brief must verify :stable through the anonymous ghcr token flow"
+# An unreachable external service behind a required check is infrastructure
+# unavailability, not a blocked pull request: the brief must have the agent
+# substitute the head's ghcr image as the check's evidence.
+grep -q 'infrastructure' "$landing_py" ||
+  fail "the landing brief must treat an unreachable check service as infrastructure unavailability"
+grep -q 'substitute evidence' "$landing_py" ||
+  fail "the landing brief must verify an unreachable check's deliverable in ghcr"
+# The ghost lab is the maintainer's local lab and never part of a landing
+# decision: the brief must forbid blocking on a ghost-lab check outright.
+grep -q "maintainer's local lab" "$landing_py" ||
+  fail "the landing brief must name the ghost lab as maintainer-local"
+grep -q 'may ever block on a ghost-lab check' "$landing_py" ||
+  fail "the landing brief must forbid blocking on ghost-lab"
+grep -q 'ghost lab' "$repo_root/AGENTS.md" ||
+  fail "AGENTS.md must codify that nothing gates on the ghost lab"
+# A path-filtered, scheduled, or manual publish workflow owes no publication
+# for a merge outside its triggers: the merge itself is the deliverable.
+grep -q 'path-filtered' "$landing_py" ||
+  fail "the landing brief must cover conditional publish workflows"
+grep -q 'no publication of it exists' "$landing_py" ||
+  fail "the landing brief must not fail a merge that owes no publication"
 
 # The gate is the typed pull request number: no y/yes, no timeout.
 grep -q 'class ConfirmMutation' "$tui" || fail "the ConfirmMutation gate must exist"
