@@ -75,6 +75,21 @@ def check(condition: bool, description: str) -> None:
         failures.append(description)
 
 
+async def settle_evidence(app, pilot) -> None:
+    """Drain the dashboard's mount-time evidence workers (#339).
+
+    Row highlight, the Hive probe, and harness discovery run as thread
+    workers whose UI callbacks rewrite a stop's live/overlap evidence — and
+    one of those callbacks (render_evidence/hive_loaded) spawns a follow-up
+    worker (render_context) whose own callback is the final rewrite. Drain
+    worker-and-callback rounds until nothing in flight can clobber fixture
+    evidence between its assignment and the start of the review.
+    """
+    for _ in range(3):
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+
 def write_stub(path: Path, body: str) -> str:
     path.write_text("#!/usr/bin/env bash\n" + body)
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
@@ -760,6 +775,7 @@ async def main() -> int:
                 if app.stops:
                     break
                 await pilot.pause(0.05)
+            await settle_evidence(app, pilot)
             app.stops[0].live = {
                 "baseRefOid": "fedcba9876543210fedcba9876543210fedcba98",
                 "headRefOid": head_sha,
@@ -3984,6 +4000,7 @@ async def main() -> int:
                 if app.stops:
                     break
                 await pilot.pause(0.05)
+            await settle_evidence(app, pilot)
             app.stops[0].live = {
                 "isDraft": False,
                 "baseRefOid": "fedcba9876543210fedcba9876543210fedcba98",

@@ -1,7 +1,7 @@
 ---
 name: review-dashboard
 version: "2.0"
-last_updated: 2026-08-20
+last_updated: 2026-08-25
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
 entry_point: docs/skills/review-dashboard.md
@@ -261,10 +261,14 @@ distinct states. `[o]` is only an optional browser escape hatch.
 - **Treat the Hive API as JSON, not a browser.** The read-only status probe
   reports missing hub configuration, missing credentials, network failure,
   authentication, authorization, edge/login redirects, malformed responses,
-  and server failure as separate concise states. The queue POST never follows
-  a redirect and succeeds only when a bounded JSON response explicitly says
-  `queued`; the typed pull-request-number gate remains the authority boundary.
-  Hosted queueing remains blocked by the ingress defect tracked in #258.
+  and server failure as separate concise states. A malformed response names
+  its own shape — status, content type, byte count, and a bounded redacted
+  body excerpt in the failure state and the trace — so an intercepted SPA
+  page reads differently from invalid JSON or a JSON array. The queue POST
+  never follows a redirect and succeeds only when a bounded JSON response
+  explicitly says `queued`; the typed pull-request-number gate remains the
+  authority boundary. Hosted queueing remains blocked by the ingress defect
+  tracked in #258.
 
 ## Batch landing
 
@@ -394,7 +398,10 @@ refuses with the check still red. Merging around it stays forbidden.
   exact severity counts, cited file/line findings, engine and live-CI
   verification, duplicate/overlap context, mergeability, head, and
   backend/model provenance. Incomplete, failed, and unparsable results direct
-  the reviewer to raw evidence and never display a clean conclusion.
+  the reviewer to raw evidence and never display a clean conclusion. The card
+  is a point-in-time record: `ReviewScreen` pins the live and overlap
+  evidence at review start, because the queue's background workers keep
+  rewriting `stop.live`/`stop.overlap` while the review runs (#339).
 - **Never bypass branch protection.** No `--admin`, no `--delete-branch`, no
   push.
 

@@ -13,6 +13,7 @@ This is the only maintainer surface. Runs inside the review image:
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -843,7 +844,7 @@ class LandingScreen(Screen):
                 )
         rows.update("\n".join(lines))
         self.query_one("#landing-hive", Static).update(
-            f" Hive: {self.dashboard.hive_state or 'asking…'}"
+            f" Hive: {escape(self.dashboard.hive_state or 'asking…')}"
         )
         task = self.dashboard.landing_queue[-1]
         try:
@@ -1447,6 +1448,13 @@ class ReviewScreen(Screen):
         self.stop_requested = False
         self.started = time.monotonic()
         self.output: list[str] = []
+        # The card is a point-in-time record of the evidence the maintainer
+        # saw when the review started. The dashboard's background workers
+        # keep rewriting stop.live/stop.overlap while the review runs, so
+        # reading them at finish would mix a fresh fetch into a completed
+        # transcript (#339).
+        self.live_snapshot = copy.deepcopy(stop.live)
+        self.overlap_snapshot = copy.deepcopy(stop.overlap)
 
     def compose(self) -> ComposeResult:
         stop = self.stop_record
@@ -1473,8 +1481,8 @@ class ReviewScreen(Screen):
     def run_review(self) -> None:
         stop = self.stop_record
         if ACTIVE_BACKEND == "codex":
-            base_sha = str(stop.live.get("baseRefOid") or "")
-            head_sha = str(stop.live.get("headRefOid") or "")
+            base_sha = str(self.live_snapshot.get("baseRefOid") or "")
+            head_sha = str(self.live_snapshot.get("headRefOid") or "")
             if (len(base_sha) != 40 or len(head_sha) != 40 or
                     any(char not in "0123456789abcdef" for char in (base_sha + head_sha).lower())):
                 self.app.call_from_thread(
@@ -1560,10 +1568,10 @@ class ReviewScreen(Screen):
         self.finished = True
         stop = self.stop_record
         elapsed = int(time.monotonic() - self.started)
-        live_context = live_review_context(stop.live, title=stop.title)
+        live_context = live_review_context(self.live_snapshot, title=stop.title)
         if ACTIVE_BACKEND == "codex":
-            base_sha = str(stop.live.get("baseRefOid") or "")
-            head_sha = str(stop.live.get("headRefOid") or "")
+            base_sha = str(self.live_snapshot.get("baseRefOid") or "")
+            head_sha = str(self.live_snapshot.get("headRefOid") or "")
             if len(base_sha) != 40 or len(head_sha) != 40:
                 result = ReviewResult(1, "failed", provenance={"backend": "codex"})
             else:
@@ -1578,8 +1586,8 @@ class ReviewScreen(Screen):
                 )
                 result = ReviewResult(
                     result.version, result.state, result.counts, result.findings,
-                    live_review_verification(stop.live), result.provenance,
-                    stop.overlap, live_context, result.raw_evidence,
+                    live_review_verification(self.live_snapshot), result.provenance,
+                    self.overlap_snapshot, live_context, result.raw_evidence,
                 )
         else:
             result = adapt_current_engine(
@@ -1587,14 +1595,14 @@ class ReviewScreen(Screen):
                 {"backend": os.environ.get("GOOSE_PROVIDER", "goose"),
                  "model": os.environ.get("GOOSE_MODEL", "gpt-5.6-luna"),
                  "repository": stop.repository, "pull_request": stop.number},
-                verification=live_review_verification(stop.live),
-                overlap=stop.overlap,
+                verification=live_review_verification(self.live_snapshot),
+                overlap=self.overlap_snapshot,
                 live=live_context,
             )
-        if ACTIVE_BACKEND == "codex" and len(str(stop.live.get("baseRefOid") or "")) == 40 and len(str(stop.live.get("headRefOid") or "")) == 40:
+        if ACTIVE_BACKEND == "codex" and len(str(self.live_snapshot.get("baseRefOid") or "")) == 40 and len(str(self.live_snapshot.get("headRefOid") or "")) == 40:
             request = ReviewRequest(
                 *stop.repository.split("/", 1), stop.number,
-                stop.live["baseRefOid"], stop.live["headRefOid"],
+                self.live_snapshot["baseRefOid"], self.live_snapshot["headRefOid"],
                 actor="maintainer", tenant="review", generated_at="dashboard",
             )
             if can_remember(result, request):
@@ -1604,7 +1612,7 @@ class ReviewScreen(Screen):
                                result.provenance.get("reasoning_effort", "low")),
                 )
         card = build_decision_card(
-            result, exact_head=str(stop.live.get("headRefOid") or "")
+            result, exact_head=str(self.live_snapshot.get("headRefOid") or "")
         )
         if error:
             outcome, state = "error", f"FAILED to start: {error}"
@@ -2305,7 +2313,7 @@ class ReviewDashboard(App):
             f" Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
             f"| {('source ' + self.source_state + (' — ' + self.source_message if self.source_message else ''))} "
             f"| {('snapshot ' + freshness) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
-            f"| batch: {selected}{stuck}{agents}{landed} | Hive: {self.hive_state or 'asking…'}"
+            f"| batch: {selected}{stuck}{agents}{landed} | Hive: {escape(self.hive_state or 'asking…')}"
         )
 
     def action_filter(self) -> None:
@@ -2657,6 +2665,21 @@ class ReviewDashboard(App):
                     self.mutation_failed, stop, command, str(error), on_error
                 )
                 return
+            if result.returncode != 0:
+                message = result.stderr.strip() or f"exit {result.returncode}"
+                trace(
+                    {
+                        "repo": stop.repository,
+                        "number": stop.number,
+                        "argv": command,
+                        "exit": result.returncode,
+                        "error": bounded_detail(message),
+                    }
+                )
+                self.call_from_thread(
+                    self.mutation_failed, stop, command, message, on_error
+                )
+                return
             trace(
                 {
                     "repo": stop.repository,
@@ -2665,12 +2688,6 @@ class ReviewDashboard(App):
                     "exit": result.returncode,
                 }
             )
-            if result.returncode != 0:
-                message = result.stderr.strip() or f"exit {result.returncode}"
-                self.call_from_thread(
-                    self.mutation_failed, stop, command, message, on_error
-                )
-                return
         self.call_from_thread(self.mutations_finished, stop, commands, then)
 
     def mutation_failed(
@@ -2685,7 +2702,7 @@ class ReviewDashboard(App):
         stop.failure_branch = f"{context['mergeable']}/{context['merge_state']}"
         stop.selected = True
         self.refresh_rows()
-        self.notify(f"{shlex.join(command[:4])}…: {message[:200]}", severity="error")
+        self.notify(f"{shlex.join(command[:4])}…: {escape(message[:200])}", severity="error")
         self.show_evidence(stop)
         # A failure that only prints is a failure the maintainer has to
         # remember. Hand it to whoever asked, so they can offer a way out.

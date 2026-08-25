@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 
 MAX_DETAIL = 240
+MAX_SNIPPET = 120
 MAX_BODY = 16_384
 
 
@@ -37,9 +38,9 @@ class Result:
         }
 
 
-def _bounded(value: object) -> str:
+def _bounded(value: object, limit: int = MAX_DETAIL) -> str:
     text = re.sub(r"[\x00-\x1f\x7f]+", " ", str(value))
-    return " ".join(text.split())[:MAX_DETAIL]
+    return " ".join(text.split())[:limit]
 
 
 def _failure(category: str, message: str, detail: object = "") -> Result:
@@ -58,6 +59,30 @@ def _http_failure(code: int, body: bytes, token: str) -> Result:
     if code >= 500:
         return _failure("server", f"Hive server error ({code})", detail)
     return _failure("http", f"API request rejected ({code})", detail)
+
+
+def _malformed(code: int, content_type: str, body: bytes, token: str, reason: str) -> Result:
+    """A 2xx that is not a JSON object names its own shape (#337).
+
+    `malformed API response` alone cannot distinguish an intercepted SPA page
+    from invalid JSON, so the failure carries the status, content type, byte
+    count, and a bounded redacted body excerpt.
+    """
+    excerpt = _bounded(
+        body[:MAX_BODY].decode("utf-8", "replace").replace(token, "[redacted]"),
+        MAX_SNIPPET,
+    )
+    shape = f"{code} {content_type}"
+    if len(body) > MAX_BODY:
+        shape = f"{shape}, over {MAX_BODY} bytes"
+    if reason:
+        shape = f"{shape}, {reason}"
+    detail = f"status={code} content-type={content_type} bytes={len(body)}"
+    message = f"malformed API response: {shape}"
+    if excerpt:
+        detail = f"{detail} body={excerpt!r}"
+        message = f"{message} '{excerpt}'"
+    return _failure("malformed", message, detail)
 
 
 def request(
@@ -99,13 +124,13 @@ def request(
     if not 200 <= code < 300:
         return _http_failure(code, body, token)
     if len(body) > MAX_BODY or content_type != "application/json":
-        return _failure("malformed", "malformed API response")
+        return _malformed(code, content_type, body, token, "")
     try:
         data = json.loads(body)
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return _failure("malformed", "malformed API response")
+        return _malformed(code, content_type, body, token, "invalid JSON")
     if not isinstance(data, dict):
-        return _failure("malformed", "malformed API response")
+        return _malformed(code, content_type, body, token, "not a JSON object")
     return Result(True, "ok", "online", data)
 
 
