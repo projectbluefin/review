@@ -467,7 +467,8 @@ RUN set -eu; \
 # index.json; Goose only discovers directories containing SKILL.md, under fixed
 # roots. Generating at build time means every session sees the whole inventory
 # (name + description only, ~2k tokens) with bodies loaded on demand, and no
-# org repository has to change.
+# org repository has to change. lab-testing is excluded: this appliance owns
+# no lab and depends on none (AGENTS.md).
 ARG SKILLS_COMMIT
 ARG SKILLS_REFRESH=0
 COPY --chmod=0755 scripts/generate-skills.py /usr/local/libexec/review-generate-skills
@@ -476,6 +477,7 @@ RUN set -eu; \
     /usr/local/libexec/review-generate-skills \
       --index "https://raw.githubusercontent.com/projectbluefin/common/${SKILLS_COMMIT}/docs/skills/index.json" \
       --raw-base "https://raw.githubusercontent.com/projectbluefin/common/${SKILLS_COMMIT}/" \
+      --exclude lab-testing \
       --out /home/dev/.agents/skills; \
     chown -R 1000:1000 /home/dev/.agents; \
     rm -f /usr/local/libexec/review-generate-skills; \

@@ -177,6 +177,7 @@ require image/Containerfile \
   'infocmp -x tmux-direct | grep -q' \
   'https://raw.githubusercontent.com/projectbluefin/common/${SKILLS_COMMIT}/docs/skills/index.json' \
   '--raw-base "https://raw.githubusercontent.com/projectbluefin/common/${SKILLS_COMMIT}/"' \
+  '--exclude lab-testing' \
   '--out /home/dev/.agents/skills' \
   'COPY --chmod=0755 scripts/generate-skills.py /usr/local/libexec/review-generate-skills' \
   'rm -f /usr/local/libexec/review-generate-skills;' \
@@ -261,6 +262,12 @@ fi
 # thing. Guard the reimplementation, allow the codec.
 # shellcheck disable=SC2016
 forbid image/Containerfile 'python3 -c'
+
+# This appliance owns no lab (AGENTS.md): the lab skills bundle and its pin
+# must never return.
+forbid image/Containerfile \
+  'LAB_SKILLS_COMMIT' \
+  'projectbluefin/lab/'
 for extractor in image/bin/extract-archive image/bin/find image/bin/cmp; do
   if [[ -e "$extractor" ]]; then
     echo "::error file=${extractor}::use the base's tar/find/cmp, not a hand-rolled reimplementation"
