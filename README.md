@@ -705,7 +705,13 @@ description, project URL/source, revision, version, creation time, license,
 and exact FSDK base name/digest metadata in both platform labels and manifest
 annotations. Publishing attaches a signed SLSA provenance bundle and a signed
 SPDX SBOM to the published index digest, verifiable with `gh attestation
-verify`. CI verifies the FSDK input's GitHub attestation and its
+verify`. The SBOM covers the archive-installed components — Goose, the GitHub
+CLI, tmux, Codex, ripgrep, the pinned Hive runtime files, the skill bundles,
+and the review git hooks — because the image carries a build-time SPDX
+manifest of them (`/opt/bluefin/sbom/review-components.spdx.json`, generated
+from the resolved Containerfile pins) that the publish scan ingests; the
+post-publish audit fails when any of them is missing from either platform's
+attested SBOM. CI verifies the FSDK input's GitHub attestation and its
 linux/amd64+linux/arm64 manifest before a build; after publication it verifies
 both review attestations, labels, annotations, subject digest, and exactly
 those two platforms.

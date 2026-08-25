@@ -207,6 +207,7 @@ jobs:
             --build-arg GOOSE_REFRESH="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --build-arg GOOSE_X86_64_SHA256="$GOOSE_X86_64_SHA256" \
             --build-arg GOOSE_AARCH64_SHA256="$GOOSE_AARCH64_SHA256" \
+            --build-arg REVIEW_REVISION="${GITHUB_SHA}" \
             --secret id=github_token,src="$secret_file" \
             --label "org.opencontainers.image.title=Bluefin review contributor" \
             --label "org.opencontainers.image.description=Foreground contributor runtime for projectbluefin/review." \
@@ -311,6 +312,12 @@ jobs:
       # platform's inventory and attach it to an artifact claiming both.
       - name: Generate the SPDX SBOM for this architecture
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        env:
+          # Off by default: ingest the image's own SPDX manifest of
+          # archive-installed components (#78), baked in at build time from
+          # the resolved pins. Without this cataloger the SBOM describes only
+          # what package-manager metadata exposes.
+          SYFT_SELECT_CATALOGERS: "+sbom-cataloger"
         with:
           image: ${{ steps.push.outputs.image }}@${{ steps.push.outputs.digest }}
           registry-username: ${{ github.actor }}

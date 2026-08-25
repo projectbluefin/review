@@ -181,6 +181,11 @@ require image/Containerfile \
   'COPY --chmod=0755 scripts/generate-skills.py /usr/local/libexec/review-generate-skills' \
   'rm -f /usr/local/libexec/review-generate-skills;' \
   'test ! -e /usr/local/libexec/review-generate-skills' \
+  'ARG REVIEW_REVISION=unknown' \
+  'COPY --chmod=0755 scripts/generate-sbom-manifest.py /usr/local/libexec/review-sbom-manifest' \
+  'rm -f /usr/local/libexec/review-sbom-manifest;' \
+  'test ! -e /usr/local/libexec/review-sbom-manifest' \
+  '--out /opt/bluefin/sbom/review-components.spdx.json' \
   'COPY --chmod=0755 image/entrypoint.sh /usr/local/bin/review-entrypoint' \
   '/home/dev/Downloads' \
   'USER dev' \
@@ -305,7 +310,9 @@ fi
 
 require .dockerignore \
   '!package.json' \
-  '!package-lock.json'
+  '!package-lock.json' \
+  '!scripts/generate-skills.py' \
+  '!scripts/generate-sbom-manifest.py'
 
 require tests/image-audit.sh \
   '#### Size deltas' \
@@ -316,7 +323,11 @@ require tests/image-audit.sh \
   'must contain exactly linux/amd64 and linux/arm64 manifests' \
   '--require-github-attestation' \
   'org.opencontainers.image.base.digest' \
-  'native arm64 runtime measurement is tracked by #77'
+  'native arm64 runtime measurement is tracked by #77' \
+  'required_sbom_components' \
+  'check_sbom_components' \
+  'fetch_spdx_predicate' \
+  '/opt/bluefin/sbom/review-components.spdx.json'
 
 forbid tests/image-audit.sh \
   'native arm64 runtime measurement is #87' \

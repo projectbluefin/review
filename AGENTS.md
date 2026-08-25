@@ -151,6 +151,7 @@ boundaries.
 ```bash
 bash scripts/check-skill-frontmatter.sh
 bash tests/generate-skills.sh
+bash tests/sbom-manifest.sh
 bash tests/image-contract.sh
 bash tests/hive-compatibility.sh
 bash tests/bluefin-review.sh

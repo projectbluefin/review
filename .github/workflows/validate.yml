@@ -60,6 +60,11 @@ jobs:
           set -euo pipefail
           bash tests/generate-skills.sh
 
+      - name: SBOM manifest generator contract
+        run: |
+          set -euo pipefail
+          bash tests/sbom-manifest.sh
+
       - name: Harness registry and adapter contracts
         run: |
           set -euo pipefail

@@ -508,6 +508,46 @@ RUN set -eu; \
     test ! -e /home/dev/.agents/skills/lab-_template; \
     chown -R 1000:1000 /home/dev/.agents
 
+# Supply-chain manifest (#78). The published SBOM is syft's inventory of the
+# image, and syft only sees package-manager metadata: every component above
+# that was installed from a release archive or fetched source file -- Goose,
+# gh, tmux, Codex, ripgrep, the Hive runtime files, the skill bundles, and
+# the git hooks -- was absent from the attached SPDX document. Record those
+# components as a standalone SPDX document inside the image, generated here
+# where every pin is a resolved build argument (CI resolves the Goose asset
+# digests immediately before building). The publish workflow's syft run
+# ingests this document through its sbom-cataloger (SYFT_SELECT_CATALOGERS),
+# and tests/image-audit.sh --require-attestations fails publication when any
+# of them is missing from the attached SPDX evidence.
+ARG REVIEW_REVISION=unknown
+COPY --chmod=0755 scripts/generate-sbom-manifest.py /usr/local/libexec/review-sbom-manifest
+RUN set -eu; \
+    /usr/local/libexec/review-sbom-manifest \
+      --arch "$(uname -m)" \
+      --revision "$REVIEW_REVISION" \
+      --goose-channel "$GOOSE_CHANNEL" \
+      --goose-sha256-x86-64 "$GOOSE_X86_64_SHA256" \
+      --goose-sha256-aarch64 "$GOOSE_AARCH64_SHA256" \
+      --gh-version "$GH_VERSION" \
+      --tmux-version "$TMUX_VERSION" \
+      --codex-version "$CODEX_VERSION" \
+      --codex-sha256-x86-64 "$CODEX_X86_64_SHA256" \
+      --codex-sha256-aarch64 "$CODEX_AARCH64_SHA256" \
+      --codex-code-mode-host-sha256-x86-64 "$CODEX_CODE_MODE_HOST_X86_64_SHA256" \
+      --codex-code-mode-host-sha256-aarch64 "$CODEX_CODE_MODE_HOST_AARCH64_SHA256" \
+      --ripgrep-version "$RIPGREP_VERSION" \
+      --ripgrep-sha256-x86-64 "$RIPGREP_X86_64_SHA256" \
+      --ripgrep-sha256-aarch64 "$RIPGREP_AARCH64_SHA256" \
+      --hive-commit "$HIVE_COMMIT" \
+      --skills-commit "$SKILLS_COMMIT" \
+      --lab-skills-commit "$LAB_SKILLS_COMMIT" \
+      --out /opt/bluefin/sbom/review-components.spdx.json; \
+    rm -f /usr/local/libexec/review-sbom-manifest; \
+    test ! -e /usr/local/libexec/review-sbom-manifest; \
+    python3 -m json.tool /opt/bluefin/sbom/review-components.spdx.json >/dev/null; \
+    chmod 0755 /opt/bluefin/sbom; \
+    chmod 0644 /opt/bluefin/sbom/review-components.spdx.json
+
 COPY --chmod=0755 image/entrypoint.sh /usr/local/bin/review-entrypoint
 COPY image/tmux.conf /etc/tmux.conf
 
