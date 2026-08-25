@@ -156,10 +156,9 @@ For each pull request, in order:
    A required check can also fail without ever testing the pull request:
    the external service the check drives — a lab endpoint, a runner pool —
    is unreachable. That is infrastructure unavailability, not a defect in
-   the pull request, and it is never `blocked` on its own. The ghost lab
-   is the maintainer's local lab: it is never part of a landing decision,
-   and no pull request may ever block on a ghost-lab check — its absence
-   or failure only means its deliverable gets verified in ghcr instead.
+   the pull request, and it is never `blocked` on its own: this appliance
+   owns no lab and depends on none, so a check whose service is missing
+   only means its deliverable gets verified in ghcr instead.
    Prove the
    distinction in the check's logs (endpoint unreachable, not failing
    tests), then verify the check's deliverable in ghcr instead: the pull

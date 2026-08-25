@@ -235,7 +235,7 @@ goose_label_digest() {
 # publisher knows; without --expected-revision it is a presence check only.
 required_sbom_components() {
   local arch="$1" goose_sha256="$2" suffix
-  local hive_commit skills_commit lab_skills_commit codex_version
+  local hive_commit skills_commit codex_version
   case "$arch" in
   amd64) suffix=X86_64 ;;
   arm64) suffix=AARCH64 ;;
@@ -246,7 +246,6 @@ required_sbom_components() {
   esac
   hive_commit="$(containerfile_arg HIVE_COMMIT)"
   skills_commit="$(containerfile_arg SKILLS_COMMIT)"
-  lab_skills_commit="$(containerfile_arg LAB_SKILLS_COMMIT)"
   codex_version="$(containerfile_arg CODEX_VERSION)"
   printf 'goose\t%s\t%s\n' "$(containerfile_arg GOOSE_CHANNEL)" "$goose_sha256"
   printf 'gh\t%s\t\n' "$(containerfile_arg GH_VERSION)"
@@ -258,7 +257,6 @@ required_sbom_components() {
   printf 'contributor-relay.sh\t%s\t\n' "$hive_commit"
   printf 'backends.conf\t%s\t\n' "$hive_commit"
   printf 'bluefin-organization-skills\t%s\t\n' "$skills_commit"
-  printf 'bluefin-lab-skills\t%s\t\n' "$lab_skills_commit"
   printf 'review-git-hooks\t%s\t\n' "$expected_revision"
 }
 

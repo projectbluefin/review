@@ -34,11 +34,6 @@ image such as busybox, a `curl` of a prebuilt binary, and a new intermediate
 `review-base` image. Adding the component upstream and bumping the digest is
 the whole fix; reach for nothing else.
 
-Builds run on the ghost cluster's BuildBarn remote-execution grid per
-`fsdk-containers`' `docs/skills/remote-execution.md`. `BST_LOCAL=1` is a
-degraded-mode opt-out that must be announced when used and is not acceptable
-as a permanent workaround.
-
 ## A Base Gap Is Filed, Not Described
 
 When the base turns out to be missing something, **open an issue on
@@ -281,13 +276,10 @@ the full 40-character commit; the launcher rejects a branch name.
 
 Hive is a **protocol** dependency, not a library. The image consumes exactly
 three upstream files — `bin/contributor-agent.sh`, `bin/contributor-relay.sh`,
-and `config/backends.conf`. A bump is only safe to automerge when those three
-are unchanged between the old and new SHA; otherwise read the diff and update
+and `config/backends.conf`. The pin automerges like every other dependency:
+when a bump touches one of the three consumed files, read the diff and update
 [`hive-runtime.md`](hive-runtime.md) and [`hive-triage.md`](hive-triage.md) in
-the same change. That condition is machine-checked by
-`.github/workflows/hive-pin-gate.yml`, which derives the consumed-file list from
-`image/Containerfile` rather than a hand-maintained list; keep the two in step
-when the image starts or stops consuming an upstream file.
+a follow-up change. Never gate the bump on that review.
 
 Never add a downstream workaround for an upstream protocol gap. Moving the pin
 is the fix; a local retry, poll, timeout, or shim becomes a permanent

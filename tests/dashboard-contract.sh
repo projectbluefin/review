@@ -103,21 +103,19 @@ done
 # org/user endpoint split, index children count as carrying a tag.
 grep -q 'ghcr.io/token' "$landing_py" ||
   fail "the landing brief must verify :stable through the anonymous ghcr token flow"
-# An unreachable external service behind a required check is infrastructure
-# unavailability, not a blocked pull request: the brief must have the agent
-# substitute the head's ghcr image as the check's evidence.
+# This appliance owns no lab: the brief must treat an unreachable external
+# check service as infrastructure unavailability and substitute ghcr
+# evidence — never a blocked pull request.
 grep -q 'infrastructure' "$landing_py" ||
   fail "the landing brief must treat an unreachable check service as infrastructure unavailability"
 grep -q 'substitute evidence' "$landing_py" ||
   fail "the landing brief must verify an unreachable check's deliverable in ghcr"
-# The ghost lab is the maintainer's local lab and never part of a landing
-# decision: the brief must forbid blocking on a ghost-lab check outright.
-grep -q "maintainer's local lab" "$landing_py" ||
-  fail "the landing brief must name the ghost lab as maintainer-local"
-grep -q 'may ever block on a ghost-lab check' "$landing_py" ||
-  fail "the landing brief must forbid blocking on ghost-lab"
-grep -q 'ghost lab' "$repo_root/AGENTS.md" ||
-  fail "AGENTS.md must codify that nothing gates on the ghost lab"
+grep -q 'owns no lab and depends on none' "$landing_py" ||
+  fail "the landing brief must state the appliance depends on no lab"
+grep -q 'owns no lab' "$repo_root/AGENTS.md" ||
+  fail "AGENTS.md must codify that nothing gates on maintainer-local infrastructure"
+grep -qiE 'ghost' "$landing_py" &&
+  fail "the landing brief must not carry ghost-lab special cases"
 # A path-filtered, scheduled, or manual publish workflow owes no publication
 # for a merge outside its triggers: the merge itself is the deliverable.
 grep -q 'path-filtered' "$landing_py" ||
@@ -172,8 +170,8 @@ grep -q 'isDraft' "$tui" || fail "merge must refuse drafts from live evidence"
 grep -q 'pulls_cache.pop' "$tui" || fail "mutations must invalidate the pull cache"
 
 # Tracked gaps are named as issues, not silent stubs.
-grep -q 'GHOST_BUILD_ISSUE = "projectbluefin/review#' "$tui" ||
-  fail "the ghost-build stub must name its tracking issue"
+grep -q 'GHOST_BUILD_ISSUE' "$tui" &&
+  fail "ghost build dispatch must not exist — this appliance owns no lab"
 grep -q 'DOCS_UPDATE_ISSUE = "projectbluefin/review#' "$tui" ||
   fail "the docs-update stub must name its tracking issue"
 

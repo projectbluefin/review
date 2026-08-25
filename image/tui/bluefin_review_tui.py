@@ -113,7 +113,6 @@ COMMANDS = (
     CommandSpec("leave_review", "L", "leave_review", "leave a review"),
     CommandSpec("batch", "b", "batch", "batch select"),
     CommandSpec("docs", "d", "docs", "update docs"),
-    CommandSpec("ghost_build", "", "ghost_build", "ghost build", mutating=True),
     CommandSpec("open_browser", "o", "open_browser", "open"),
     CommandSpec("view_diff", "v", "view_diff", "diff"),
     CommandSpec("comment", "c", "comment", "comment", mutating=True),
@@ -240,9 +239,8 @@ REVIEW_INCOMPLETE = 65
 # How long a stopped review has to die politely before it is killed.
 STOP_GRACE_SECONDS = 5.0
 
-# Ghost Cluster build dispatch and the docs-update agent task are tracked
-# work, not silent stubs; the handlers below name the issue.
-GHOST_BUILD_ISSUE = "projectbluefin/review#133"
+# The docs-update agent task is tracked work, not a silent stub; the
+# handler below names the issue.
 DOCS_UPDATE_ISSUE = "projectbluefin/review#134"
 
 
@@ -2965,9 +2963,6 @@ class ReviewDashboard(App):
 
     def action_docs(self) -> None:
         self.notify(f"docs-update agent task is tracked as {DOCS_UPDATE_ISSUE}")
-
-    def action_ghost_build(self) -> None:
-        self.notify(f"Ghost Cluster build dispatch is tracked as {GHOST_BUILD_ISSUE}")
 
     def action_open_browser(self) -> None:
         stop = self.current

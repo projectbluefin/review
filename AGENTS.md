@@ -52,12 +52,20 @@ not skip, reorder, prioritize, or decline a Hive assignment mid-protocol. The
 one sanctioned filter is own-work exclusion on the maintainer-facing queue
 view — a reviewer never receives their own authored pull requests to review.
 
-The ghost lab is the maintainer's local lab. Nothing in this repository may
-require it, gate on it, or block a landing on it: a review decision that
-depends on the lab being reachable is wrong by construction. When a check
-backed by the lab cannot run, the deliverable it would have validated is
-verified from published registry evidence instead, and the absence of that
-evidence is reported as a finding, never as a blocked pull request.
+This appliance owns no lab and depends on none. Nothing in this repository
+may require, integrate with, or gate on maintainer-local infrastructure: a
+review decision that needs someone's private endpoint to be reachable is
+wrong by construction. When a check backed by such a service cannot run,
+the deliverable it would have validated is verified from published registry
+evidence instead, and the absence of that evidence is reported as a
+finding, never as a blocked pull request.
+
+Latest upstream, everywhere. Every dependency — base image, runtimes,
+tools, protocols — tracks the newest upstream version, and Renovate moves
+every pin automatically. A pin is a checkpoint the automation advances,
+never a human gate: no dependency bump may wait on manual review, an audit
+checklist, or a conditional workflow. If a bump breaks something, the fix
+is forward — a follow-up change — not a brake on the update stream.
 
 The work the appliance produces for other repositories is toil reduction for
 under-maintained projects, not feature work: agents repair what is broken and

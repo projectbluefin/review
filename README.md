@@ -51,8 +51,8 @@ silently create a second workflow, authority path, or task queue.
 2. **Interactive maintainer dashboard** (`review-queue`): the review surface.
    Goose or an explicitly selected Codex harness reviews a pull request in
    place and streams its verdict, alongside
-   high-velocity triage with batching, agent-assisted
-   documentation updates (#134), and Ghost Cluster build dispatch (#133).
+   high-velocity triage with batching, and agent-assisted
+   documentation updates (#134).
 
 The watcher feedback loop — comparing automated pre-reviews with maintainer
 decisions and feeding the lessons back into `projectbluefin/common` — is
@@ -269,7 +269,6 @@ regression `tests/dashboard_pilot.py` drives the real app to prove.
 | `r` | **start a review with Goose** — streams live, reports COMPLETE / INCOMPLETE / FAILED |
 | `L` | leave a review on GitHub: approve, request changes, or comment (also from the review screen) |
 | `d` | docs-update agent task (tracked as #134) |
-| `g` | Ghost Cluster build dispatch (tracked as #133) |
 | `o` | optional browser escape hatch |
 | `v` | view the complete diff — full screen, coloured, paginated, with loading/error state |
 | `c` | comment |
@@ -668,12 +667,11 @@ Use an immutable `sha-<commit>` tag or digest with
 ## Image and context
 
 The image derives from the digest-pinned Project Bluefin FSDK lab runner and
-layers the pinned Hive runtime at `5db84c3b2cb7ce48635bba702115a34838690e03`,
+layers the pinned Hive runtime at `8ac1994a4994ec3454f83c2ed5a989abd430e1af`,
 the current Goose canary snapshot, the pinned official Codex CLI, GitHub CLI,
 tmux, uv with the Textual
-dashboard runtime, hooks, generated
-organization skills, and the pinned `projectbluefin/lab` skills (projected as
-`lab-<id>` so the Ghost Cluster operating knowledge rides along). Goose
+dashboard runtime, hooks, and generated
+organization skills. Goose
 publishes that snapshot from its active `main`
 branch; each archive is verified against GitHub's signed build provenance
 before installation.

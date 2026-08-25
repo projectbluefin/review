@@ -147,7 +147,7 @@ conflicts direct the maintainer to manual resolution before a gate.
    Keep the decision card concise and keep bounded raw evidence reachable with
    `e`; backend prose does not belong in Textual rendering code.
 8. **Keep the acting surface explicit.** The shipped keys cover review,
-   merge, branch updates, rejection, handoff, docs, Ghost Cluster, and dupe
+   merge, branch updates, rejection, handoff, docs, and dupe
    cleanup; label and priority mutation are not part of the dashboard.
 
 ## Textual Patterns
@@ -378,9 +378,9 @@ that touches none of its triggers owes no publication — the brief has
 the agent prove the filter from the workflow YAML and the merge commit's
 file list and report the merge itself as the deliverable, never `failed`
 for a publication the repository never promised. Above all of these
-stands one policy: the ghost lab is the maintainer's local lab and is
-never part of a landing decision — no pull request may ever report
-`blocked` on a ghost-lab check; its absence or failure only moves the
+stands one policy: this appliance owns no lab and depends on none — no
+pull request may ever report `blocked` because a maintainer-local
+service is missing; its absence or failure only moves the
 verification to ghcr evidence. The same holds for a required check that
 fails without
 testing the pull request: when the external service the check drives — a

@@ -15,7 +15,7 @@
 ARG FSDK_RUNNER_IMAGE=ghcr.io/projectbluefin/lab-runner:25.08@sha256:7c4b1e518bd1bffe2e506474e6196e9c18fb727bbd48a3c5f7ddbd3446ea5846
 # Kept equal to justfile's hive_commit: host setup and the
 # image runtime use the same contributor relay protocol revision.
-ARG HIVE_COMMIT=5db84c3b2cb7ce48635bba702115a34838690e03
+ARG HIVE_COMMIT=8ac1994a4994ec3454f83c2ed5a989abd430e1af
 ARG NODE_VERSION=24.18.1
 ARG GH_VERSION=2.97.0
 ARG TMUX_VERSION=3.7b
@@ -481,33 +481,6 @@ RUN set -eu; \
     rm -f /usr/local/libexec/review-generate-skills; \
     test ! -e /usr/local/libexec/review-generate-skills
 
-# Bundle the projectbluefin/lab skills through the same seam. lab already
-# keeps its skills in Goose's native docs/skills/<id>/SKILL.md layout, so
-# this is a pinned checkout projected into the discovery root — one seam,
-# no second generator. These carry the Ghost Cluster operating knowledge the
-# dashboard's build dispatch (#133) depends on.
-ARG LAB_SKILLS_COMMIT=23d22295913b35fa408aefdf3a11b9fec30a3b15
-RUN set -eu; \
-    workdir="$(mktemp -d)"; \
-    trap 'rm -rf "$workdir"' EXIT; \
-    curl --fail --location --show-error --silent \
-      "https://codeload.github.com/projectbluefin/lab/tar.gz/${LAB_SKILLS_COMMIT}" \
-      -o "$workdir/lab.tar.gz"; \
-    python3 -m gzip -d < "$workdir/lab.tar.gz" > "$workdir/lab.tar"; \
-    mkdir -p "$workdir/lab"; \
-    tar --no-same-owner -xf "$workdir/lab.tar" -C "$workdir/lab" --strip-components=1 \
-      "lab-${LAB_SKILLS_COMMIT}/docs/skills"; \
-    for skill in "$workdir"/lab/docs/skills/*/; do \
-      id="$(basename "$skill")"; \
-      [ "$id" = _template ] && continue; \
-      [ -f "${skill}SKILL.md" ] || continue; \
-      mkdir -p "/home/dev/.agents/skills/lab-${id}"; \
-      cp -R "$skill". "/home/dev/.agents/skills/lab-${id}/"; \
-    done; \
-    test -f /home/dev/.agents/skills/lab-cluster-tooling/SKILL.md; \
-    test ! -e /home/dev/.agents/skills/lab-_template; \
-    chown -R 1000:1000 /home/dev/.agents
-
 # Supply-chain manifest (#78). The published SBOM is syft's inventory of the
 # image, and syft only sees package-manager metadata: every component above
 # that was installed from a release archive or fetched source file -- Goose,
@@ -540,7 +513,6 @@ RUN set -eu; \
       --ripgrep-sha256-aarch64 "$RIPGREP_AARCH64_SHA256" \
       --hive-commit "$HIVE_COMMIT" \
       --skills-commit "$SKILLS_COMMIT" \
-      --lab-skills-commit "$LAB_SKILLS_COMMIT" \
       --out /opt/bluefin/sbom/review-components.spdx.json; \
     rm -f /usr/local/libexec/review-sbom-manifest; \
     test ! -e /usr/local/libexec/review-sbom-manifest; \
