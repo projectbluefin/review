@@ -801,8 +801,6 @@ async def main() -> int:
                 def stale_adapter(*args, **kwargs):
                     result = original_adapter(*args, **kwargs)
                     result.provenance["head_sha"] = reviewed_head
-                    if re_review is not None:
-                        result.provenance["re_review"] = re_review
                     return result
                 tui.adapt_current_engine = stale_adapter
             await pilot.press("r")

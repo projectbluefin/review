@@ -1739,7 +1739,7 @@ class ReviewScreen(Screen):
 
     def _re_review_card(self, result: ReviewResult) -> list[str]:
         """Project explicit exact-head delta evidence into bounded card lines."""
-        reviewed = str(result.provenance.get("head_sha") or "")
+        reviewed = str((self.prior_result.provenance if self.prior_result else {}).get("head_sha") or "")
         current = str(self.live_snapshot.get("headRefOid") or "")
         base = str(self.live_snapshot.get("baseRefOid") or "")
         if (not re.fullmatch(r"[0-9a-f]{40}", reviewed) or
@@ -1757,10 +1757,11 @@ class ReviewScreen(Screen):
             if not isinstance(item, dict): return None
             try: return Region(str(item["path"]), int(item["start_line"]), int(item.get("end_line", item["start_line"])))
             except (KeyError, TypeError, ValueError): return None
-        regions = ()
+        regions = tuple(Region(str(f["file"]), int(f["line"]), int(f.get("end_line", f["line"]))) for f in result.findings if isinstance(f, dict) and f.get("file") and isinstance(f.get("line"), int))
         prior_findings = tuple(PriorFinding(f"{f.get('file')}:{f.get('line')}", FindingEvidence(str(f["file"]), int(f["line"]), int(f.get("end_line", f["line"])))) for f in prior.findings if isinstance(f, dict) and f.get("file") and isinstance(f.get("line"), int))
         ev = tuple(FindingEvidence(str(f["file"]), int(f["line"]), int(f.get("end_line", f["line"]))) for f in result.findings if isinstance(f, dict) and f.get("file") and isinstance(f.get("line"), int))
-        new = ()
+        prior_ids = {f.finding_id for f in prior_findings}
+        new = tuple(H1Evidence(f"{f['file']}:{f['line']}", str(f["file"]), int(f["line"])) for f in result.findings if isinstance(f, dict) and f.get("file") and isinstance(f.get("line"), int) and f"{f['file']}:{f['line']}" not in prior_ids)
         try:
             request = ReviewRequest(*self.stop_record.repository.split("/", 1), self.stop_record.number, base, current, "maintainer", "review", generated_at="dashboard")
             delta = classify_head_delta(DeltaInput(reviewed, current, historical_base, base, ReviewEvidenceManifest(request), regions, prior_findings, ev, new,
