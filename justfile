@@ -14,7 +14,7 @@
 #   review-container  Run the direct lab-runner fork as a container.
 #   review-stop       Stop a detached worker. Refuses attended runs and
 #                     containers this launcher did not start.
-#   review-doctor     Check that the direct lab-runner fork is runnable.
+#   review-doctor     Run disposable isolation diagnostics and image checks.
 #   review-queue      Run the direct lab-runner fork as a container.
 #
 # ─────────────────────────────────────────────────────────────────────────
@@ -41,6 +41,8 @@
 # Every interactive launch path ends in an 'exec' or a final foreground
 # command whose exit status propagates verbatim; the detached path is an
 # explicit, labeled podman run -d. tests/just-onboarding.sh pins all of it.
+# Agent-capable launches additionally select runsc explicitly after a
+# credential-free rootless probe; there is no default-runtime fallback (#348).
 # ─────────────────────────────────────────────────────────────────────────
 #
 # Bluefin's root Justfile (/usr/share/ublue-os/just/00-entry.just) imports a
@@ -168,6 +170,82 @@ ensure_contributor_image() {
   echo "  Use a published stable/SHA tag or build image/Containerfile locally." >&2
   return 1
 }
+
+isolation_runtime_failure() {
+  local classification="$1" detail="$2"
+  echo "ERROR: isolation runtime: gVisor/runsc (${classification})" >&2
+  echo "  ${detail}" >&2
+  echo "  Review did not start an agent or mount credentials." >&2
+  echo "  Bluefin provisioning: https://github.com/projectbluefin/bluefin/issues/1139" >&2
+  return 1
+}
+
+runsc_runtime_probe() (
+  set -euo pipefail
+  local image="$1" probe_name="review-runtime-probe-$$" probe_status=0 probe_evidence
+  cleanup_runtime_probe() {
+    timeout 5s podman rm --force "$probe_name" >/dev/null 2>&1 || true
+  }
+  trap 'probe_status=$?; trap - EXIT; cleanup_runtime_probe; exit "$probe_status"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  timeout 20s podman --runtime=runsc run --detach --name "$probe_name" \
+    --network=none --pull=never --entrypoint /usr/bin/sleep "$image" 30 \
+    >/dev/null || probe_status=$?
+  [[ "$probe_status" -eq 0 ]] || return "$probe_status"
+  probe_evidence="$(
+    timeout 5s podman inspect --format '{{.State.Running}} {{.OCIRuntime}}' "$probe_name"
+  )" || probe_status=$?
+  [[ "$probe_status" -eq 0 ]] || return "$probe_status"
+  printf '%s\n' "$probe_evidence"
+)
+
+require_runsc_host() {
+  local runsc_path rootless
+  runsc_path="$(command -v runsc 2>/dev/null || true)"
+  if [[ -z "$runsc_path" || ! -f "$runsc_path" || ! -x "$runsc_path" ]]; then
+    isolation_runtime_failure missing 'runsc is not installed as an executable host command.'
+    return
+  fi
+  if ! "$runsc_path" --version >/dev/null 2>&1; then
+    isolation_runtime_failure 'installed but unusable' 'runsc --version failed.'
+    return
+  fi
+  rootless="$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)"
+  if [[ "$rootless" != true ]]; then
+    isolation_runtime_failure 'incompatible with this host/Podman configuration' \
+      'Podman is not operating rootless for this user.'
+    return
+  fi
+}
+
+require_runsc_runtime() {
+  local image="$1" probe_status=0 probe_evidence running probe_runtime
+  probe_evidence="$(runsc_runtime_probe "$image")" || probe_status=$?
+  if [[ "$probe_status" -ne 0 ]]; then
+    if [[ "$probe_status" -eq 125 ]]; then
+      isolation_runtime_failure 'incompatible with this host/Podman configuration' \
+        'Rootless Podman rejected runsc or could not start it.'
+    else
+      isolation_runtime_failure 'installed but unusable' \
+        "The disposable runsc probe exited with status ${probe_status}."
+    fi
+    return
+  fi
+
+  read -r running probe_runtime <<<"$probe_evidence"
+  if [[ "$running" != true ]]; then
+    isolation_runtime_failure 'installed but unusable' \
+      'The disposable runsc probe was not running during runtime inspection.'
+    return
+  fi
+  if [[ "$probe_runtime" != runsc ]]; then
+    isolation_runtime_failure 'incompatible with this host/Podman configuration' \
+      "Podman reported the probe runtime as ${probe_runtime:-unknown}, not runsc."
+    return
+  fi
+}
 '''
 
 # Run the direct lab-runner fork. REVIEW_DETACH=1 runs it detached.
@@ -179,20 +257,23 @@ review-container:
     CONTRIBUTOR_IMAGE="{{contributor_image}}"
     CONTAINER_NAME="${REVIEW_CONTAINER_NAME:-review-container}"
     require_valid_container_name "$CONTAINER_NAME"
+    require_runsc_host
     require_no_running_instance "$CONTAINER_NAME"
     ensure_contributor_image "$CONTRIBUTOR_IMAGE"
+    require_runsc_runtime "$CONTRIBUTOR_IMAGE"
+    echo "✓ isolation runtime: gVisor/runsc"
 
     if [[ "${REVIEW_DETACH:-0}" == 1 ]]; then
       echo "✓ starting ${CONTRIBUTOR_IMAGE} as a detached container."
       echo "  Follow it:  podman logs -f ${CONTAINER_NAME}"
       echo "  Stop it:    just review-stop ${CONTAINER_NAME}"
-      exec podman run --rm --detach --replace --name "$CONTAINER_NAME" \
+      exec podman --runtime=runsc run --rm --detach --replace --name "$CONTAINER_NAME" \
         --label "review.owner=detached" "$CONTRIBUTOR_IMAGE"
     fi
 
     echo "✓ starting ${CONTRIBUTOR_IMAGE} in the foreground."
     echo "  Stop any time with Ctrl-C."
-    exec podman run --rm --interactive --tty --replace --name "$CONTAINER_NAME" \
+    exec podman --runtime=runsc run --rm --interactive --tty --replace --name "$CONTAINER_NAME" \
       --label "$(owner_run_label)" "$CONTRIBUTOR_IMAGE"
 
 # Stop a detached review worker. This is the explicit lifecycle verb for
@@ -239,14 +320,17 @@ review-queue:
     CONTRIBUTOR_IMAGE="{{contributor_image}}"
     CONTAINER_NAME="${REVIEW_QUEUE_NAME:-review-queue}"
     require_valid_container_name "$CONTAINER_NAME"
+    require_runsc_host
     require_no_running_instance "$CONTAINER_NAME"
     ensure_contributor_image "$CONTRIBUTOR_IMAGE"
+    require_runsc_runtime "$CONTRIBUTOR_IMAGE"
+    echo "✓ isolation runtime: gVisor/runsc"
     echo "✓ starting ${CONTRIBUTOR_IMAGE} in the foreground."
     echo "  Stop any time with Ctrl-C."
-    exec podman run --rm --interactive --tty --replace --name "$CONTAINER_NAME" \
+    exec podman --runtime=runsc run --rm --interactive --tty --replace --name "$CONTAINER_NAME" \
       --label "$(owner_run_label)" "$CONTRIBUTOR_IMAGE"
 
-[doc("Check that the direct lab-runner fork is runnable.")]
+[doc("Run disposable isolation diagnostics and check the direct image runtime.")]
 review-doctor:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -256,11 +340,15 @@ review-doctor:
       echo "ERROR: Podman is required to inspect the review image." >&2
       exit 1
     }
-    contributor_image_available "$CONTRIBUTOR_IMAGE" || {
+    require_runsc_host
+    ensure_contributor_image "$CONTRIBUTOR_IMAGE" || {
       echo "ERROR: cannot obtain the contributor image ${CONTRIBUTOR_IMAGE}." >&2
       exit 1
     }
     echo "✓ ${CONTRIBUTOR_IMAGE} is resolvable (direct lab-runner fork)"
+    require_runsc_runtime "$CONTRIBUTOR_IMAGE"
+    echo "✓ isolation runtime: gVisor/runsc (ready; rootless Podman probe passed)"
+    echo "✓ disposable credential-free agent-free probe removed"
     podman run --rm --entrypoint /usr/bin/bash "$CONTRIBUTOR_IMAGE" -lc '
       set -eu
       for tool in bash curl git jq python3 kubectl argo just which xargs awk ps tar diff patch less file; do

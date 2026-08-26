@@ -15,7 +15,13 @@ cat >"$fake_bin/podman" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${PODMAN_LOG:?}"
+if [[ "${1:-}" == --runtime=runsc ]]; then
+  shift
+fi
 case "${1:-}" in
+  info)
+    printf 'true\n'
+    ;;
   image)
     exit 1
     ;;
@@ -26,6 +32,14 @@ case "${1:-}" in
     exit 0
     ;;
   inspect)
+    if [[ "$*" == *'.OCIRuntime'* ]]; then
+      if [[ "$*" == *'.State.Running'* ]]; then
+        printf 'true runsc\n'
+      else
+        printf 'runsc\n'
+      fi
+      exit 0
+    fi
     if [[ "$*" == *'review.owner'* ]]; then
       printf '%s\n' "${PODMAN_OWNER_LABEL:-}"
       exit 0
@@ -46,6 +60,11 @@ esac
 exit 0
 EOF
 chmod 0755 "$fake_bin/podman"
+cat >"$fake_bin/runsc" <<'EOF'
+#!/usr/bin/env bash
+printf 'runsc version test\n'
+EOF
+chmod 0755 "$fake_bin/runsc"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -137,3 +156,5 @@ if grep -qE 'podman (rm|kill)|--force|stop -f' <<<"$stop_body"; then
 fi
 
 printf 'direct-copy launcher contract OK\n'
+
+bash "$repo_root/tests/runsc-isolation.sh"

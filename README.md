@@ -63,7 +63,8 @@ downstream workaround becomes upstream's compatibility burden later. See
 
 The root `justfile` remains the public launcher surface. During the
 direct-copy transition, `review-container` and `review-queue` run the
-published image directly; `review-doctor` checks its basic runtime.
+published image directly; `review-doctor` runs a disposable non-persistent,
+credential-free, agent-free isolation probe before checking the image runtime.
 
 ## Installing this into your own setup
 
@@ -87,7 +88,7 @@ four public recipes:
 | `just review-container` | Run the direct lab-runner fork in the foreground; the restored worker is tracked in #346. |
 | `just review-stop [name]` | Stop a detached worker. Refuses attended runs and containers this launcher did not start. |
 | `just review-queue` | Run the direct lab-runner fork in the foreground; the restored dashboard is tracked in #346. |
-| `just review-doctor` | Check that the direct lab-runner fork is resolvable and runnable. |
+| `just review-doctor` | Check the required gVisor/runsc boundary and direct image runtime. |
 
 Interactive runs remain attached to their originating terminal, and Ctrl-C or
 closing that terminal stops them. A detached worker (`REVIEW_DETACH=1`) is
@@ -118,8 +119,16 @@ an operations task outside this repository automation.
 
 ## Requirements and credentials
 
-The direct-copy image needs only a container engine for local use. Build and
-publish validation uses Podman, Buildah, Skopeo, `jq`, and the GitHub CLI.
+Direct manual image inspection needs only a container engine. The
+agent-capable `review-container` and `review-queue` recipes require a trusted
+host `runsc` installation and fail before starting an agent or mounting
+credentials unless a credential-free rootless Podman probe reports
+`OCIRuntime=runsc`. Run `just review-doctor` to check it. Bluefin provisioning
+is tracked by [bluefin#1139](https://github.com/projectbluefin/bluefin/issues/1139),
+and the Review contract is [#348](https://github.com/projectbluefin/review/issues/348);
+the launcher never downloads a runtime or falls back to Podman's default.
+
+Build and publish validation uses Podman, Buildah, Skopeo, `jq`, and the GitHub CLI.
 The image itself inherits the published lab-runner runtime; it does not carry
 Goose, Codex, Pi, Hive, or a package manager.
 
