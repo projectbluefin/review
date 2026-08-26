@@ -451,10 +451,13 @@ When a completed result is bound to an older full H0 while the point-in-time
 live snapshot contains a different full H1, the decision card appends a
 bounded, read-only delta: both identities, each prior finding disposition,
 newly supported H1 evidence, and an explicit statement that H0 authority is
-not carried forward. Uncertain mappings or sensitive-surface changes show the
-concrete fallback reasons and direct the maintainer to a full review. Missing
-or malformed delta inputs fail closed and do not alter ordinary same-head
-review cards or any action gate.
+not carried forward. The review worker obtains changed H1 regions only through
+the bounded read-only GitHub compare endpoint; a failed, malformed, oversized,
+or partial response is concrete full-review evidence, never a guessed mapping.
+Uncertain mappings, merge-base changes, sensitive workflow changes, incomplete
+H0, and unavailable capability show their concrete fallback reasons and direct
+the maintainer to a full review. Missing or malformed delta inputs fail closed
+and do not alter ordinary same-head review cards or any action gate.
 
 - `then=lambda: self.mutate(...)` — a chained gate; the contract fails on it.
 - Interpolating any GitHub- or agent-sourced text into markup without

@@ -117,6 +117,11 @@ async def main() -> int:
         '  if [ -n "${GH_USER_FAIL-}" ]; then echo "authentication required" >&2; exit 1; fi\n'
         '  echo castrojo; exit 0;\n'
         'fi\n'
+        'if [ "$1" = "api" ] && [[ "$2" == repos/*/compare/* ]]; then\n'
+        '  if [ -n "${RE_REVIEW_COMPARE_FAIL-}" ]; then echo "compare unavailable" >&2; exit 1; fi\n'
+        f'  printf "compare:%s\\n" "${{RE_REVIEW_COMPARE_JSON-UNSET}}" >>"{gh_log}"\n'
+        '  if [ -n "${RE_REVIEW_COMPARE_JSON+x}" ]; then printf "%s\\n" "$RE_REVIEW_COMPARE_JSON"; else printf "%s\\n" "{}"; fi; exit 0\n'
+        'fi\n'
         f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
         'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
         'if [ "$1 $2" = "pr diff" ]; then\n'
@@ -766,7 +771,9 @@ async def main() -> int:
         *,
         head_sha: str = "0123456789abcdef0123456789abcdef01234567",
         reviewed_head: str = "",
-        re_review: dict | None = None,
+        prior_result: tui.ReviewResult | None = None,
+        compare_json: str | None = None,
+        compare_fail: bool = False,
     ):
         review_stub(exit_code, output)
         app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
@@ -789,14 +796,17 @@ async def main() -> int:
                 ],
             }
             app.stops[0].overlap = {"duplicates": [44], "overlaps": [45, 46]}
-            if re_review is not None:
-                app.stops[0].review_result = tui.ReviewResult(
-                    1, "findings", {"critical": 0, "high": 1, "medium": 0, "low": 0},
-                    [{"severity": "high", "file": "image/entrypoint.sh", "line": 87, "title": "old"}],
-                    provenance={"head_sha": reviewed_head, "base_sha": "fedcba9876543210fedcba9876543210fedcba98"},
-                )
+            app.stops[0].review_result = prior_result
             root_screen = app.screen
             original_adapter = tui.adapt_current_engine
+            if compare_json is not None:
+                os.environ["RE_REVIEW_COMPARE_JSON"] = compare_json
+            else:
+                os.environ.pop("RE_REVIEW_COMPARE_JSON", None)
+            if compare_fail:
+                os.environ["RE_REVIEW_COMPARE_FAIL"] = "1"
+            else:
+                os.environ.pop("RE_REVIEW_COMPARE_FAIL", None)
             if reviewed_head:
                 def stale_adapter(*args, **kwargs):
                     result = original_adapter(*args, **kwargs)
@@ -834,6 +844,8 @@ async def main() -> int:
             await pilot.press("q")
             await pilot.pause()
             tui.adapt_current_engine = original_adapter
+            os.environ.pop("RE_REVIEW_COMPARE_JSON", None)
+            os.environ.pop("RE_REVIEW_COMPARE_FAIL", None)
             check(app.screen is root_screen, "q must close ReviewScreen")
             return str(status.render()), set(status.classes), str(card.render())
 
@@ -2891,6 +2903,11 @@ async def main() -> int:
         workdir / "gh",
         f'printf "%s\\n" "$*" >>"{gh_log}"\n'
         'if [ "$1 $2" = "api user" ]; then echo castrojo; exit 0; fi\n'
+        'if [ "$1" = "api" ] && [[ "$2" == repos/*/compare/* ]]; then\n'
+        '  if [ -n "${RE_REVIEW_COMPARE_FAIL-}" ]; then echo "compare unavailable" >&2; exit 1; fi\n'
+        f'  printf "compare:%s\\n" "${{RE_REVIEW_COMPARE_JSON-UNSET}}" >>"{gh_log}"\n'
+        '  if [ -n "${RE_REVIEW_COMPARE_JSON+x}" ]; then printf "%s\\n" "$RE_REVIEW_COMPARE_JSON"; else printf "%s\\n" "{}"; fi; exit 0\n'
+        'fi\n'
         f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
         'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
         'if [ "$1 $2" = "pr list" ]; then echo "[]"; exit 0; fi\n'
@@ -3523,6 +3540,11 @@ async def main() -> int:
         workdir / "gh",
         f'printf "%s\\n" "$*" >>"{gh_log}"\n'
         'if [ "$1 $2" = "api user" ]; then echo castrojo; exit 0; fi\n'
+        'if [ "$1" = "api" ] && [[ "$2" == repos/*/compare/* ]]; then\n'
+        '  if [ -n "${RE_REVIEW_COMPARE_FAIL-}" ]; then echo "compare unavailable" >&2; exit 1; fi\n'
+        f'  printf "compare:%s\\n" "${{RE_REVIEW_COMPARE_JSON-UNSET}}" >>"{gh_log}"\n'
+        '  if [ -n "${RE_REVIEW_COMPARE_JSON+x}" ]; then printf "%s\\n" "$RE_REVIEW_COMPARE_JSON"; else printf "%s\\n" "{}"; fi; exit 0\n'
+        'fi\n'
         f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
         'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
         'if [ "$1 $2" = "pr list" ]; then echo "[]"; exit 0; fi\n'
@@ -3759,29 +3781,125 @@ async def main() -> int:
         f"a stale review must direct a rerun, got {card!r}",
     )
 
-    text, classes, card = await run_review(
-        0, findings_output, reviewed_head="a" * 40,
-        re_review={
-            "reviewed_merge_base_sha": "fedcba9876543210fedcba9876543210fedcba98",
-            "changed_regions": [{"path": "image/entrypoint.sh", "start_line": 80, "end_line": 90}],
-            "evidence": [{"path": "image/entrypoint.sh", "start_line": 87, "end_line": 87}],
-            "newly_supported": [{"finding_id": "new-proof", "path": "new.py", "line": 3}],
-        },
+    # The H0 result is retained by the real Stop and the actual `gh api
+    # repos/<repo>/compare/H0...H1` boundary supplies H1 change evidence.
+    # No test-only dashboard metadata participates in this journey.
+    h0 = "a" * 40
+    h1 = "0123456789abcdef0123456789abcdef01234567"
+    base = "fedcba9876543210fedcba9876543210fedcba98"
+    prior = tui.ReviewResult(
+        1, "findings", {"critical": 0, "high": 2, "medium": 1, "low": 0},
+        [
+            {"severity": "high", "file": "image/entrypoint.sh", "line": 87, "end_line": 89, "title": "H0 changed"},
+            {"severity": "medium", "file": "tests/image-contract.sh", "line": 401, "title": "H0 unchanged"},
+            {"severity": "high", "file": "gone.py", "line": 7, "title": "H0 unmappable"},
+        ],
+        provenance={"head_sha": h0, "base_sha": base, "approval": "must not carry"},
     )
-    check("RE-REVIEW" in card and "reviewed aaaaaaaa" in card and "current 01234567" in card,
-          "stale exact-head review must name both H0 and H1 identities")
-    check("changed-region" in card and "invalidated-unmappable" in card,
-          "re-review card must show bounded finding dispositions")
-    check("new-proof" in card and "No authority carried" in card,
-          "re-review card must show new H1 evidence without carrying authority")
+    re_review_output = "\n".join([
+        "goose review: check 'main' completed: 3 finding(s)",
+        '{"severity":"high","path":"image/entrypoint.sh","line_start":87,"line_end":89,"summary":"H1 changed","check":"main"}',
+        '{"severity":"medium","path":"tests/image-contract.sh","line_start":401,"line_end":401,"summary":"H1 unchanged","check":"main"}',
+        '{"severity":"low","path":"new.py","line_start":3,"line_end":3,"summary":"H1 [new]","check":"main"}',
+        "goose review: orchestrator emitted 3 finding(s) from 1 check(s) (main: ran, 3 finding(s))",
+    ])
+    mapped_compare = json.dumps({"total_files": 1, "files": [{
+        "filename": "image/entrypoint.sh", "status": "modified",
+        "patch": "@@ -80,5 +80,11 @@",
+    }]})
+    text, classes, card = await run_review(
+        0, re_review_output, prior_result=prior, compare_json=mapped_compare,
+    )
+    check("RE-REVIEW" in card and f"reviewed {h0}" in card and f"current {h1}" in card,
+          "the production compare journey must name both exact H0 and H1 identities")
+    check(f"H1 manifest  base {base}  head {h1}  result findings" in card,
+          "the production delta must carry its current H1 manifest and result")
+    check("image/entrypoint.sh:87=changed-region" in card and
+          "tests/image-contract.sh:401=unchanged-region" in card and
+          "gone.py:7=invalidated-unmappable" in card,
+          "the production delta must render bounded changed, unchanged, and unmappable H0 dispositions: " + repr(card))
+    check("new.py:3 (new.py:3)" in card and "No authority carried from H0." in card and "must not carry" not in card,
+          "new H1 evidence must be escaped and H0 authority must not carry forward")
+    check(any(f"api repos/projectbluefin/bluefinctl/compare/{h0}...{h1}" in line
+              for line in gh_log.read_text().splitlines()),
+          "the Pilot must stub and exercise the production gh compare boundary")
+
+    stale_prior = tui.ReviewResult(
+        1, "findings", {"critical": 0, "high": 1, "medium": 0, "low": 0},
+        [{"severity": "high", "file": "stale.py", "line": 7, "title": "H0 stale"}],
+        provenance={"head_sha": h0, "base_sha": base},
+    )
+    stale_output = "\n".join([
+        "goose review: check 'main' completed: 1 finding(s)",
+        '{"severity":"high","path":"stale.py","line_start":7,"line_end":7,"summary":"H1 stale","check":"main"}',
+        "goose review: orchestrator emitted 1 finding(s) from 1 check(s) (main: ran, 1 finding(s))",
+        "REVIEW INCOMPLETE — a check returned no verdict",
+    ])
+    text, classes, card = await run_review(
+        65, stale_output, prior_result=stale_prior,
+        compare_json=json.dumps({"total_files": 0, "files": []}),
+    )
+    check("stale.py:7=stale-re-evaluate" in card,
+          "an incomplete H1 result must mark matching H0 evidence stale for re-evaluation")
 
     text, classes, card = await run_review(
-        0, findings_output, reviewed_head="a" * 40,
-        re_review={"mapping_uncertain": True, "sensitive_surfaces_changed": True},
+        0, re_review_output, prior_result=prior, compare_fail=True,
     )
-    check("FULL REVIEW REQUIRED" in card and "mapping-uncertain" in card and "sensitive-surface-changed" in card,
-          "uncertain or sensitive H1 delta must state concrete full-review reasons")
-    check("full review" in card.lower(), "fallback must direct the maintainer to a full review")
+    check("FULL REVIEW REQUIRED" in card and "mapping-uncertain" in card and "capability-absent" in card,
+          "a failed production compare must fail closed with concrete uncertainty and capability reasons: " + repr(card))
+
+    sensitive_compare = json.dumps({"total_files": 1, "files": [{
+        "filename": ".github/workflows/publish.yml", "status": "modified",
+        "patch": "@@ -1 +1 @@",
+    }]})
+    text, classes, card = await run_review(
+        0, re_review_output, prior_result=prior, compare_json=sensitive_compare,
+    )
+    check("sensitive-surface-changed" in card,
+          "a sensitive H1 compare path must require a full review: " + repr(card))
+
+    risk_compare = json.dumps({"total_files": 129, "files": []})
+    text, classes, card = await run_review(
+        0, re_review_output, prior_result=prior, compare_json=risk_compare,
+    )
+    check("bounded-risk-exceeded" in card,
+          "a compare beyond the bounded review budget must require a full review")
+
+    merge_base_prior = tui.ReviewResult(
+        prior.version, prior.state, prior.counts, prior.findings,
+        provenance={"head_sha": h0, "base_sha": "b" * 40},
+    )
+    text, classes, card = await run_review(
+        0, re_review_output, prior_result=merge_base_prior, compare_json=mapped_compare,
+    )
+    check("merge-base-changed" in card,
+          "a changed exact merge base must require a full review")
+
+    incomplete_prior = tui.ReviewResult(
+        prior.version, "incomplete", prior.counts, prior.findings,
+        provenance={"head_sha": h0, "base_sha": base},
+    )
+    text, classes, card = await run_review(
+        0, re_review_output, prior_result=incomplete_prior, compare_json=mapped_compare,
+    )
+    check("prior-review-incomplete" in card,
+          "an incomplete H0 review must not supply authority to H1")
+
+    malformed_prior = tui.ReviewResult(
+        prior.version, prior.state, prior.counts, prior.findings,
+        provenance={"head_sha": h0},
+    )
+    text, classes, card = await run_review(0, re_review_output, prior_result=malformed_prior)
+    check("FULL REVIEW REQUIRED" in card and "historical H0 merge base unavailable" in card,
+          "missing historical H0 evidence must fail closed instead of hiding the delta")
+
+    same_head_prior = tui.ReviewResult(
+        prior.version, prior.state, prior.counts, prior.findings,
+        provenance={"head_sha": h1, "base_sha": base},
+    )
+    text, classes, card = await run_review(0, re_review_output, prior_result=same_head_prior)
+    check("RE-REVIEW" not in card,
+          "a same-head result must preserve the ordinary decision card without a re-review projection")
 
     # ── the regression that started this: a review whose checks returned no
     # verdict must never read as clean ───────────────────────────────────
@@ -4133,8 +4251,9 @@ async def main() -> int:
     outcomes = [r["outcome"] for r in records if r.get("action") == "review"]
     check(
         outcomes == [
-            "complete", "complete", "incomplete", "stale", "incomplete", "failed",
-            "complete", "incomplete", "complete", "stopped", "stopped",
+            "complete", "complete", "incomplete", "stale", "complete", "incomplete",
+            "complete", "complete", "complete", "complete", "complete", "complete",
+            "complete", "incomplete", "failed", "complete", "incomplete", "complete", "stopped", "stopped",
             "complete", "error",
         ],
         f"every review must be traced with its outcome, got {outcomes}",

@@ -32,6 +32,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Footer,
@@ -78,6 +79,12 @@ MAX_REVIEW_BODY_CHARS = 4096
 # The label Hive's governor sweep scans for. It is not defined in most
 # repositories; Hive's queue endpoint owns creating and applying it.
 QUEUE_LABEL = "lgtm"
+MAX_RE_REVIEW_FILES = 128
+MAX_RE_REVIEW_HUNKS = 512
+MAX_RE_REVIEW_RESPONSE_CHARS = 1_000_000
+MAX_RE_REVIEW_FINDINGS = 12
+MAX_RE_REVIEW_NEW_EVIDENCE = 8
+SENSITIVE_RE_REVIEW_PATHS = (".github/workflows/",)
 
 # The semantic registry is the source for bindings, help, and the command
 # palette. IDs are stable so clickable surfaces can consume the same contract.
@@ -304,32 +311,58 @@ def gh(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
     )
 
 
-def compare_hunk_regions(repository: str, old_head: str, new_head: str) -> tuple[tuple[Region, ...], bool, bool]:
-    """Read-only GitHub compare; return bounded patch regions and failure flags."""
+@dataclass(frozen=True)
+class CompareEvidence:
+    """Bounded read-only H0..H1 compare evidence for a re-review."""
+
+    regions: tuple[Region, ...] = ()
+    mapping_uncertain: bool = False
+    sensitive_surfaces_changed: bool = False
+    bounded_risk_exceeded: bool = False
+    capability_available: bool = True
+
+
+def compare_hunk_regions(repository: str, old_head: str, new_head: str) -> CompareEvidence:
+    """Read the GitHub compare boundary without treating partial data as proof."""
     if not (re.fullmatch(r"[0-9a-f]{40}", old_head) and re.fullmatch(r"[0-9a-f]{40}", new_head)):
-        return (), True, False
+        return CompareEvidence(mapping_uncertain=True, capability_available=False)
     try:
         response = gh("api", f"repos/{repository}/compare/{old_head}...{new_head}", timeout=30)
-        payload = json.loads(response.stdout) if response.returncode == 0 else {}
+        if response.returncode != 0 or len(response.stdout) > MAX_RE_REVIEW_RESPONSE_CHARS:
+            return CompareEvidence(mapping_uncertain=True, capability_available=False)
+        payload = json.loads(response.stdout)
         files = payload.get("files") if isinstance(payload, dict) else None
-        if not isinstance(files, list) or len(files) > 128:
-            return (), True, response.returncode == 0
+        total_files = payload.get("total_files") if isinstance(payload, dict) else None
+        if (not isinstance(files, list) or
+                (isinstance(total_files, int) and total_files > len(files)) or
+                len(files) > MAX_RE_REVIEW_FILES):
+            return CompareEvidence(
+                mapping_uncertain=True,
+                bounded_risk_exceeded=True,
+            )
         regions: list[Region] = []
+        sensitive = False
+        uncertain = False
         for item in files:
             if not isinstance(item, dict) or not isinstance(item.get("filename"), str):
-                return (), True, True
-            patch = item.get("patch", "")
+                return CompareEvidence(mapping_uncertain=True)
+            filename = item["filename"]
+            sensitive = sensitive or filename.startswith(SENSITIVE_RE_REVIEW_PATHS)
+            patch = item.get("patch")
             if not isinstance(patch, str):
-                return (), True, True
+                uncertain = True
+                continue
             for match in re.finditer(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", patch):
                 start = int(match.group(1)); count = int(match.group(2) or 1)
                 if count:
-                    regions.append(Region(item["filename"], start, start + count - 1))
-                if len(regions) >= 512:
-                    return tuple(regions), True, True
-        return tuple(regions), False, True
+                    regions.append(Region(filename, start, start + count - 1))
+                if len(regions) >= MAX_RE_REVIEW_HUNKS:
+                    return CompareEvidence(
+                        tuple(regions), True, sensitive, True,
+                    )
+        return CompareEvidence(tuple(regions), uncertain, sensitive)
     except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, json.JSONDecodeError):
-        return (), True, False
+        return CompareEvidence(mapping_uncertain=True, capability_available=False)
 
 
 def bounded_detail(detail: str) -> str:
@@ -1484,9 +1517,7 @@ class ReviewScreen(Screen):
         self.live_snapshot = copy.deepcopy(stop.live)
         self.overlap_snapshot = copy.deepcopy(stop.overlap)
         self.prior_result = copy.deepcopy(stop.review_result)
-        self.compare_regions: tuple[Region, ...] = ()
-        self.compare_uncertain = False
-        self.compare_available = True
+        self.compare_evidence = CompareEvidence()
 
     def compose(self) -> ComposeResult:
         stop = self.stop_record
@@ -1515,7 +1546,7 @@ class ReviewScreen(Screen):
         prior_head = str((self.prior_result.provenance if self.prior_result else {}).get("head_sha") or "")
         current_head = str(self.live_snapshot.get("headRefOid") or "")
         if self.prior_result is not None and prior_head and prior_head != current_head:
-            self.compare_regions, self.compare_uncertain, self.compare_available = compare_hunk_regions(
+            self.compare_evidence = compare_hunk_regions(
                 stop.repository, prior_head, current_head
             )
         if ACTIVE_BACKEND == "codex":
@@ -1776,42 +1807,104 @@ class ReviewScreen(Screen):
 
     def _re_review_card(self, result: ReviewResult) -> list[str]:
         """Project explicit exact-head delta evidence into bounded card lines."""
-        reviewed = str((self.prior_result.provenance if self.prior_result else {}).get("head_sha") or "")
-        current = str(self.live_snapshot.get("headRefOid") or "")
-        base = str(self.live_snapshot.get("baseRefOid") or "")
-        if (not re.fullmatch(r"[0-9a-f]{40}", reviewed) or
-                not re.fullmatch(r"[0-9a-f]{40}", current) or reviewed == current or
-                not re.fullmatch(r"[0-9a-f]{40}", base)):
-            return []
         prior = self.prior_result
         if prior is None:
             return []
-        raw = prior.provenance if isinstance(prior.provenance, dict) else {}
-        historical_base = str(raw.get("base_sha") or "")
+        reviewed = str(prior.provenance.get("head_sha") or "")
+        current = str(self.live_snapshot.get("headRefOid") or "")
+        base = str(self.live_snapshot.get("baseRefOid") or "")
+        if reviewed == current and re.fullmatch(r"[0-9a-f]{40}", current):
+            return []
+        if not all(re.fullmatch(r"[0-9a-f]{40}", value or "") for value in (reviewed, current, base)):
+            return self._re_review_fallback(
+                reviewed, current, "exact H0/H1 identity or current H1 base unavailable"
+            )
+        historical_base = str(prior.provenance.get("base_sha") or "")
         if not re.fullmatch(r"[0-9a-f]{40}", historical_base):
-            return ["", "RE-REVIEW  FULL REVIEW REQUIRED — historical H0 merge base unavailable."]
-        def region(item: object) -> Region | None:
-            if not isinstance(item, dict): return None
-            try: return Region(str(item["path"]), int(item["start_line"]), int(item.get("end_line", item["start_line"])))
-            except (KeyError, TypeError, ValueError): return None
-        regions = self.compare_regions
-        prior_findings = tuple(PriorFinding(f"{f.get('file')}:{f.get('line')}", FindingEvidence(str(f["file"]), int(f["line"]), int(f.get("end_line", f["line"])))) for f in prior.findings if isinstance(f, dict) and f.get("file") and isinstance(f.get("line"), int))
-        ev = tuple(FindingEvidence(str(f["file"]), int(f["line"]), int(f.get("end_line", f["line"]))) for f in result.findings if isinstance(f, dict) and f.get("file") and isinstance(f.get("line"), int))
-        prior_ids = {f.finding_id for f in prior_findings}
-        new = tuple(H1Evidence(f"{f['file']}:{f['line']}", str(f["file"]), int(f["line"])) for f in result.findings if isinstance(f, dict) and f.get("file") and isinstance(f.get("line"), int) and f"{f['file']}:{f['line']}" not in prior_ids)
+            return self._re_review_fallback(reviewed, current, "historical H0 merge base unavailable")
+
+        def findings(value: ReviewResult) -> tuple[tuple[PriorFinding, ...], bool, bool]:
+            mapped: list[PriorFinding] = []
+            malformed = False
+            for item in value.findings[:MAX_RE_REVIEW_FINDINGS + 1]:
+                if (not isinstance(item, dict) or not isinstance(item.get("file"), str) or
+                        not isinstance(item.get("line"), int) or
+                        not isinstance(item.get("end_line", item.get("line")), int)):
+                    malformed = True
+                    continue
+                path = item["file"]
+                start = item["line"]
+                end = item.get("end_line", start)
+                if not path or len(path) > 512 or start < 1 or end < start:
+                    malformed = True
+                    continue
+                try:
+                    mapped.append(PriorFinding(
+                        f"{path}:{start}", FindingEvidence(path, start, end)
+                    ))
+                except ValueError:
+                    malformed = True
+            return tuple(mapped[:MAX_RE_REVIEW_FINDINGS]), malformed, len(value.findings) > MAX_RE_REVIEW_FINDINGS
+
+        prior_findings, prior_malformed, prior_risk = findings(prior)
+        current_findings, current_malformed, current_risk = findings(result)
+        h1_stale = result.state not in {"complete", "findings"}
+        evidence = tuple(
+            FindingEvidence(item.evidence.path, item.evidence.start_line,
+                            item.evidence.end_line, h1_stale)
+            for item in current_findings if item.evidence is not None
+        )
+        prior_ids = {item.finding_id for item in prior_findings}
+        new = tuple(
+            H1Evidence(item.finding_id, item.evidence.path, item.evidence.start_line)
+            for item in current_findings
+            if item.evidence is not None and item.finding_id not in prior_ids
+        )
         try:
             request = ReviewRequest(*self.stop_record.repository.split("/", 1), self.stop_record.number, base, current, "maintainer", "review", generated_at="dashboard")
-            delta = classify_head_delta(DeltaInput(reviewed, current, historical_base, base, ReviewEvidenceManifest(request), regions, prior_findings, ev, new,
-                self.compare_uncertain, False, prior.state in {"complete", "findings"}, False, self.compare_available))
+            delta = classify_head_delta(DeltaInput(
+                reviewed, current, historical_base, base, ReviewEvidenceManifest(request),
+                self.compare_evidence.regions, prior_findings, evidence, new,
+                self.compare_evidence.mapping_uncertain or prior_malformed or current_malformed,
+                self.compare_evidence.sensitive_surfaces_changed,
+                prior.state in {"complete", "findings"},
+                self.compare_evidence.bounded_risk_exceeded or prior_risk or current_risk,
+                self.compare_evidence.capability_available,
+            ))
         except (TypeError, ValueError, KeyError):
-            return []
-        lines = ["", "RE-REVIEW  exact-head delta", f"reviewed {reviewed}  current {current}"]
-        lines.append("dispositions  " + ", ".join(f"{x.finding_id}={x.disposition.value}" for x in delta.findings[:12]) if delta.findings else "dispositions  none")
-        if delta.newly_supported: lines.append("new H1 evidence  " + ", ".join(f"{x.finding_id} ({x.path}:{x.line})" for x in delta.newly_supported[:8]))
+            return self._re_review_fallback(reviewed, current, "malformed re-review evidence")
+        lines = [
+            "", "RE-REVIEW  exact-head delta",
+            f"reviewed {escape(reviewed)}  current {escape(current)}",
+            f"H1 manifest  base {escape(base)}  head {escape(delta.current_h1_manifest.request.head_sha)}  result {escape(result.state)}",
+        ]
+        lines.append(
+            "dispositions  " + ", ".join(
+                f"{escape(item.finding_id)}={escape(item.disposition.value)}"
+                for item in delta.findings[:MAX_RE_REVIEW_FINDINGS]
+            ) if delta.findings else "dispositions  none"
+        )
+        if delta.newly_supported:
+            lines.append("new H1 evidence  " + ", ".join(
+                f"{escape(item.finding_id)} ({escape(item.path)}:{item.line})"
+                for item in delta.newly_supported[:MAX_RE_REVIEW_NEW_EVIDENCE]
+            ))
         lines.append("No authority carried from H0.")
         if delta.full_review_required:
-            lines.append("FULL REVIEW REQUIRED — " + ", ".join(x.value for x in delta.fallback_reasons) + ".")
+            lines.append("FULL REVIEW REQUIRED — " + ", ".join(
+                escape(item.value) for item in delta.fallback_reasons
+            ) + ".")
         return lines
+
+    @staticmethod
+    def _re_review_fallback(reviewed: str, current: str, reason: str) -> list[str]:
+        """Keep malformed historic evidence visible and fail closed."""
+        return [
+            "", "RE-REVIEW  FULL REVIEW REQUIRED",
+            f"reviewed {escape(reviewed or '?')}  current {escape(current or '?')}",
+            f"reason  {escape(reason)}.",
+            "No authority carried from H0.",
+        ]
 
     def action_stop(self) -> None:
         # Signal the whole process group, and mean it. A review that ignores
@@ -2007,7 +2100,13 @@ class ReviewDashboard(App):
         self.harness_options = options
         result = next((option.discovery for option in options if option.harness.branding.harness_id == ACTIVE_BACKEND), options[0].discovery)
         self.harness_state = result.availability.value
-        label = self.query_one("#harness-status", Static)
+        try:
+            label = self.query_one("#harness-status", Static)
+        except NoMatches:
+            # The asynchronous probe can finish after Textual has torn down
+            # this dashboard. State remains useful for a live screen, but an
+            # unmounted screen has nowhere safe to render it.
+            return
         if result.availability is Availability.READY:
             label.update(
                 "Harness Autopilot — READY · Codex / gpt-5.6-luna · "
