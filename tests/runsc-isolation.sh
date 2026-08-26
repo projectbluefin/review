@@ -10,9 +10,10 @@ trap 'rm -rf "$scratch"' EXIT
 
 fake_bin="$scratch/bin"
 system_bin="$scratch/system-bin"
+state_dir="$scratch/podman-state"
 podman_log="$scratch/podman.log"
-mkdir -p "$fake_bin" "$system_bin"
-for system_tool in bash cat grep ps sleep tr; do
+mkdir -p "$fake_bin" "$system_bin" "$state_dir"
+for system_tool in bash basename cat grep mktemp ps rm rmdir sleep tr; do
   ln -s "$(command -v "$system_tool")" "$system_bin/$system_tool"
 done
 
@@ -62,10 +63,13 @@ image)
 info)
   printf '%s\n' "${PODMAN_ROOTLESS:-true}"
   ;;
-manifest | pull | rm | stop)
+manifest | pull | stop)
   exit 0
   ;;
 container)
+  if [[ "${1:-}" == exists && -f "${PODMAN_STATE_DIR:?}/${2:-}.exists" ]]; then
+    exit 0
+  fi
   [[ "${PODMAN_CONTAINER_EXISTS:-0}" == 1 ]]
   ;;
 inspect)
@@ -81,6 +85,11 @@ inspect)
     fi
     exit 0
   fi
+  if [[ "$*" == *'review.probe'* ]]; then
+    target="${*: -1}"
+    cat "${PODMAN_STATE_DIR:?}/${target}.label"
+    exit 0
+  fi
   printf 'false\n'
   exit 1
   ;;
@@ -88,7 +97,7 @@ run)
   if [[ "$*" == *'--name review-runtime-probe-'* ]]; then
     [[ "$runtime_selected" == true ]] || exit 91
     case "${PODMAN_PROBE_BEHAVIOR:-ready}" in
-    reject)
+    reject | collision)
       echo 'configured OCI runtime runsc is unavailable' >&2
       exit 125
       ;;
@@ -97,9 +106,41 @@ run)
       exit 42
       ;;
     esac
+    cidfile=
+    probe_label=
+    while (($#)); do
+      case "$1" in
+      --cidfile)
+        cidfile="$2"
+        shift 2
+        ;;
+      --label)
+        case "$2" in review.probe=*) probe_label="${2#review.probe=}" ;; esac
+        shift 2
+        ;;
+      *) shift ;;
+      esac
+    done
+    [[ -n "$cidfile" && -n "$probe_label" ]] || exit 92
+    probe_id="probe-id-${probe_label}"
+    printf '%s\n' "$probe_id" >"$cidfile"
+    printf '%s\n' "$probe_label" >"${PODMAN_STATE_DIR:?}/${probe_id}.label"
+    : >"${PODMAN_STATE_DIR:?}/${probe_id}.exists"
+    printf '%s\n' "$probe_id" >"${PODMAN_STATE_DIR:?}/last-created-id"
+    if [[ "${PODMAN_PROBE_BEHAVIOR:-ready}" == signal ]]; then
+      recipe_pid="$(ps -o ppid= -p "$PPID" | tr -d '[:space:]')"
+      kill -TERM "$recipe_pid"
+    fi
     exit 0
   fi
   exit 0
+  ;;
+rm)
+  target="${*: -1}"
+  if [[ "${PODMAN_CLEANUP_BEHAVIOR:-ready}" == fail ]]; then
+    exit 1
+  fi
+  rm -f "${PODMAN_STATE_DIR:?}/${target}.exists" "${PODMAN_STATE_DIR:?}/${target}.label"
   ;;
 esac
 exit 0
@@ -109,12 +150,19 @@ chmod 0755 "$fake_bin/podman"
 cat >"$fake_bin/timeout" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+printf 'timeout %s\n' "$*" >>"${PODMAN_LOG:?}"
+if [[ "${1:-}" == --kill-after=* ]]; then
+  shift
+fi
 shift
 if [[ "$*" == *'--runtime=runsc run'* ]]; then
   case "${TIMEOUT_BEHAVIOR:-ready}" in
   expire) exit 124 ;;
   interrupt) exit 130 ;;
   esac
+fi
+if [[ "${TIMEOUT_BEHAVIOR:-ready}" == cleanup-timeout && "$*" == *'container exists'* ]]; then
+  exit 124
 fi
 exec "$@"
 EOF
@@ -124,9 +172,11 @@ run_recipe() {
   local recipe="$1"
   shift
   : >"$podman_log"
+  rm -f "$state_dir"/*
   set +e
   output="$(
-    env PATH="$fake_bin:$system_bin" PODMAN_LOG="$podman_log" "$@" \
+    env PATH="$fake_bin:$system_bin" PODMAN_LOG="$podman_log" \
+      PODMAN_STATE_DIR="$state_dir" "$@" \
       "$real_just" --justfile "$justfile" "$recipe" 2>&1
   )"
   status=$?
@@ -142,12 +192,17 @@ assert_no_agent_launch() {
   fi
 }
 
-assert_probe_removed() {
-  if ! grep -Eq -- '^--runtime=runsc run .*--name review-runtime-probe-' "$podman_log"; then
-    return
+assert_probe_absent() {
+  if find "$state_dir" -name '*.exists' -print -quit | grep -q .; then
+    fail "the disposable runsc probe must not survive its cleanup trap"
   fi
-  grep -Eq -- '^rm --force review-runtime-probe-[0-9]+$' "$podman_log" ||
-    fail "the disposable runsc probe must be force-removed by its cleanup trap"
+  if [[ -s "$state_dir/last-created-id" ]]; then
+    probe_id="$(cat "$state_dir/last-created-id")"
+    grep -Eq -- "^rm --force ${probe_id}$" "$podman_log" ||
+      fail "cleanup must target the cidfile-owned probe ID"
+    ! grep -Eq -- '^rm --force review-runtime-probe-' "$podman_log" ||
+      fail "cleanup must never force-remove a probe by its public name"
+  fi
 }
 
 assert_failure_copy() {
@@ -160,7 +215,7 @@ assert_failure_copy() {
   grep -Fq 'projectbluefin/bluefin/issues/1139' <<<"$output" ||
     fail "isolation failure must link the Bluefin provisioning issue"
   assert_no_agent_launch
-  assert_probe_removed
+  assert_probe_absent
 }
 
 case_missing() {
@@ -219,8 +274,40 @@ case_probe_timeout() {
 
 case_probe_interrupt() {
   write_fake_runsc ready
-  run_recipe review-container TIMEOUT_BEHAVIOR=interrupt
+  run_recipe review-container PODMAN_PROBE_BEHAVIOR=signal
   assert_failure_copy 'installed but unusable'
+  [[ -s "$state_dir/last-created-id" ]] ||
+    fail "the interruption test must signal a live, created probe"
+}
+
+case_name_collision() {
+  write_fake_runsc ready
+  run_recipe review-container PODMAN_PROBE_BEHAVIOR=collision
+  assert_failure_copy 'incompatible with this host/Podman configuration'
+  ! grep -Eq -- '^rm --force review-runtime-probe-' "$podman_log" ||
+    fail "a failed create must never remove a colliding container name"
+}
+
+case_cleanup_failure() {
+  write_fake_runsc ready
+  run_recipe review-container PODMAN_CLEANUP_BEHAVIOR=fail
+  [[ "$status" -ne 0 ]] || fail "cleanup failure must fail closed"
+  ! grep -Fq '✓ isolation runtime: gVisor/runsc' <<<"$output" ||
+    fail "cleanup failure must never report runtime readiness"
+  [[ -s "$state_dir/last-created-id" ]] ||
+    fail "the cleanup-failure test must reach a live, created probe"
+  grep -Fq 'probe cleanup failed' <<<"$output" ||
+    fail "cleanup failure must be reported as the failed security check"
+  assert_no_agent_launch
+}
+
+case_cleanup_timeout() {
+  write_fake_runsc ready
+  run_recipe review-container TIMEOUT_BEHAVIOR=cleanup-timeout
+  [[ "$status" -ne 0 ]] || fail "cleanup status timeout must fail closed"
+  grep -Fq 'probe cleanup failed' <<<"$output" ||
+    fail "cleanup status timeout must be reported as the failed security check"
+  assert_no_agent_launch
 }
 
 case_rootful() {
@@ -240,11 +327,17 @@ assert_successful_agent_launch() {
     fail "${name} must explicitly select runsc"
   grep -Eq -- '^--runtime=runsc run .*--name review-runtime-probe-' "$podman_log" ||
     fail "${name} must execute the rootless runsc probe"
-  grep -Eq -- '^inspect --format .*OCIRuntime.*review-runtime-probe-' "$podman_log" ||
+  grep -Eq -- '^inspect --format .*OCIRuntime.*probe-id-' "$podman_log" ||
     fail "${name} must verify the probe container runtime identity"
-  grep -Eq -- '^inspect --format .*State.Running.*OCIRuntime.*review-runtime-probe-' "$podman_log" ||
+  grep -Eq -- '^inspect --format .*State.Running.*OCIRuntime.*probe-id-' "$podman_log" ||
     fail "${name} must verify runtime identity while the probe is active"
-  assert_probe_removed
+  grep -Eq -- '^inspect --format .*review.probe.*probe-id-' "$podman_log" ||
+    fail "${name} must bind authoritative evidence and cleanup to the ownership label"
+  assert_probe_absent
+  grep -Eq -- '^--runtime=runsc run .*--rm .*--cidfile .*--label review.probe=' "$podman_log" ||
+    fail "the probe must carry --rm plus cidfile and ownership-label defenses"
+  grep -Eq -- '^timeout --kill-after=2s (5s|20s) ' "$podman_log" ||
+    fail "probe operations must escalate from TERM to KILL within a fixed bound"
 }
 
 case_attended() {
@@ -290,6 +383,9 @@ run_case() {
   probe-stopped) case_probe_stopped ;;
   probe-timeout) case_probe_timeout ;;
   probe-interrupt) case_probe_interrupt ;;
+  name-collision) case_name_collision ;;
+  cleanup-failure) case_cleanup_failure ;;
+  cleanup-timeout) case_cleanup_timeout ;;
   rootful) case_rootful ;;
   attended) case_attended ;;
   detached) case_detached ;;
@@ -306,7 +402,8 @@ if (($#)); then
 else
   for requested_case in \
     missing nonexecutable unusable podman-rejects probe-nonzero false-positive \
-    probe-stopped probe-timeout probe-interrupt rootful \
+    probe-stopped probe-timeout probe-interrupt name-collision cleanup-failure \
+    cleanup-timeout rootful \
     attended detached queue doctor; do
     run_case "$requested_case"
   done

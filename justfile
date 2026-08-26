@@ -182,23 +182,73 @@ isolation_runtime_failure() {
 
 runsc_runtime_probe() (
   set -euo pipefail
-  local image="$1" probe_name="review-runtime-probe-$$" probe_status=0 probe_evidence
+  local image="$1" runtime_root="${XDG_RUNTIME_DIR:-/tmp}"
+  local probe_dir probe_name probe_token cidfile probe_id= probe_status=0
+  local probe_evidence probe_owner cleanup_status=0
+  probe_dir="$(mktemp -d "${runtime_root%/}/review-runtime-probe-XXXXXX")"
+  probe_name="$(basename "$probe_dir")"
+  probe_token="${probe_name#review-runtime-probe-}"
+  cidfile="$probe_dir/cid"
+
   cleanup_runtime_probe() {
-    timeout 5s podman rm --force "$probe_name" >/dev/null 2>&1 || true
+    local owned_probe= exists_status=0 verification_status=0
+    if [[ -s "$cidfile" ]]; then
+      probe_id="$(cat "$cidfile")"
+      timeout --kill-after=2s 5s podman container exists "$probe_id" || exists_status=$?
+      if [[ "$exists_status" -eq 0 ]]; then
+        owned_probe="$(
+          timeout --kill-after=2s 5s podman inspect \
+            --format '{{index .Config.Labels "review.probe"}}' "$probe_id"
+        )" || cleanup_status=70
+        if [[ "$owned_probe" != "$probe_token" ]]; then
+          cleanup_status=70
+        elif ! timeout --kill-after=2s 5s podman rm --force "$probe_id" >/dev/null; then
+          cleanup_status=70
+        else
+          timeout --kill-after=2s 5s podman container exists "$probe_id" ||
+            verification_status=$?
+          [[ "$verification_status" -eq 1 ]] || cleanup_status=70
+        fi
+      elif [[ "$exists_status" -ne 1 ]]; then
+        cleanup_status=70
+      fi
+    fi
+    rm -f "$cidfile"
+    rmdir "$probe_dir" 2>/dev/null || cleanup_status=70
+    return "$cleanup_status"
   }
-  trap 'probe_status=$?; trap - EXIT; cleanup_runtime_probe; exit "$probe_status"' EXIT
+  finish_runtime_probe() {
+    local original_status=$?
+    trap - EXIT HUP INT TERM
+    cleanup_runtime_probe || cleanup_status=$?
+    if [[ "$cleanup_status" -ne 0 ]]; then
+      echo 'runsc probe cleanup failed; the diagnostic may still exist.' >&2
+      exit "$cleanup_status"
+    fi
+    exit "$original_status"
+  }
+  trap finish_runtime_probe EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  timeout 20s podman --runtime=runsc run --detach --name "$probe_name" \
+  timeout --kill-after=2s 20s podman --runtime=runsc run --rm --detach \
+    --name "$probe_name" --cidfile "$cidfile" --label "review.probe=$probe_token" \
     --network=none --pull=never --entrypoint /usr/bin/sleep "$image" 30 \
     >/dev/null || probe_status=$?
   [[ "$probe_status" -eq 0 ]] || return "$probe_status"
+  [[ -s "$cidfile" ]] || return 70
+  probe_id="$(cat "$cidfile")"
   probe_evidence="$(
-    timeout 5s podman inspect --format '{{.State.Running}} {{.OCIRuntime}}' "$probe_name"
+    timeout --kill-after=2s 5s podman inspect \
+      --format '{{.State.Running}} {{.OCIRuntime}}' "$probe_id"
   )" || probe_status=$?
   [[ "$probe_status" -eq 0 ]] || return "$probe_status"
-  printf '%s\n' "$probe_evidence"
+  probe_owner="$(
+    timeout --kill-after=2s 5s podman inspect \
+      --format '{{index .Config.Labels "review.probe"}}' "$probe_id"
+  )" || probe_status=$?
+  [[ "$probe_status" -eq 0 ]] || return "$probe_status"
+  printf '%s %s\n' "$probe_evidence" "$probe_owner"
 )
 
 require_runsc_host() {
@@ -221,7 +271,7 @@ require_runsc_host() {
 }
 
 require_runsc_runtime() {
-  local image="$1" probe_status=0 probe_evidence running probe_runtime
+  local image="$1" probe_status=0 probe_evidence running probe_runtime probe_owner
   probe_evidence="$(runsc_runtime_probe "$image")" || probe_status=$?
   if [[ "$probe_status" -ne 0 ]]; then
     if [[ "$probe_status" -eq 125 ]]; then
@@ -234,7 +284,7 @@ require_runsc_runtime() {
     return
   fi
 
-  read -r running probe_runtime <<<"$probe_evidence"
+  read -r running probe_runtime probe_owner <<<"$probe_evidence"
   if [[ "$running" != true ]]; then
     isolation_runtime_failure 'installed but unusable' \
       'The disposable runsc probe was not running during runtime inspection.'
@@ -243,6 +293,11 @@ require_runsc_runtime() {
   if [[ "$probe_runtime" != runsc ]]; then
     isolation_runtime_failure 'incompatible with this host/Podman configuration' \
       "Podman reported the probe runtime as ${probe_runtime:-unknown}, not runsc."
+    return
+  fi
+  if [[ -z "$probe_owner" ]]; then
+    isolation_runtime_failure 'incompatible with this host/Podman configuration' \
+      'Podman did not preserve the probe ownership label.'
     return
   fi
 }

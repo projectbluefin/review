@@ -229,11 +229,15 @@ result as ready, missing, installed but unusable, or incompatible with the
 current host/Podman configuration. The probe uses the already-resolved Review
 image with no network, mounts, or inherited credentials and verifies runtime
 identity while the uniquely named probe is active, then removes it through a
-bounded cleanup trap on success, failure, interruption, or timeout. A
-successful launch prints `isolation runtime: gVisor/runsc`; that line is a
-launcher receipt, while native acceptance still inspects the real running
-container. Build, audit, and unrelated utility containers do not execute
-agent-controlled work and do not use this launch policy.
+bounded cleanup trap on success, failure, interruption, or timeout. The probe
+uses an unpredictable name, `--rm`, a private cidfile, and an ownership label;
+cleanup verifies the label and removes only that exact container ID. Every
+probe operation has bounded TERM-to-KILL escalation, and cleanup failure fails
+the proof instead of printing a false removal receipt. A successful launch
+prints `isolation runtime: gVisor/runsc`; that line is a launcher receipt,
+while native acceptance still inspects the real running container. Build,
+audit, and unrelated utility containers do not execute agent-controlled work
+and do not use this launch policy.
 
 Rootless Podman maps the host user to container **root**, not to the container
 user of the same uid. A mounted host file keeps its mode, so Hive's
@@ -312,8 +316,9 @@ bash tests/just-onboarding.sh
 git diff --check
 ```
 
-The recipe list must contain only the four public commands. Doctor must not
-start a container.
+The recipe list must contain only the four public commands. Doctor may start
+only its disposable probe and agent-free image check; it must not start an
+agent or any persistent or credential-bearing container.
 
 ## Sources
 
