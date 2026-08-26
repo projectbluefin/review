@@ -304,6 +304,34 @@ def gh(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
     )
 
 
+def compare_hunk_regions(repository: str, old_head: str, new_head: str) -> tuple[tuple[Region, ...], bool, bool]:
+    """Read-only GitHub compare; return bounded patch regions and failure flags."""
+    if not (re.fullmatch(r"[0-9a-f]{40}", old_head) and re.fullmatch(r"[0-9a-f]{40}", new_head)):
+        return (), True, False
+    try:
+        response = gh("api", f"repos/{repository}/compare/{old_head}...{new_head}", timeout=30)
+        payload = json.loads(response.stdout) if response.returncode == 0 else {}
+        files = payload.get("files") if isinstance(payload, dict) else None
+        if not isinstance(files, list) or len(files) > 128:
+            return (), True, response.returncode == 0
+        regions: list[Region] = []
+        for item in files:
+            if not isinstance(item, dict) or not isinstance(item.get("filename"), str):
+                return (), True, True
+            patch = item.get("patch", "")
+            if not isinstance(patch, str):
+                return (), True, True
+            for match in re.finditer(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", patch):
+                start = int(match.group(1)); count = int(match.group(2) or 1)
+                if count:
+                    regions.append(Region(item["filename"], start, start + count - 1))
+                if len(regions) >= 512:
+                    return tuple(regions), True, True
+        return tuple(regions), False, True
+    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, json.JSONDecodeError):
+        return (), True, False
+
+
 def bounded_detail(detail: str) -> str:
     detail = re.sub(r"[\x00-\x1f\x7f]+", " ", str(detail))
     return " ".join(detail.split())[:240]
@@ -1456,6 +1484,9 @@ class ReviewScreen(Screen):
         self.live_snapshot = copy.deepcopy(stop.live)
         self.overlap_snapshot = copy.deepcopy(stop.overlap)
         self.prior_result = copy.deepcopy(stop.review_result)
+        self.compare_regions: tuple[Region, ...] = ()
+        self.compare_uncertain = False
+        self.compare_available = True
 
     def compose(self) -> ComposeResult:
         stop = self.stop_record
@@ -1481,6 +1512,12 @@ class ReviewScreen(Screen):
     @work(thread=True)
     def run_review(self) -> None:
         stop = self.stop_record
+        prior_head = str((self.prior_result.provenance if self.prior_result else {}).get("head_sha") or "")
+        current_head = str(self.live_snapshot.get("headRefOid") or "")
+        if self.prior_result is not None and prior_head and prior_head != current_head:
+            self.compare_regions, self.compare_uncertain, self.compare_available = compare_hunk_regions(
+                stop.repository, prior_head, current_head
+            )
         if ACTIVE_BACKEND == "codex":
             base_sha = str(self.live_snapshot.get("baseRefOid") or "")
             head_sha = str(self.live_snapshot.get("headRefOid") or "")
@@ -1757,7 +1794,7 @@ class ReviewScreen(Screen):
             if not isinstance(item, dict): return None
             try: return Region(str(item["path"]), int(item["start_line"]), int(item.get("end_line", item["start_line"])))
             except (KeyError, TypeError, ValueError): return None
-        regions = tuple(Region(str(f["file"]), int(f["line"]), int(f.get("end_line", f["line"]))) for f in result.findings if isinstance(f, dict) and f.get("file") and isinstance(f.get("line"), int))
+        regions = self.compare_regions
         prior_findings = tuple(PriorFinding(f"{f.get('file')}:{f.get('line')}", FindingEvidence(str(f["file"]), int(f["line"]), int(f.get("end_line", f["line"])))) for f in prior.findings if isinstance(f, dict) and f.get("file") and isinstance(f.get("line"), int))
         ev = tuple(FindingEvidence(str(f["file"]), int(f["line"]), int(f.get("end_line", f["line"]))) for f in result.findings if isinstance(f, dict) and f.get("file") and isinstance(f.get("line"), int))
         prior_ids = {f.finding_id for f in prior_findings}
@@ -1765,7 +1802,7 @@ class ReviewScreen(Screen):
         try:
             request = ReviewRequest(*self.stop_record.repository.split("/", 1), self.stop_record.number, base, current, "maintainer", "review", generated_at="dashboard")
             delta = classify_head_delta(DeltaInput(reviewed, current, historical_base, base, ReviewEvidenceManifest(request), regions, prior_findings, ev, new,
-                False, False, prior.state in {"complete", "findings"}, False, True))
+                self.compare_uncertain, False, prior.state in {"complete", "findings"}, False, self.compare_available))
         except (TypeError, ValueError, KeyError):
             return []
         lines = ["", "RE-REVIEW  exact-head delta", f"reviewed {reviewed}  current {current}"]
