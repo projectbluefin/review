@@ -1455,6 +1455,7 @@ class ReviewScreen(Screen):
         # transcript (#339).
         self.live_snapshot = copy.deepcopy(stop.live)
         self.overlap_snapshot = copy.deepcopy(stop.overlap)
+        self.prior_result = copy.deepcopy(stop.review_result)
 
     def compose(self) -> ComposeResult:
         stop = self.stop_record
@@ -1599,6 +1600,8 @@ class ReviewScreen(Screen):
                 overlap=self.overlap_snapshot,
                 live=live_context,
             )
+        result.provenance.setdefault("base_sha", str(self.live_snapshot.get("baseRefOid") or ""))
+        result.provenance.setdefault("head_sha", str(self.live_snapshot.get("headRefOid") or ""))
         if ACTIVE_BACKEND == "codex" and len(str(self.live_snapshot.get("baseRefOid") or "")) == 40 and len(str(self.live_snapshot.get("headRefOid") or "")) == 40:
             request = ReviewRequest(
                 *stop.repository.split("/", 1), stop.number,
@@ -1743,28 +1746,25 @@ class ReviewScreen(Screen):
                 not re.fullmatch(r"[0-9a-f]{40}", current) or reviewed == current or
                 not re.fullmatch(r"[0-9a-f]{40}", base)):
             return []
-        raw = result.provenance.get("re_review")
-        if not isinstance(raw, dict):
-            raw = {}
-        historical_base = str(raw.get("reviewed_merge_base_sha") or "")
+        prior = self.prior_result
+        if prior is None:
+            return []
+        raw = prior.provenance if isinstance(prior.provenance, dict) else {}
+        historical_base = str(raw.get("base_sha") or "")
         if not re.fullmatch(r"[0-9a-f]{40}", historical_base):
             return ["", "RE-REVIEW  FULL REVIEW REQUIRED — historical H0 merge base unavailable."]
         def region(item: object) -> Region | None:
             if not isinstance(item, dict): return None
             try: return Region(str(item["path"]), int(item["start_line"]), int(item.get("end_line", item["start_line"])))
             except (KeyError, TypeError, ValueError): return None
-        regions = tuple(x for item in raw.get("changed_regions", []) if (x := region(item)) is not None)
-        evidence = tuple(x for item in raw.get("evidence", []) if (x := region(item)) is not None)
-        prior = tuple(PriorFinding(f"{f.get('file')}:{f.get('line')}", FindingEvidence(str(f["file"]), int(f["line"]), int(f.get("end_line", f["line"]))))
-                     for f in result.findings if isinstance(f, dict) and f.get("file") and isinstance(f.get("line"), int))
-        ev = tuple(FindingEvidence(x.path, x.start_line, x.end_line, bool(raw.get("stale_evidence"))) for x in evidence)
-        new = tuple(H1Evidence(str(x["finding_id"]), str(x["path"]), int(x["line"])) for x in raw.get("newly_supported", []) if isinstance(x, dict) and x.get("finding_id") and x.get("path") and isinstance(x.get("line"), int))
+        regions = ()
+        prior_findings = tuple(PriorFinding(f"{f.get('file')}:{f.get('line')}", FindingEvidence(str(f["file"]), int(f["line"]), int(f.get("end_line", f["line"])))) for f in prior.findings if isinstance(f, dict) and f.get("file") and isinstance(f.get("line"), int))
+        ev = tuple(FindingEvidence(str(f["file"]), int(f["line"]), int(f.get("end_line", f["line"]))) for f in result.findings if isinstance(f, dict) and f.get("file") and isinstance(f.get("line"), int))
+        new = ()
         try:
             request = ReviewRequest(*self.stop_record.repository.split("/", 1), self.stop_record.number, base, current, "maintainer", "review", generated_at="dashboard")
-            delta = classify_head_delta(DeltaInput(reviewed, current, historical_base, base, ReviewEvidenceManifest(request), regions, prior, ev, new,
-                bool(raw.get("mapping_uncertain")), bool(raw.get("sensitive_surfaces_changed")),
-                bool(raw.get("prior_review_complete", True)), bool(raw.get("bounded_risk_exceeded")),
-                bool(raw.get("capability_available", True))))
+            delta = classify_head_delta(DeltaInput(reviewed, current, historical_base, base, ReviewEvidenceManifest(request), regions, prior_findings, ev, new,
+                False, False, prior.state in {"complete", "findings"}, False, True))
         except (TypeError, ValueError, KeyError):
             return []
         lines = ["", "RE-REVIEW  exact-head delta", f"reviewed {reviewed}  current {current}"]

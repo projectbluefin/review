@@ -789,6 +789,12 @@ async def main() -> int:
                 ],
             }
             app.stops[0].overlap = {"duplicates": [44], "overlaps": [45, 46]}
+            if re_review is not None:
+                app.stops[0].review_result = tui.ReviewResult(
+                    1, "findings", {"critical": 0, "high": 1, "medium": 0, "low": 0},
+                    [{"severity": "high", "file": "image/entrypoint.sh", "line": 87, "title": "old"}],
+                    provenance={"head_sha": reviewed_head, "base_sha": "fedcba9876543210fedcba9876543210fedcba98"},
+                )
             root_screen = app.screen
             original_adapter = tui.adapt_current_engine
             if reviewed_head:
