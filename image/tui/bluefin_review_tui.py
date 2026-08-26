@@ -56,7 +56,9 @@ from harness.goose import GooseHarness
 from harness.autopilot import (HarnessOption, Preference, can_remember,
                                choose_option, discover_all, load_preferences,
                                remember_success)
-from review_evidence_manifest import ReviewRequest
+from review_evidence_manifest import ReviewRequest, ReviewEvidenceManifest
+from re_review import (DeltaInput, FindingEvidence, H1Evidence, PriorFinding,
+                       Region, classify_head_delta)
 from harness.registry import Availability, DraftRequest, DraftState, HarnessRegistry
 
 QUEUE_URL = os.environ.get(
@@ -1637,6 +1639,8 @@ class ReviewScreen(Screen):
             state = f"FAILED (exit {code}) — the review did not run. Nothing was submitted."
         stop.review_result = result
 
+        delta_card = self._re_review_card(result)
+
         status = self.query_one("#review-status", Static)
         status.remove_class("running")
         status.add_class(outcome)
@@ -1665,6 +1669,8 @@ class ReviewScreen(Screen):
                 for key in ("critical", "high", "medium", "low")
             ),
         ]
+        if delta_card:
+            lines.extend(delta_card)
         for finding in card.findings[:5]:
             lines.append(
                 f"{finding.severity.upper()}  "
@@ -1727,6 +1733,42 @@ class ReviewScreen(Screen):
                 "seconds": elapsed,
             }
         )
+
+    def _re_review_card(self, result: ReviewResult) -> list[str]:
+        """Project explicit exact-head delta evidence into bounded card lines."""
+        reviewed = str(result.provenance.get("head_sha") or "")
+        current = str(self.live_snapshot.get("headRefOid") or "")
+        base = str(self.live_snapshot.get("baseRefOid") or "")
+        if (not re.fullmatch(r"[0-9a-f]{40}", reviewed) or
+                not re.fullmatch(r"[0-9a-f]{40}", current) or reviewed == current or
+                not re.fullmatch(r"[0-9a-f]{40}", base)):
+            return []
+        raw = self.live_snapshot.get("re_review")
+        if not isinstance(raw, dict):
+            return []
+        def region(item: object) -> Region | None:
+            if not isinstance(item, dict): return None
+            try: return Region(str(item["path"]), int(item["start_line"]), int(item.get("end_line", item["start_line"])))
+            except (KeyError, TypeError, ValueError): return None
+        regions = tuple(x for item in raw.get("changed_regions", []) if (x := region(item)) is not None)
+        evidence = tuple(x for item in raw.get("evidence", []) if (x := region(item)) is not None)
+        prior = tuple(PriorFinding(f"{f.get('file')}:{f.get('line')}", FindingEvidence(str(f["file"]), int(f["line"]), int(f.get("end_line", f["line"]))))
+                     for f in result.findings if isinstance(f, dict) and f.get("file") and isinstance(f.get("line"), int))
+        ev = tuple(FindingEvidence(x.path, x.start_line, x.end_line, bool(raw.get("stale_evidence"))) for x in evidence)
+        new = tuple(H1Evidence(str(x["finding_id"]), str(x["path"]), int(x["line"])) for x in raw.get("newly_supported", []) if isinstance(x, dict) and x.get("finding_id") and x.get("path") and isinstance(x.get("line"), int))
+        try:
+            request = ReviewRequest(*self.stop_record.repository.split("/", 1), self.stop_record.number, base, current, "maintainer", "review", generated_at="dashboard")
+            delta = classify_head_delta(DeltaInput(reviewed, current, base, base, ReviewEvidenceManifest(request), regions, prior, ev, new,
+                bool(raw.get("mapping_uncertain")), bool(raw.get("sensitive_surfaces_changed"))))
+        except (TypeError, ValueError, KeyError):
+            return []
+        lines = ["", "RE-REVIEW  exact-head delta", f"reviewed {reviewed}  current {current}"]
+        lines.append("dispositions  " + ", ".join(f"{x.finding_id}={x.disposition.value}" for x in delta.findings[:12]) if delta.findings else "dispositions  none")
+        if delta.newly_supported: lines.append("new H1 evidence  " + ", ".join(f"{x.finding_id} ({x.path}:{x.line})" for x in delta.newly_supported[:8]))
+        lines.append("No authority carried from H0.")
+        if delta.full_review_required:
+            lines.append("FULL REVIEW REQUIRED — " + ", ".join(x.value for x in delta.fallback_reasons) + ".")
+        return lines
 
     def action_stop(self) -> None:
         # Signal the whole process group, and mean it. A review that ignores

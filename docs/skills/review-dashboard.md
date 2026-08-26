@@ -445,6 +445,17 @@ mutates GitHub.
 
 ## Red Flags
 
+## Exact-head re-review
+
+When a completed result is bound to an older full H0 while the point-in-time
+live snapshot contains a different full H1, the decision card appends a
+bounded, read-only delta: both identities, each prior finding disposition,
+newly supported H1 evidence, and an explicit statement that H0 authority is
+not carried forward. Uncertain mappings or sensitive-surface changes show the
+concrete fallback reasons and direct the maintainer to a full review. Missing
+or malformed delta inputs fail closed and do not alter ordinary same-head
+review cards or any action gate.
+
 - `then=lambda: self.mutate(...)` — a chained gate; the contract fails on it.
 - Interpolating any GitHub- or agent-sourced text into markup without
   `escape()`. An agent-reported JSONL state is attacker-shaped text too:

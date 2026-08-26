@@ -766,6 +766,7 @@ async def main() -> int:
         *,
         head_sha: str = "0123456789abcdef0123456789abcdef01234567",
         reviewed_head: str = "",
+        re_review: dict | None = None,
     ):
         review_stub(exit_code, output)
         app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
@@ -788,6 +789,8 @@ async def main() -> int:
                 ],
             }
             app.stops[0].overlap = {"duplicates": [44], "overlaps": [45, 46]}
+            if re_review is not None:
+                app.stops[0].live["re_review"] = re_review
             root_screen = app.screen
             original_adapter = tui.adapt_current_engine
             if reviewed_head:
@@ -3751,6 +3754,29 @@ async def main() -> int:
         "next action  Rerun the review on the current head." in card,
         f"a stale review must direct a rerun, got {card!r}",
     )
+
+    text, classes, card = await run_review(
+        0, findings_output, reviewed_head="a" * 40,
+        re_review={
+            "changed_regions": [{"path": "image/entrypoint.sh", "start_line": 80, "end_line": 90}],
+            "evidence": [{"path": "image/entrypoint.sh", "start_line": 87, "end_line": 87}],
+            "newly_supported": [{"finding_id": "new-proof", "path": "new.py", "line": 3}],
+        },
+    )
+    check("RE-REVIEW" in card and "reviewed aaaaaaaa" in card and "current 01234567" in card,
+          "stale exact-head review must name both H0 and H1 identities")
+    check("changed-region" in card and "invalidated-unmappable" in card,
+          "re-review card must show bounded finding dispositions")
+    check("new-proof" in card and "No authority carried" in card,
+          "re-review card must show new H1 evidence without carrying authority")
+
+    text, classes, card = await run_review(
+        0, findings_output, reviewed_head="a" * 40,
+        re_review={"mapping_uncertain": True, "sensitive_surfaces_changed": True},
+    )
+    check("FULL REVIEW REQUIRED" in card and "mapping-uncertain" in card and "sensitive-surface-changed" in card,
+          "uncertain or sensitive H1 delta must state concrete full-review reasons")
+    check("full review" in card.lower(), "fallback must direct the maintainer to a full review")
 
     # ── the regression that started this: a review whose checks returned no
     # verdict must never read as clean ───────────────────────────────────
