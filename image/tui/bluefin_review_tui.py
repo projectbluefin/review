@@ -1743,9 +1743,12 @@ class ReviewScreen(Screen):
                 not re.fullmatch(r"[0-9a-f]{40}", current) or reviewed == current or
                 not re.fullmatch(r"[0-9a-f]{40}", base)):
             return []
-        raw = self.live_snapshot.get("re_review")
+        raw = result.provenance.get("re_review")
         if not isinstance(raw, dict):
-            return []
+            raw = {}
+        historical_base = str(raw.get("reviewed_merge_base_sha") or "")
+        if not re.fullmatch(r"[0-9a-f]{40}", historical_base):
+            return ["", "RE-REVIEW  FULL REVIEW REQUIRED — historical H0 merge base unavailable."]
         def region(item: object) -> Region | None:
             if not isinstance(item, dict): return None
             try: return Region(str(item["path"]), int(item["start_line"]), int(item.get("end_line", item["start_line"])))
@@ -1758,8 +1761,10 @@ class ReviewScreen(Screen):
         new = tuple(H1Evidence(str(x["finding_id"]), str(x["path"]), int(x["line"])) for x in raw.get("newly_supported", []) if isinstance(x, dict) and x.get("finding_id") and x.get("path") and isinstance(x.get("line"), int))
         try:
             request = ReviewRequest(*self.stop_record.repository.split("/", 1), self.stop_record.number, base, current, "maintainer", "review", generated_at="dashboard")
-            delta = classify_head_delta(DeltaInput(reviewed, current, base, base, ReviewEvidenceManifest(request), regions, prior, ev, new,
-                bool(raw.get("mapping_uncertain")), bool(raw.get("sensitive_surfaces_changed"))))
+            delta = classify_head_delta(DeltaInput(reviewed, current, historical_base, base, ReviewEvidenceManifest(request), regions, prior, ev, new,
+                bool(raw.get("mapping_uncertain")), bool(raw.get("sensitive_surfaces_changed")),
+                bool(raw.get("prior_review_complete", True)), bool(raw.get("bounded_risk_exceeded")),
+                bool(raw.get("capability_available", True))))
         except (TypeError, ValueError, KeyError):
             return []
         lines = ["", "RE-REVIEW  exact-head delta", f"reviewed {reviewed}  current {current}"]

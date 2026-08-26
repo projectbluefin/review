@@ -789,14 +789,14 @@ async def main() -> int:
                 ],
             }
             app.stops[0].overlap = {"duplicates": [44], "overlaps": [45, 46]}
-            if re_review is not None:
-                app.stops[0].live["re_review"] = re_review
             root_screen = app.screen
             original_adapter = tui.adapt_current_engine
             if reviewed_head:
                 def stale_adapter(*args, **kwargs):
                     result = original_adapter(*args, **kwargs)
                     result.provenance["head_sha"] = reviewed_head
+                    if re_review is not None:
+                        result.provenance["re_review"] = re_review
                     return result
                 tui.adapt_current_engine = stale_adapter
             await pilot.press("r")
@@ -3758,6 +3758,7 @@ async def main() -> int:
     text, classes, card = await run_review(
         0, findings_output, reviewed_head="a" * 40,
         re_review={
+            "reviewed_merge_base_sha": "fedcba9876543210fedcba9876543210fedcba98",
             "changed_regions": [{"path": "image/entrypoint.sh", "start_line": 80, "end_line": 90}],
             "evidence": [{"path": "image/entrypoint.sh", "start_line": 87, "end_line": 87}],
             "newly_supported": [{"finding_id": "new-proof", "path": "new.py", "line": 3}],
