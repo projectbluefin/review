@@ -445,6 +445,16 @@ mutates GitHub.
 
 ## Red Flags
 
+- `then=lambda: self.mutate(...)` — a chained gate; the contract fails on it.
+- Interpolating any GitHub- or agent-sourced text into markup without
+  `escape()`. An agent-reported JSONL state is attacker-shaped text too:
+  unescaped, `waiting[/][blink]OWNED` raised `MarkupError` in
+  `rows.update()` and took the whole batch-queue screen down.
+- `self.query_one(...)` evaluated inside an `@work(thread=True)` body.
+- A new mutating verb passed to the read-only `gh()` helper.
+- A default view that filters the queue without saying so.
+- A feature added with only a `tests/dashboard-contract.sh` grep behind it.
+
 ## Exact-head re-review
 
 When a completed result is bound to an older full H0 while the point-in-time
@@ -458,16 +468,6 @@ Uncertain mappings, merge-base changes, sensitive workflow changes, incomplete
 H0, and unavailable capability show their concrete fallback reasons and direct
 the maintainer to a full review. Missing or malformed delta inputs fail closed
 and do not alter ordinary same-head review cards or any action gate.
-
-- `then=lambda: self.mutate(...)` — a chained gate; the contract fails on it.
-- Interpolating any GitHub- or agent-sourced text into markup without
-  `escape()`. An agent-reported JSONL state is attacker-shaped text too:
-  unescaped, `waiting[/][blink]OWNED` raised `MarkupError` in
-  `rows.update()` and took the whole batch-queue screen down.
-- `self.query_one(...)` evaluated inside an `@work(thread=True)` body.
-- A new mutating verb passed to the read-only `gh()` helper.
-- A default view that filters the queue without saying so.
-- A feature added with only a `tests/dashboard-contract.sh` grep behind it.
 
 ## Verification
 
