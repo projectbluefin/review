@@ -333,9 +333,14 @@ def compare_hunk_regions(repository: str, old_head: str, new_head: str) -> Compa
         payload = json.loads(response.stdout)
         files = payload.get("files") if isinstance(payload, dict) else None
         total_files = payload.get("total_files") if isinstance(payload, dict) else None
-        if (not isinstance(files, list) or
-                (isinstance(total_files, int) and total_files > len(files)) or
+        if (not isinstance(files, list) or type(total_files) is not int or
+                total_files < 0 or total_files < len(files) or
                 len(files) > MAX_RE_REVIEW_FILES):
+            return CompareEvidence(
+                mapping_uncertain=True,
+                bounded_risk_exceeded=len(files) > MAX_RE_REVIEW_FILES if isinstance(files, list) else False,
+            )
+        if total_files > len(files):
             return CompareEvidence(
                 mapping_uncertain=True,
                 bounded_risk_exceeded=True,
@@ -352,7 +357,9 @@ def compare_hunk_regions(repository: str, old_head: str, new_head: str) -> Compa
             if not isinstance(patch, str):
                 uncertain = True
                 continue
+            hunk_found = False
             for match in re.finditer(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", patch):
+                hunk_found = True
                 start = int(match.group(1)); count = int(match.group(2) or 1)
                 if count:
                     regions.append(Region(filename, start, start + count - 1))
@@ -360,6 +367,8 @@ def compare_hunk_regions(repository: str, old_head: str, new_head: str) -> Compa
                     return CompareEvidence(
                         tuple(regions), True, sensitive, True,
                     )
+            if not hunk_found:
+                uncertain = True
         return CompareEvidence(tuple(regions), uncertain, sensitive)
     except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, json.JSONDecodeError):
         return CompareEvidence(mapping_uncertain=True, capability_available=False)

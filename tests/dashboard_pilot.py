@@ -3848,6 +3848,55 @@ async def main() -> int:
         "the real re-review Pilot must render attacker-shaped evidence literally",
     )
 
+    # GitHub compare responses must carry a trustworthy file count. Malformed
+    # types, negative values, and counts inconsistent with the returned page
+    # cannot support H0 mapping and must fall back to a full review.
+    for label, malformed_compare in (
+        ("a string total_files", {"total_files": "1", "files": []}),
+        ("a negative total_files", {"total_files": -1, "files": []}),
+        ("a smaller total_files", {
+            "total_files": 0,
+            "files": [{"filename": "image/entrypoint.sh", "patch": "@@ -80 +80 @@"}],
+        }),
+    ):
+        _text, _classes, malformed_card = await run_review(
+            0, re_review_output, prior_result=prior,
+            compare_json=json.dumps(malformed_compare),
+        )
+        check(
+            "FULL REVIEW REQUIRED" in malformed_card
+            and "mapping-uncertain" in malformed_card,
+            f"{label} must fail closed to full review: {malformed_card!r}",
+        )
+
+    # A file entry with a textual patch but no unified-diff hunk is partial
+    # evidence, just like an omitted patch; it cannot prove unchanged H0.
+    _text, _classes, no_hunk_card = await run_review(
+        0, re_review_output, prior_result=prior,
+        compare_json=json.dumps({
+            "total_files": 1,
+            "files": [{"filename": "image/entrypoint.sh", "patch": "partial file evidence"}],
+        }),
+    )
+    check(
+        "FULL REVIEW REQUIRED" in no_hunk_card
+        and "mapping-uncertain" in no_hunk_card,
+        f"a no-hunk partial file entry must fail closed: {no_hunk_card!r}",
+    )
+
+    _text, _classes, omitted_patch_card = await run_review(
+        0, re_review_output, prior_result=prior,
+        compare_json=json.dumps({
+            "total_files": 1,
+            "files": [{"filename": "image/entrypoint.sh"}],
+        }),
+    )
+    check(
+        "FULL REVIEW REQUIRED" in omitted_patch_card
+        and "mapping-uncertain" in omitted_patch_card,
+        f"an omitted patch must fail closed: {omitted_patch_card!r}",
+    )
+
     stale_prior = tui.ReviewResult(
         1, "findings", {"critical": 0, "high": 1, "medium": 0, "low": 0},
         [{"severity": "high", "file": "stale.py", "line": 7, "title": "H0 stale"}],
@@ -4294,9 +4343,11 @@ async def main() -> int:
     outcomes = [r["outcome"] for r in records if r.get("action") == "review"]
     check(
         outcomes == [
-            "complete", "complete", "incomplete", "stale", "complete", "complete", "incomplete",
+            "complete", "complete", "incomplete", "stale", "complete",
             "complete", "complete", "complete", "complete", "complete", "complete",
-            "complete", "incomplete", "failed", "complete", "incomplete", "complete", "stopped", "stopped",
+            "incomplete",
+            "complete", "complete", "complete", "complete", "complete", "complete", "complete",
+            "incomplete", "failed", "complete", "incomplete", "complete", "stopped", "stopped",
             "complete", "error",
         ],
         f"every review must be traced with its outcome, got {outcomes}",
