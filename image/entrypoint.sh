@@ -166,10 +166,8 @@ if [ -d "$skills_root" ]; then
   note "${#skills[@]} org skills available (load one with /<skill-name>)"
 fi
 
-# Contributor work is usually lint-gated, and the base ships no linter and no
-# package manager to obtain one (fsdk-containers#89). Naming them at startup
-# stops an agent from discovering it mid-task and reaching for a slow ad-hoc
-# `npx --yes` download.
+# Contributor work is usually lint-gated. Name any unavailable validation
+# tools at startup so an agent does not discover the gap mid-task.
 validation_tools=(bats shellcheck hadolint systemd-analyze pre-commit just podman actionlint)
 missing_validation_tools=()
 for validation_tool in "${validation_tools[@]}"; do

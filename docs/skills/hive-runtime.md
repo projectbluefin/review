@@ -1,7 +1,7 @@
 ---
 name: hive-runtime
-version: "2.2"
-last_updated: 2026-08-14
+version: "2.3"
+last_updated: 2026-08-25
 id: hive-runtime
 one_line_purpose: Operate inside Hive's tmux, token, and cooldown constraints.
 entry_point: docs/skills/hive-runtime.md
@@ -18,8 +18,8 @@ metadata:
 
 # Hive Runtime
 
-> The published image currently contains no Hive runtime; these procedures
-> apply after the restoration tracked in review#346.
+> The published image contains the pinned Hive contributor runtime. These
+> procedures describe its handoff from the review launcher.
 
 ## When to Use
 
@@ -39,7 +39,7 @@ credential handling ([`launcher.md`](launcher.md)).
 |---|---|
 | "A local shim will unblock this now." | It outlives the gap it was written for and shadows the real tool once upstream lands the fix. Report it and wait. |
 | "Upstream is slow; we can patch our copy." | A patched copy of a pinned upstream file silently diverges at the next bump, and nothing fails to say so. |
-| "The pin is close enough to upstream." | Hive compatibility is part of runtime restoration tracked in review#346; do not add Hive files to the direct-copy image. |
+| "The pin is close enough to upstream." | The image consumes three pinned Hive runtime files; verify their compatibility together and do not add a downstream protocol implementation. |
 
 ## Core Process
 

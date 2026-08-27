@@ -12,7 +12,7 @@
 # was never once offered an update and silently froze. A pin no tool can track
 # is not a stricter pin, it is a stale one. The reference below is the only
 # source of truth for which base this is; do not restate its value here.
-ARG FSDK_RUNNER_IMAGE=ghcr.io/projectbluefin/lab-runner:25.08@sha256:7c4b1e518bd1bffe2e506474e6196e9c18fb727bbd48a3c5f7ddbd3446ea5846
+ARG FSDK_RUNNER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:b0ad156e813b6197c8b8105403c259ec01c190d9c4367f188e6aef3754313b4c
 # Kept equal to justfile's hive_commit: host setup and the
 # image runtime use the same contributor relay protocol revision.
 ARG HIVE_COMMIT=8ac1994a4994ec3454f83c2ed5a989abd430e1af
@@ -64,9 +64,6 @@ ENV HIVE_CONTRIBUTOR_MODE=true
 #
 # Every archive is checksum-verified with sha256sum BEFORE it is opened, and
 # unpacked by the base's own GNU tar 1.35 -- not by a hand-rolled extractor.
-#
-# The `-I 'python3 -m gzip'` filter supplies the one codec this base lacks;
-# tar keeps every archive semantic. Delete it when fsdk-containers#87 lands.
 #
 # GNU tar is what blocks path traversal and tar bombs here: without
 # `-P`/`--absolute-names` it strips leading `/` and refuses any member
@@ -122,26 +119,26 @@ RUN set -eu; \
       "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${gh_arch}.tar.gz" \
       -o "$workdir/gh.tar.gz"; \
     printf '%s  %s\n' "$gh_sha" "$workdir/gh.tar.gz" | sha256sum -c -; \
-    tar -I 'python3 -m gzip' -xOf "$workdir/gh.tar.gz" --wildcards --occurrence=1 '*/bin/gh' > /usr/local/bin/gh; \
+    tar -xzOf "$workdir/gh.tar.gz" --wildcards --occurrence=1 '*/bin/gh' > /usr/local/bin/gh; \
     chmod 0755 /usr/local/bin/gh; \
     curl --fail --location --show-error --silent \
       "https://github.com/tmux/tmux-builds/releases/download/v${TMUX_VERSION}/tmux-${TMUX_VERSION}-linux-${tmux_arch}.tar.gz" \
       -o "$workdir/tmux.tar.gz"; \
     printf '%s  %s\n' "$tmux_sha" "$workdir/tmux.tar.gz" | sha256sum -c -; \
-    tar -I 'python3 -m gzip' -xOf "$workdir/tmux.tar.gz" --occurrence=1 tmux > /usr/local/bin/tmux; \
+    tar -xzOf "$workdir/tmux.tar.gz" --occurrence=1 tmux > /usr/local/bin/tmux; \
     chmod 0755 /usr/local/bin/tmux; \
     curl --fail --location --show-error --silent \
       "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${codex_arch}-unknown-linux-musl.tar.gz" \
       -o "$workdir/codex.tar.gz"; \
     printf '%s  %s\n' "$codex_sha" "$workdir/codex.tar.gz" | sha256sum -c -; \
-    tar -I 'python3 -m gzip' -xOf "$workdir/codex.tar.gz" --occurrence=1 \
+    tar -xzOf "$workdir/codex.tar.gz" --occurrence=1 \
       "codex-${codex_arch}-unknown-linux-musl" > /usr/local/bin/codex; \
     chmod 0755 /usr/local/bin/codex; \
     curl --fail --location --show-error --silent \
       "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-code-mode-host-${codex_arch}-unknown-linux-musl.tar.gz" \
       -o "$workdir/codex-code-mode-host.tar.gz"; \
     printf '%s  %s\n' "$codex_code_mode_host_sha" "$workdir/codex-code-mode-host.tar.gz" | sha256sum -c -; \
-    tar -I 'python3 -m gzip' -xOf "$workdir/codex-code-mode-host.tar.gz" --occurrence=1 \
+    tar -xzOf "$workdir/codex-code-mode-host.tar.gz" --occurrence=1 \
       "codex-code-mode-host-${codex_arch}-unknown-linux-musl" > /usr/local/bin/codex-code-mode-host; \
     chmod 0755 /usr/local/bin/codex-code-mode-host; \
     npm --prefix /opt/hive ci --omit=dev --ignore-scripts; \
@@ -163,7 +160,7 @@ RUN set -eu; \
     codex-code-mode-host --help >/dev/null
 
 # The agent tooling delta approved by #75: `rg`, under its own native name.
-# ShellCheck and the other linters stay out; they are fsdk-containers#89.
+# ShellCheck, Hadolint, and Actionlint come from the FSDK base.
 #
 # `just` and mikefarah `yq` v4 are absent from this layer because the base
 # ships both, and a second copy here would precede the base's on PATH.
@@ -204,13 +201,7 @@ RUN set -eu; \
       "https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/ripgrep-${RIPGREP_VERSION}-${rg_arch}.tar.gz" \
       -o "$workdir/ripgrep.tar.gz"; \
     printf '%s  %s\n' "$rg_sha" "$workdir/ripgrep.tar.gz" | sha256sum -c -; \
-    # Decompress whole, then select the member. Piping the codec into tar
-    # deadlocks here: `--occurrence=1` stops reading once it has `rg`, and the
-    # `python3 -m gzip` filter dies on the resulting SIGPIPE rather than
-    # exiting quietly the way the gzip binary would. The checksum is verified
-    # above, before either read of the archive.
-    python3 -m gzip -d < "$workdir/ripgrep.tar.gz" > "$workdir/ripgrep.tar"; \
-    tar -xOf "$workdir/ripgrep.tar" --wildcards --occurrence=1 '*/rg' > /usr/local/bin/rg; \
+    tar -xzOf "$workdir/ripgrep.tar.gz" --wildcards --occurrence=1 '*/rg' > /usr/local/bin/rg; \
     chmod 0755 /usr/local/bin/rg; \
     rg --version; \
     # Standard command semantics stay the base's. Nothing in this layer may
@@ -262,8 +253,7 @@ RUN set -eu; \
       "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${uv_arch}.tar.gz" \
       -o "$workdir/uv.tar.gz"; \
     printf '%s  %s\n' "$uv_sha" "$workdir/uv.tar.gz" | sha256sum -c -; \
-    python3 -m gzip -d < "$workdir/uv.tar.gz" > "$workdir/uv.tar"; \
-    tar -xOf "$workdir/uv.tar" --wildcards --occurrence=1 '*/uv' > /usr/local/bin/uv; \
+    tar -xzOf "$workdir/uv.tar.gz" --wildcards --occurrence=1 '*/uv' > /usr/local/bin/uv; \
     chmod 0755 /usr/local/bin/uv; \
     uv --version; \
     grep -q "^textual==${TEXTUAL_VERSION}" /opt/bluefin/tui/requirements.lock; \
@@ -313,8 +303,7 @@ RUN --mount=type=secret,id=github_token set -eu; \
       -o "$workdir/goose.tar.gz"; \
     printf '%s  %s\n' "$goose_sha" "$workdir/goose.tar.gz" | sha256sum -c -; \
     gh attestation verify "$workdir/goose.tar.gz" --repo aaif-goose/goose --signer-workflow aaif-goose/goose/.github/workflows/canary.yml; \
-    python3 -m gzip -d < "$workdir/goose.tar.gz" > "$workdir/goose.tar"; \
-    tar -xOf "$workdir/goose.tar" --occurrence=1 ./goose > /usr/local/bin/goose; \
+    tar -xzOf "$workdir/goose.tar.gz" --occurrence=1 ./goose > /usr/local/bin/goose; \
     chmod 0755 /usr/local/bin/goose; \
     /usr/local/bin/goose --version; \
     /usr/local/bin/goose run --help >/dev/null

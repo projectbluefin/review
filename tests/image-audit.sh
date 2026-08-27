@@ -754,7 +754,7 @@ runtime_inventory() {
   ' bash "$2" "$3" "$4"
 }
 
-base_required="bash cat chmod cp curl git grep jq ls mkdir mv python3 rm sed sh sort tail tee touch tr uname wc ssh kubectl tic infocmp argo just nginx find cmp diff"
+base_required="bash cat chmod cp curl git grep jq ls mkdir mv python3 rm sed sh sort tail tee touch tr uname wc ssh kubectl tic infocmp argo just nginx find cmp diff gzip skopeo shellcheck hadolint actionlint"
 # Two different rules used to be spelled the same way here, which made the
 # audit fail for a change that was actually correct.
 #
@@ -779,7 +779,7 @@ base_required="bash cat chmod cp curl git grep jq ls mkdir mv python3 rm sed sh 
 package_managers="apt dnf apk"
 review_owned="node npm gh tmux codex codex-code-mode-host goose rg"
 base_forbidden="${review_owned} ${package_managers}"
-derived_required="bash node npm corepack gh tmux codex codex-code-mode-host goose rg find cmp diff grep cat ls infocmp"
+derived_required="bash node npm corepack gh tmux codex codex-code-mode-host goose rg find cmp diff grep cat ls infocmp gzip skopeo shellcheck hadolint actionlint"
 derived_forbidden="$package_managers"
 # Base commands Hive's relay calls directly and review must never shim over.
 # image/Containerfile proves their semantics at build time against the real

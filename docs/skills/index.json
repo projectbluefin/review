@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-25",
+  "generated_at": "2026-08-26",
   "schema_version": "1.0",
   "skills": [
     {
@@ -55,8 +55,8 @@
         "config"
       ],
       "description": "Keeps Goose configuration and global and repository skill routing available in the container, and records how Context7 reaches agents today. Use when Goose loses its config or misses a skill.",
-      "version": "2.2",
-      "last_updated": "2026-08-11",
+      "version": "2.3",
+      "last_updated": "2026-08-25",
       "doc_type": "reference"
     },
     {
@@ -75,8 +75,8 @@
         "workspace"
       ],
       "description": "Explains Hive's tmux session, workspace directory, prompt and output contract, contributor credentials, token lifetime, cooldown, and exclusive task selection. Use when operating or debugging a session.",
-      "version": "2.2",
-      "last_updated": "2026-08-14",
+      "version": "2.3",
+      "last_updated": "2026-08-25",
       "doc_type": "reference"
     },
     {
@@ -131,9 +131,9 @@
         "podman",
         "container"
       ],
-      "description": "Maintains the three container-only review recipes and their credential boundaries. Use when editing justfile.",
-      "version": "3.3",
-      "last_updated": "2026-08-20",
+      "description": "Maintains the four container-only review recipes and their credential boundaries. Use when editing justfile.",
+      "version": "3.4",
+      "last_updated": "2026-08-26",
       "doc_type": "runbook"
     },
     {
