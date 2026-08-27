@@ -357,17 +357,64 @@ def compare_hunk_regions(repository: str, old_head: str, new_head: str) -> Compa
             if not isinstance(patch, str):
                 uncertain = True
                 continue
-            hunk_found = False
-            for match in re.finditer(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", patch):
-                hunk_found = True
-                start = int(match.group(1)); count = int(match.group(2) or 1)
-                if count:
-                    regions.append(Region(filename, start, start + count - 1))
-                if len(regions) >= MAX_RE_REVIEW_HUNKS:
-                    return CompareEvidence(
-                        tuple(regions), True, sensitive, True,
-                    )
-            if not hunk_found:
+            hunk_header = re.compile(
+                r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@.*$"
+            )
+            current_hunk: tuple[int, int, int, int, int, int] | None = None
+            patch_uncertain = False
+            last_body_line = False
+            for line in patch.splitlines():
+                match = hunk_header.fullmatch(line)
+                if match:
+                    if current_hunk is not None:
+                        old_seen, new_seen = current_hunk[4:6]
+                        if (old_seen != current_hunk[1] or
+                                new_seen != current_hunk[3]):
+                            patch_uncertain = True
+                    old_start = int(match.group(1))
+                    old_count = int(match.group(2) or 1)
+                    new_start = int(match.group(3))
+                    new_count = int(match.group(4) or 1)
+                    current_hunk = (old_start, old_count, new_start, new_count, 0, 0)
+                    last_body_line = False
+                    if new_count:
+                        regions.append(Region(filename, new_start, new_start + new_count - 1))
+                    if len(regions) >= MAX_RE_REVIEW_HUNKS:
+                        return CompareEvidence(
+                            tuple(regions), True, sensitive, True,
+                        )
+                    continue
+                if current_hunk is None:
+                    patch_uncertain = True
+                    continue
+                if line == r"\ No newline at end of file":
+                    if not last_body_line:
+                        patch_uncertain = True
+                    last_body_line = False
+                    continue
+                if not line or line[0] not in " +-":
+                    patch_uncertain = True
+                    continue
+                old_seen, new_seen = current_hunk[4:6]
+                if line[0] == " ":
+                    old_seen += 1
+                    new_seen += 1
+                elif line[0] == "-":
+                    old_seen += 1
+                else:
+                    new_seen += 1
+                current_hunk = (*current_hunk[:4], old_seen, new_seen)
+                last_body_line = True
+                if (old_seen > current_hunk[1] or new_seen > current_hunk[3]):
+                    patch_uncertain = True
+            if current_hunk is None:
+                patch_uncertain = True
+            else:
+                old_seen, new_seen = current_hunk[4:6]
+                patch_uncertain = patch_uncertain or (
+                    old_seen != current_hunk[1] or new_seen != current_hunk[3]
+                )
+            if patch_uncertain:
                 uncertain = True
         return CompareEvidence(tuple(regions), uncertain, sensitive)
     except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, json.JSONDecodeError):

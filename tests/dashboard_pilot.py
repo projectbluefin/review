@@ -3805,7 +3805,9 @@ async def main() -> int:
     ])
     mapped_compare = json.dumps({"total_files": 1, "files": [{
         "filename": "image/entrypoint.sh", "status": "modified",
-        "patch": "@@ -80,5 +80,11 @@",
+        "patch": "\n".join(
+            ["@@ -80,5 +80,11 @@"] + ["-old"] * 5 + ["+new"] * 11
+        ),
     }]})
     text, classes, card = await run_review(
         0, re_review_output, prior_result=prior, compare_json=mapped_compare,
@@ -3838,7 +3840,7 @@ async def main() -> int:
     ])
     attacker_compare = json.dumps({"total_files": 1, "files": [{
         "filename": attacker_path, "status": "modified",
-        "patch": "@@ -1 +9 @@",
+        "patch": "@@ -1 +9 @@\n-old\n+new",
     }]})
     text, classes, card = await run_review(
         0, attacker_output, prior_result=prior, compare_json=attacker_compare,
@@ -3884,6 +3886,23 @@ async def main() -> int:
         f"a no-hunk partial file entry must fail closed: {no_hunk_card!r}",
     )
 
+    for label, truncated_patch in (
+        ("a bodyless hunk", "@@ -80,5 +80,5 @@"),
+        ("a truncated hunk", "@@ -80,5 +80,5 @@\n-old\n+new"),
+    ):
+        _text, _classes, truncated_card = await run_review(
+            0, re_review_output, prior_result=prior,
+            compare_json=json.dumps({
+                "total_files": 1,
+                "files": [{"filename": "image/entrypoint.sh", "patch": truncated_patch}],
+            }),
+        )
+        check(
+            "FULL REVIEW REQUIRED" in truncated_card
+            and "mapping-uncertain" in truncated_card,
+            f"{label} must fail closed to full review: {truncated_card!r}",
+        )
+
     _text, _classes, omitted_patch_card = await run_review(
         0, re_review_output, prior_result=prior,
         compare_json=json.dumps({
@@ -3923,7 +3942,7 @@ async def main() -> int:
 
     sensitive_compare = json.dumps({"total_files": 1, "files": [{
         "filename": ".github/workflows/publish.yml", "status": "modified",
-        "patch": "@@ -1 +1 @@",
+        "patch": "@@ -1 +1 @@\n-old\n+new",
     }]})
     text, classes, card = await run_review(
         0, re_review_output, prior_result=prior, compare_json=sensitive_compare,
@@ -4344,7 +4363,7 @@ async def main() -> int:
     check(
         outcomes == [
             "complete", "complete", "incomplete", "stale", "complete",
-            "complete", "complete", "complete", "complete", "complete", "complete",
+            "complete", "complete", "complete", "complete", "complete", "complete", "complete", "complete",
             "incomplete",
             "complete", "complete", "complete", "complete", "complete", "complete", "complete",
             "incomplete", "failed", "complete", "incomplete", "complete", "stopped", "stopped",
