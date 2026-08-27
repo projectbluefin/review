@@ -327,20 +327,30 @@ def compare_hunk_regions(repository: str, old_head: str, new_head: str) -> Compa
     if not (re.fullmatch(r"[0-9a-f]{40}", old_head) and re.fullmatch(r"[0-9a-f]{40}", new_head)):
         return CompareEvidence(mapping_uncertain=True, capability_available=False)
     try:
-        response = gh("api", f"repos/{repository}/compare/{old_head}...{new_head}", timeout=30)
+        response = gh(
+            "api", f"repos/{repository}/compare/{old_head}...{new_head}",
+            "--method", "GET", "--field", f"per_page={MAX_RE_REVIEW_FILES}",
+            "--field", "page=1", timeout=30,
+        )
         if response.returncode != 0 or len(response.stdout) > MAX_RE_REVIEW_RESPONSE_CHARS:
             return CompareEvidence(mapping_uncertain=True, capability_available=False)
         payload = json.loads(response.stdout)
         files = payload.get("files") if isinstance(payload, dict) else None
         total_files = payload.get("total_files") if isinstance(payload, dict) else None
-        if (not isinstance(files, list) or type(total_files) is not int or
-                total_files < 0 or total_files < len(files) or
-                len(files) > MAX_RE_REVIEW_FILES):
-            return CompareEvidence(
-                mapping_uncertain=True,
-                bounded_risk_exceeded=len(files) > MAX_RE_REVIEW_FILES if isinstance(files, list) else False,
-            )
-        if total_files > len(files):
+        if not isinstance(files, list):
+            return CompareEvidence(mapping_uncertain=True)
+        if len(files) > MAX_RE_REVIEW_FILES:
+            return CompareEvidence(mapping_uncertain=True, bounded_risk_exceeded=True)
+        if total_files is not None:
+            if (type(total_files) is not int or total_files < 0 or
+                    total_files < len(files)):
+                return CompareEvidence(mapping_uncertain=True)
+            if total_files > len(files):
+                return CompareEvidence(
+                    mapping_uncertain=True,
+                    bounded_risk_exceeded=True,
+                )
+        elif len(files) >= MAX_RE_REVIEW_FILES:
             return CompareEvidence(
                 mapping_uncertain=True,
                 bounded_risk_exceeded=True,

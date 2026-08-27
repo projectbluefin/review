@@ -3826,6 +3826,39 @@ async def main() -> int:
               for line in gh_log.read_text().splitlines()),
           "the Pilot must stub and exercise the production gh compare boundary")
 
+    # The official compare response has no total_files field. A bounded page
+    # with complete patch metadata must still reach deterministic delta
+    # classification, and the request must make its page bound explicit.
+    official_compare = json.dumps({
+        "status": "ahead", "ahead_by": 14, "behind_by": 0,
+        "total_commits": 14, "commits": [],
+        "files": [{
+            "filename": "image/entrypoint.sh", "status": "modified",
+            "patch": "\n".join(
+                ["@@ -80,5 +80,11 @@"] + ["-old"] * 5 + ["+new"] * 11
+            ),
+        }],
+    })
+    text, classes, card = await run_review(
+        0, re_review_output, prior_result=prior,
+        compare_json=official_compare,
+    )
+    check(
+        "FULL REVIEW REQUIRED" not in card
+        and "image/entrypoint.sh:87=changed-region" in card,
+        f"the official no-total_files compare shape must reach deterministic mapping: {card!r}",
+    )
+    check(
+        any(
+            f"api repos/projectbluefin/bluefinctl/compare/{h0}...{h1}" in line
+            and "--method GET" in line
+            and "--field per_page=128" in line
+            and "--field page=1" in line
+            for line in gh_log.read_text().splitlines()
+        ),
+        "the official compare request must explicitly bind its bounded first page",
+    )
+
     # Agent-sourced H1 paths and finding identifiers are attacker-shaped
     # markup input. The real ReviewScreen must render them literally, not let
     # Rich interpret a tag or raise while composing the decision card.
@@ -4450,7 +4483,7 @@ async def main() -> int:
     check(
         outcomes == [
             "complete", "complete", "incomplete", "stale", "complete",
-            "complete", "complete", "complete", "complete", "complete", "complete", "complete", "complete",
+            "complete", "complete", "complete", "complete", "complete", "complete", "complete", "complete", "complete",
             "complete", "complete", "complete", "complete", "complete", "complete", "complete",
             "incomplete",
             "complete", "complete", "complete", "complete", "complete", "complete", "complete",
