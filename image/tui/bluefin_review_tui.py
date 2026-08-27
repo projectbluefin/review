@@ -349,7 +349,9 @@ def compare_hunk_regions(repository: str, old_head: str, new_head: str) -> Compa
         sensitive = False
         uncertain = False
         for item in files:
-            if not isinstance(item, dict) or not isinstance(item.get("filename"), str):
+            if (not isinstance(item, dict) or
+                    not isinstance(item.get("filename"), str) or
+                    not item["filename"]):
                 return CompareEvidence(mapping_uncertain=True)
             filename = item["filename"]
             sensitive = sensitive or filename.startswith(SENSITIVE_RE_REVIEW_PATHS)
@@ -375,9 +377,17 @@ def compare_hunk_regions(repository: str, old_head: str, new_head: str) -> Compa
                     old_count = int(match.group(2) or 1)
                     new_start = int(match.group(3))
                     new_count = int(match.group(4) or 1)
+                    invalid_hunk = (
+                        (old_count == 0 and new_count == 0) or
+                        (old_start == 0 and old_count != 0) or
+                        (new_start == 0 and new_count != 0)
+                    )
+                    patch_uncertain = patch_uncertain or invalid_hunk or (
+                        old_count > 0 and new_count == 0
+                    )
                     current_hunk = (old_start, old_count, new_start, new_count, 0, 0)
                     last_body_line = False
-                    if new_count:
+                    if new_count and new_start > 0:
                         regions.append(Region(filename, new_start, new_start + new_count - 1))
                     if len(regions) >= MAX_RE_REVIEW_HUNKS:
                         return CompareEvidence(
@@ -1904,7 +1914,10 @@ class ReviewScreen(Screen):
 
         prior_findings, prior_malformed, prior_risk = findings(prior)
         current_findings, current_malformed, current_risk = findings(result)
-        h1_stale = result.state not in {"complete", "findings"}
+        h1_stale = (
+            result.state not in {"complete", "findings"}
+            or self.compare_evidence.mapping_uncertain
+        )
         evidence = tuple(
             FindingEvidence(item.evidence.path, item.evidence.start_line,
                             item.evidence.end_line, h1_stale)

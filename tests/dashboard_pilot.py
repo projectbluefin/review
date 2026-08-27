@@ -3916,6 +3916,93 @@ async def main() -> int:
         f"an omitted patch must fail closed: {omitted_patch_card!r}",
     )
 
+    # A pure addition is valid unified-diff evidence: the old side starts at
+    # zero with zero lines, while the new side has real added lines. It must
+    # remain deterministic rather than being rejected with every start-zero
+    # hunk.
+    pure_add_output = "\n".join([
+        "goose review: check 'main' completed: 1 finding(s)",
+        json.dumps({
+            "severity": "low", "path": "added.py", "line_start": 1,
+            "line_end": 2, "summary": "added evidence", "check": "main",
+        }),
+        "goose review: orchestrator emitted 1 finding(s) from 1 check(s) (main: ran, 1 finding(s))",
+    ])
+    pure_add_compare = json.dumps({"total_files": 1, "files": [{
+        "filename": "added.py", "status": "added",
+        "patch": "@@ -0,0 +1,2 @@\n+one\n+two",
+    }]})
+    _text, _classes, pure_add_card = await run_review(
+        0, pure_add_output, prior_result=prior, compare_json=pure_add_compare,
+    )
+    check(
+        "FULL REVIEW REQUIRED" not in pure_add_card
+        and "added.py:1 (added.py:1)" in pure_add_card,
+        f"a valid pure-add hunk must map deterministically: {pure_add_card!r}",
+    )
+
+    # A pure deletion has no H1 line range. It must not let a matching H0
+    # finding fall through as unchanged evidence.
+    pure_delete_output = "\n".join([
+        "goose review: check 'main' completed: 1 finding(s)",
+        json.dumps({
+            "severity": "high", "path": "image/entrypoint.sh", "line_start": 87,
+            "line_end": 89, "summary": "deleted evidence", "check": "main",
+        }),
+        "goose review: orchestrator emitted 1 finding(s) from 1 check(s) (main: ran, 1 finding(s))",
+    ])
+    pure_delete_compare = json.dumps({"total_files": 1, "files": [{
+        "filename": "image/entrypoint.sh", "status": "modified",
+        "patch": "@@ -87,3 +0,0 @@\n-old\n-old\n-old",
+    }]})
+    _text, _classes, pure_delete_card = await run_review(
+        0, pure_delete_output, prior_result=prior,
+        compare_json=pure_delete_compare,
+    )
+    check(
+        "FULL REVIEW REQUIRED" in pure_delete_card
+        and "mapping-uncertain" in pure_delete_card
+        and "image/entrypoint.sh:87=unchanged-region" not in pure_delete_card,
+        f"a pure-deletion hunk must fail closed: {pure_delete_card!r}",
+    )
+
+    for label, malformed_hunk in (
+        ("a zero-count hunk", "@@ -0,0 +0,0 @@"),
+        ("a nonzero old count at start zero", "@@ -0,1 +1,1 @@\n-old\n+new"),
+        ("a nonzero new count at start zero", "@@ -1,1 +0,1 @@\n-old\n+new"),
+    ):
+        _text, _classes, malformed_hunk_card = await run_review(
+            0, re_review_output, prior_result=prior,
+            compare_json=json.dumps({
+                "total_files": 1,
+                "files": [{"filename": "image/entrypoint.sh", "patch": malformed_hunk}],
+            }),
+        )
+        check(
+            "FULL REVIEW REQUIRED" in malformed_hunk_card
+            and "mapping-uncertain" in malformed_hunk_card,
+            f"{label} must fail closed: {malformed_hunk_card!r}",
+        )
+
+    # An empty filename is not a map key. Exercise it with both a deletion
+    # hunk and the zero-count form so neither shape bypasses the guard.
+    for label, empty_filename_patch in (
+        ("an empty filename deletion", "@@ -87,1 +0,0 @@\n-old"),
+        ("an empty filename zero-count hunk", "@@ -0,0 +0,0 @@"),
+    ):
+        _text, _classes, empty_filename_card = await run_review(
+            0, re_review_output, prior_result=prior,
+            compare_json=json.dumps({
+                "total_files": 1,
+                "files": [{"filename": "", "patch": empty_filename_patch}],
+            }),
+        )
+        check(
+            "FULL REVIEW REQUIRED" in empty_filename_card
+            and "mapping-uncertain" in empty_filename_card,
+            f"{label} must fail closed: {empty_filename_card!r}",
+        )
+
     stale_prior = tui.ReviewResult(
         1, "findings", {"critical": 0, "high": 1, "medium": 0, "low": 0},
         [{"severity": "high", "file": "stale.py", "line": 7, "title": "H0 stale"}],
@@ -4364,6 +4451,7 @@ async def main() -> int:
         outcomes == [
             "complete", "complete", "incomplete", "stale", "complete",
             "complete", "complete", "complete", "complete", "complete", "complete", "complete", "complete",
+            "complete", "complete", "complete", "complete", "complete", "complete", "complete",
             "incomplete",
             "complete", "complete", "complete", "complete", "complete", "complete", "complete",
             "incomplete", "failed", "complete", "incomplete", "complete", "stopped", "stopped",
