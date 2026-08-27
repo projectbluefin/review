@@ -3824,6 +3824,30 @@ async def main() -> int:
               for line in gh_log.read_text().splitlines()),
           "the Pilot must stub and exercise the production gh compare boundary")
 
+    # Agent-sourced H1 paths and finding identifiers are attacker-shaped
+    # markup input. The real ReviewScreen must render them literally, not let
+    # Rich interpret a tag or raise while composing the decision card.
+    attacker_path = "[blink]OWNED"
+    attacker_output = "\n".join([
+        "goose review: check 'main' completed: 1 finding(s)",
+        json.dumps({
+            "severity": "high", "path": attacker_path, "line_start": 9,
+            "line_end": 9, "summary": "[blink]OWNED", "check": "main",
+        }),
+        "goose review: orchestrator emitted 1 finding(s) from 1 check(s) (main: ran, 1 finding(s))",
+    ])
+    attacker_compare = json.dumps({"total_files": 1, "files": [{
+        "filename": attacker_path, "status": "modified",
+        "patch": "@@ -1 +9 @@",
+    }]})
+    text, classes, card = await run_review(
+        0, attacker_output, prior_result=prior, compare_json=attacker_compare,
+    )
+    check(
+        f"{attacker_path}:9" in card and "RE-REVIEW" in card,
+        "the real re-review Pilot must render attacker-shaped evidence literally",
+    )
+
     stale_prior = tui.ReviewResult(
         1, "findings", {"critical": 0, "high": 1, "medium": 0, "low": 0},
         [{"severity": "high", "file": "stale.py", "line": 7, "title": "H0 stale"}],
@@ -3900,6 +3924,25 @@ async def main() -> int:
     text, classes, card = await run_review(0, re_review_output, prior_result=same_head_prior)
     check("RE-REVIEW" not in card,
           "a same-head result must preserve the ordinary decision card without a re-review projection")
+
+    # Harness discovery is asynchronous and can report after the dashboard's
+    # widgets have been torn down. Exercise the actual app lifecycle and prove
+    # the late callback is harmless rather than only grepping NoMatches.
+    late_app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    late_options = []
+    async with late_app.run_test() as pilot:
+        for _ in range(200):
+            if late_app.harness_options:
+                late_options = list(late_app.harness_options)
+                break
+            await pilot.pause(0.05)
+        check(late_options, "the late-discovery Pilot needs real harness options")
+        late_app.exit()
+    try:
+        late_app.harness_loaded(late_options)
+        check(True, "late harness discovery after unmount must be harmless")
+    except Exception as error:
+        check(False, f"late harness discovery after unmount raised {error!r}")
 
     # ── the regression that started this: a review whose checks returned no
     # verdict must never read as clean ───────────────────────────────────
@@ -4251,7 +4294,7 @@ async def main() -> int:
     outcomes = [r["outcome"] for r in records if r.get("action") == "review"]
     check(
         outcomes == [
-            "complete", "complete", "incomplete", "stale", "complete", "incomplete",
+            "complete", "complete", "incomplete", "stale", "complete", "complete", "incomplete",
             "complete", "complete", "complete", "complete", "complete", "complete",
             "complete", "incomplete", "failed", "complete", "incomplete", "complete", "stopped", "stopped",
             "complete", "error",
