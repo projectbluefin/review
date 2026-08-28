@@ -751,7 +751,9 @@ assert_file_not_contains "--env-file" "$runner_log"
 # worker's record flows through Hive, so no bluefin-review state persists.
 assert_file_not_contains "bluefin-review" "$runner_log"
 assert_file_not_contains ":/config" "$runner_log"
-assert_file_not_contains "/workspace" "$runner_log"
+# Check the container mount destination, not arbitrary source-path segments.
+# A checkout may itself live under a directory named "workspace".
+assert_file_not_contains ":/workspace" "$runner_log"
 assert_file_not_contains "qemu" "$runner_log"
 assert_file_not_contains "super-secret-registration-token" "$runner_log"
 
