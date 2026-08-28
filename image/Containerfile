@@ -12,7 +12,7 @@
 # was never once offered an update and silently froze. A pin no tool can track
 # is not a stricter pin, it is a stale one. The reference below is the only
 # source of truth for which base this is; do not restate its value here.
-ARG FSDK_RUNNER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:7e74fe4d2a5527fd67459772b6c01d7e3be81256e81fd9026d25913eba134d8c
+ARG FSDK_RUNNER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:1146ab099307f47721e051bbeb8a8048de9b0ccdaf3aa4a9ca0737acb1019661
 # Kept equal to justfile's hive_commit: host setup and the
 # image runtime use the same contributor relay protocol revision.
 ARG HIVE_COMMIT=8ac1994a4994ec3454f83c2ed5a989abd430e1af
