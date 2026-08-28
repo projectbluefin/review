@@ -101,6 +101,12 @@ repos:
         entry: bash tests/generate-skills.sh
         files: ^(scripts/generate-skills\.py|tests/generate-skills\.sh)$
         pass_filenames: false
+      - id: sbom-manifest
+        name: SBOM manifest generator contract
+        language: system
+        entry: bash tests/sbom-manifest.sh
+        files: ^(scripts/generate-sbom-manifest\.py|tests/sbom-manifest\.sh|image/Containerfile|\.dockerignore|\.github/workflows/publish-compat-image\.yml)$
+        pass_filenames: false
       # A commit that merely writes about GitHub's CI-skip directive silently
       # skips its own validation and publish. Catch it at commit time.
       - id: check-commit-message

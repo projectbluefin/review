@@ -56,6 +56,10 @@ require image/Containerfile \
   'tmux -V' \
   'codex --version' \
   'pi --version' \
+  'ARG REVIEW_REVISION=unknown' \
+  'COPY --chmod=0755 scripts/generate-sbom-manifest.py /usr/local/libexec/review-sbom-manifest' \
+  'rm -f /usr/local/libexec/review-sbom-manifest;' \
+  '--out /opt/bluefin/sbom/review-components.spdx.json' \
   'USER dev' \
   'WORKDIR /home/dev' \
   'ENTRYPOINT ["/usr/local/bin/review-entrypoint"]'
@@ -66,6 +70,42 @@ forbid image/Containerfile \
   'apt-get' \
   'dnf install' \
   'apk add'
+
+require tests/image-audit.sh \
+  'required_sbom_components' \
+  'check_sbom_components' \
+  'fetch_spdx_predicate' \
+  '/opt/bluefin/sbom/review-components.spdx.json'
+
+# One platform must have one SPDX decision and one optional component fetch:
+# duplicate conflict branches can otherwise pass static manifest tests without
+# exercising the published-attestation path.
+# shellcheck disable=SC2016
+spdx_decision_count="$(grep -F -c -- \
+  'if verify_predicate "${derived_repository}@${digest}" "$spdx_predicate"; then' \
+  tests/image-audit.sh || true)"
+if [[ "$spdx_decision_count" -ne 1 ]]; then
+  echo "::error file=tests/image-audit.sh::expected one platform SPDX decision, found ${spdx_decision_count}"
+  fail=1
+fi
+# shellcheck disable=SC2016
+spdx_fetch_count="$(grep -F -c -- \
+  'if spdx_document="$(fetch_spdx_predicate "${derived_repository}@${digest}")"; then' \
+  tests/image-audit.sh || true)"
+if [[ "$spdx_fetch_count" -ne 1 ]]; then
+  echo "::error file=tests/image-audit.sh::expected one platform SPDX fetch, found ${spdx_fetch_count}"
+  fail=1
+fi
+# shellcheck disable=SC2016
+require tests/image-audit.sh 'if ! "$direct_copy"; then'
+
+# The publish path must ingest the in-image manifest and require it in the
+# per-platform attestation audit.
+# shellcheck disable=SC2016
+require .github/workflows/publish-compat-image.yml \
+  'SYFT_SELECT_CATALOGERS: "+sbom-cataloger"' \
+  'sbom-path: review-sbom-${{ matrix.arch }}.spdx.json' \
+  '--require-attestations'
 
 for path in \
   image/entrypoint.sh \
@@ -90,6 +130,11 @@ grep -qF '!package.json' .dockerignore ||
 grep -qF '!package-lock.json' .dockerignore ||
   {
     echo "::error file=.dockerignore::package-lock.json is not allowed into the build context"
+    fail=1
+  }
+grep -qF '!scripts/generate-sbom-manifest.py' .dockerignore ||
+  {
+    echo "::error file=.dockerignore::SBOM generator is not allowed into the build context"
     fail=1
   }
 

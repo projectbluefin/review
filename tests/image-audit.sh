@@ -502,6 +502,9 @@ if "$require_attestations"; then
   while IFS=$'\t' read -r platform digest; do
     [[ -n "$platform" ]] || continue
     platform_verified=true
+    # An attached SBOM is not coverage: the document must also name the
+    # archive-installed components review owns (#78), on every platform, or
+    # publication fails here.
     if verify_predicate "${derived_repository}@${digest}" "$spdx_predicate"; then
       if ! "$direct_copy"; then
         checks_before="$fail"
