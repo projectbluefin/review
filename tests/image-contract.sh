@@ -77,6 +77,25 @@ require tests/image-audit.sh \
   'fetch_spdx_predicate' \
   '/opt/bluefin/sbom/review-components.spdx.json'
 
+# One platform must have one SPDX decision and one optional component fetch:
+# duplicate conflict branches can otherwise pass static manifest tests without
+# exercising the published-attestation path.
+spdx_decision_count="$(grep -F -c -- \
+  'if verify_predicate "${derived_repository}@${digest}" "$spdx_predicate"; then' \
+  tests/image-audit.sh || true)"
+if [[ "$spdx_decision_count" -ne 1 ]]; then
+  echo "::error file=tests/image-audit.sh::expected one platform SPDX decision, found ${spdx_decision_count}"
+  fail=1
+fi
+spdx_fetch_count="$(grep -F -c -- \
+  'if spdx_document="$(fetch_spdx_predicate "${derived_repository}@${digest}")"; then' \
+  tests/image-audit.sh || true)"
+if [[ "$spdx_fetch_count" -ne 1 ]]; then
+  echo "::error file=tests/image-audit.sh::expected one platform SPDX fetch, found ${spdx_fetch_count}"
+  fail=1
+fi
+require tests/image-audit.sh 'if ! "$direct_copy"; then'
+
 # The publish path must ingest the in-image manifest and require it in the
 # per-platform attestation audit.
 # shellcheck disable=SC2016

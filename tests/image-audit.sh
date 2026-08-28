@@ -506,17 +506,6 @@ if "$require_attestations"; then
     # archive-installed components review owns (#78), on every platform, or
     # publication fails here.
     if verify_predicate "${derived_repository}@${digest}" "$spdx_predicate"; then
-      checks_before="$fail"
-      if spdx_document="$(fetch_spdx_predicate "${derived_repository}@${digest}")"; then
-        platform_labels="$(skopeo inspect --config "docker://${derived_repository}@${digest}" |
-          jq -r '.config.Labels // {} | to_entries[] | "\(.key)=\(.value)"')"
-        check_sbom_components "$spdx_document" "published linux/${platform} SPDX SBOM" "$platform" \
-          "$(goose_label_digest "$platform" "$platform_labels")"
-      else
-        error "published linux/${platform} SPDX SBOM predicate could not be read"
-      fi
-      [[ "$fail" == "$checks_before" ]] || platform_verified=false
-    if verify_predicate "${derived_repository}@${digest}" "$spdx_predicate"; then
       if ! "$direct_copy"; then
         checks_before="$fail"
         if spdx_document="$(fetch_spdx_predicate "${derived_repository}@${digest}")"; then
@@ -529,10 +518,6 @@ if "$require_attestations"; then
         fi
         [[ "$fail" == "$checks_before" ]] || platform_verified=false
       fi
-    else
-      error "published linux/${platform} image is missing a verifiable SPDX SBOM attestation"
-      platform_verified=false
-    fi
     else
       error "published linux/${platform} image is missing a verifiable SPDX SBOM attestation"
       platform_verified=false
