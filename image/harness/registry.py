@@ -91,6 +91,11 @@ class HarnessCapabilities:
     result_conversion: bool = False
     provenance: bool = False
     body_drafting: bool = False
+    # Re-entry capabilities. These are opt-in: a harness that does not
+    # advertise them remains one-shot (#255).
+    resumable: bool = False
+    checkpoint: bool = False
+    yieldable: bool = False
 
 
 @dataclass(frozen=True)

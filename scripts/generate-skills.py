@@ -146,6 +146,12 @@ def main() -> int:
         help="only emit skills in this category (repeatable; default all)",
     )
     parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="never emit this skill id (repeatable)",
+    )
+    parser.add_argument(
         "--allow-empty",
         action="store_true",
         help="succeed even when no skills are emitted",
@@ -184,6 +190,9 @@ def main() -> int:
             continue
         if args.category and skill.get("category") not in args.category:
             skipped.append((skill_id, "category filtered out"))
+            continue
+        if skill_id in args.exclude:
+            skipped.append((skill_id, "excluded by build"))
             continue
 
         entry_point = skill.get("entry_point")

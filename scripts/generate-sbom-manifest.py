@@ -115,7 +115,6 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
 
     hive_commit = require_commit(args.hive_commit, "hive commit")
     skills_commit = require_commit(args.skills_commit, "organization skills commit")
-    lab_skills_commit = require_commit(args.lab_skills_commit, "lab skills commit")
     goose_channel = require_non_empty(args.goose_channel, "goose channel")
     gh_version = require_non_empty(args.gh_version, "gh version")
     tmux_version = require_non_empty(args.tmux_version, "tmux version")
@@ -219,15 +218,6 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
             f" build time by projectbluefin/review@{args.revision}.",
         ),
         package(
-            "bluefin-lab-skills",
-            lab_skills_commit,
-            "https://github.com/projectbluefin/lab/tree/"
-            f"{lab_skills_commit}/docs/skills",
-            f"pkg:github/projectbluefin/lab@{lab_skills_commit}",
-            "Lab skills projected into /home/dev/.agents/skills at build time"
-            f" by projectbluefin/review@{args.revision}.",
-        ),
-        package(
             "review-git-hooks",
             args.revision,
             f"https://github.com/projectbluefin/review/tree/{args.revision}/image/git-hooks",
@@ -258,7 +248,6 @@ def main() -> int:
     parser.add_argument("--ripgrep-sha256-aarch64", required=True)
     parser.add_argument("--hive-commit", required=True)
     parser.add_argument("--skills-commit", required=True)
-    parser.add_argument("--lab-skills-commit", required=True)
     args = parser.parse_args()
 
     arch = {"x86_64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}.get(args.arch)

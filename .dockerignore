@@ -12,3 +12,5 @@
 # The SBOM manifest generator runs at build time to record archive-installed
 # components as an SPDX document inside the image.
 !scripts/generate-sbom-manifest.py
+**/__pycache__/
+**/*.pyc

@@ -153,6 +153,22 @@ For each pull request, in order:
    name the wait in your note) until GitHub commits to an answer, and only
    act on the computed state. Never report `blocked` on UNKNOWN alone —
    a maintainer can act on a computed state, not on a placeholder.
+   A required check can also fail without ever testing the pull request:
+   the external service the check drives — a lab endpoint, a runner pool —
+   is unreachable. That is infrastructure unavailability, not a defect in
+   the pull request, and it is never `blocked` on its own: this appliance
+   owns no lab and depends on none, so a check whose service is missing
+   only means its deliverable gets verified in ghcr instead.
+   Prove the
+   distinction in the check's logs (endpoint unreachable, not failing
+   tests), then verify the check's deliverable in ghcr instead: the pull
+   request head's built image published under its `sha-<head>` tag is the
+   substitute evidence, gathered through the anonymous flow in step 5.
+   Then continue the normal path — approve and squash-merge; when branch
+   protection refuses with the check still red, add the `lgtm` label, name
+   the unreachability and the ghcr evidence in your note, and move on.
+   What you may never do is merge around it: no `--admin`, no bypass, and
+   no reclassifying the check as unrequired.
 5. Done depends on whether this repository publishes an image, so check
    BEFORE merging — never discover it after. Treat the repository as
    publishing an image unless BOTH signals are absent: no workflow under
@@ -211,12 +227,41 @@ For each pull request, in order:
    can be evidenced at all — that is the deliverable: report `failed`
    with the evidence.
 
+   One refinement before any of that: a publish workflow can be
+   conditional — path-filtered (`paths:` under its `push:` trigger),
+   scheduled, or manual. When the merge commit's diff touches none of the
+   workflow's triggers, no publication of it exists to evidence, and none
+   is owed: the merge is the deliverable. Prove the condition from the
+   workflow YAML and the merge commit's file list, then report `merged`
+   with a note naming the filter — never `failed` for a publication the
+   repository never promised.
+
    Every wait-state note names its target and timeout: `waiting-ci` names
    the run and when you give up, `merging` names the merge-queue wait and
    when you give up, `awaiting-stable` names the tag and when you give up.
 6. Never merge a draft, never merge with failing required checks, never pass
    `--admin` or any flag that bypasses branch protection, never force-push.
    A pull request the rules cannot land is reported, not forced.
+
+A blocked verdict can be repository-level. A required check that fails on
+the toolchain or the base branch — a pinned compiler with known
+standard-library vulnerabilities, a workflow misconfiguration — blocks
+every pull request in that repository identically, whatever its diff does.
+Diagnose that once: when you report `blocked` for such a condition, check
+whether the remaining pull requests from the same repository list the same
+failing check and, when it fails the same way, report the shared verdict
+for all of them in one pass — each note naming the one root cause — rather
+than re-diagnosing them one at a time, and do not attempt repairs or CI
+waits on pull requests the shared verdict already covers. Never fix a
+repository-level blocker inside one pull request's branch — that rewrites
+its purpose. When the root cause has a mechanical fix (a toolchain pin
+bump, a workflow configuration repair), make the fix at the root: its own
+branch and pull request, named in every covered note and in the done
+note. A pull request you opened was not in the maintainer's confirmed
+selection, so do not merge it — the covered pull requests stay blocked
+behind it, each note naming the fixing pull request. A root cause with no
+mechanical fix is a written finding in the done note, never work inside a
+queued pull request's branch.
 
 Report every state change by appending exactly one JSON line to
 {task.status_path} (create it; one object per line, no other output there):

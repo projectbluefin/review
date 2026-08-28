@@ -1,7 +1,7 @@
 ---
 name: launcher
-version: "3.3"
-last_updated: 2026-08-20
+version: "3.4"
+last_updated: 2026-08-26
 id: launcher
 one_line_purpose: Change review just recipes without breaking the launch contract.
 entry_point: docs/skills/launcher.md
@@ -11,13 +11,17 @@ optimization_status: draft
 status: active
 dependencies: []
 tags: [just, launcher, podman, container]
-description: "Maintains the three container-only review recipes and their credential boundaries. Use when editing justfile."
+description: "Maintains the four container-only review recipes and their credential boundaries. Use when editing justfile."
 metadata:
   type: runbook
   context7-sources: [/websites/podman_io_en]
 ---
 
 # Launcher
+
+> The published image derives from the pinned lab-runner base and includes the
+> contributor worker and maintainer dashboard. These procedures describe the
+> launcher handoff and lifecycle for both modes.
 
 ## When to Use
 
@@ -38,7 +42,7 @@ Goose, or image build skill documents.
    |---|---|
    | `review-container` | Run the Hive queue worker: the contributor container that receives assigned tasks. `REVIEW_DETACH=1` runs it detached. |
    | `review-stop` | Stop a detached worker; refuses attended runs and unlabeled containers. |
-   | `review-doctor` | Perform read-only preflight checks. |
+   | `review-doctor` | Run a disposable non-persistent isolation probe and image checks. |
    | `review-queue` | Walk the static PR queue in the container; no Hive registration. |
 
    `just` reads only the current directory's justfile, so these recipes fail
@@ -48,7 +52,7 @@ Goose, or image build skill documents.
    do not add a wrapper recipe here to compensate.
 
 2. Keep the interactive launch paths foreground, and the detached worker
-   explicit. `REVIEW_DETACH=1` is the one sanctioned background launch: it
+   explicit. `REVIEW_DETACH=1` is the one permitted background launch: it
    stamps `review.owner=detached`, a later launch refuses to reclaim it, and
    `review-stop` is its only lifecycle verb — polite `podman stop`, never a
    force flag, and it refuses attended runs and containers it did not label.
@@ -58,6 +62,15 @@ Goose, or image build skill documents.
    `bluefin-review` state directory from the host (below).
    Ctrl-C stops an interactive run; `--replace` only reclaims a container
    name when a new launch starts.
+   Both agent-capable recipes explicitly select the host-side gVisor runtime
+   with `podman --runtime=runsc run`. Before either launch can stage or mount a
+   credential, the shared launcher preflight requires an executable `runsc`,
+   a successful version probe, rootless Podman, a successful credential-free
+   disposable container, and `podman inspect` reporting that container's
+   `OCIRuntime` as exactly `runsc`. Missing provisioning is
+   projectbluefin/bluefin#1139. Never fall back to `crun`, `runc`, or Podman's
+   configured default, and never add a weaker-runtime override. The Review
+   image does not carry `runsc`; OCI runtime selection belongs on the host.
 3. Keep the container path narrow. It mounts only the read-only Hive
    contributor configuration and runs the image entrypoint, which attaches to
    Hive's `contributor` session.
@@ -211,6 +224,21 @@ assignments by repository, label, title, author, or issue.
 
 ## Rootless Podman And Mounted Host Files
 
+`review-doctor` exercises the same runsc proof as a launch and classifies the
+result as ready, missing, installed but unusable, or incompatible with the
+current host/Podman configuration. The probe uses the already-resolved Review
+image with no network, mounts, or inherited credentials and verifies runtime
+identity while the uniquely named probe is active, then removes it through a
+bounded cleanup trap on success, failure, interruption, or timeout. The probe
+uses an unpredictable name, `--rm`, a private cidfile, and an ownership label;
+cleanup verifies the label and removes only that exact container ID. Every
+probe operation has bounded TERM-to-KILL escalation, and cleanup failure fails
+the proof instead of printing a false removal receipt. A successful launch
+prints `isolation runtime: gVisor/runsc`; that line is a launcher receipt,
+while native acceptance still inspects the real running container. Build,
+audit, and unrelated utility containers do not execute agent-controlled work
+and do not use this launch policy.
+
 Rootless Podman maps the host user to container **root**, not to the container
 user of the same uid. A mounted host file keeps its mode, so Hive's
 `contributor.env` at `0600` arrives root-owned and the image's `dev` user
@@ -265,6 +293,9 @@ want to be certain which launcher you are invoking.
   contributor container, or a host Codex config/login mount instead of the
   one-run staged auth file.
 - A token in output, files, Podman arguments, or any persisted launcher file.
+- An agent-capable `podman run` without explicit `runsc`, a runtime-selection
+  success inferred only from exit status, or any fallback to a weaker/default
+  OCI runtime.
 - Ownership inferred from `pgrep` rather than a label plus a live, same-boot,
   still-naming PID.
 - A user-supplied container name reaching `podman run` or an ownership probe
@@ -273,19 +304,21 @@ want to be certain which launcher you are invoking.
 - A model-catalog or model-ID validity check in the launcher; only the profile
   name is a closed set.
 - Contributor task-selection policy outside Hive (own-work exclusion on the
-  maintainer queue view is the one sanctioned filter).
+  maintainer queue view is the one permitted filter).
 
 ## Verification
 
 ```bash
 just --list
 just review-doctor
+bash tests/runsc-isolation.sh
 bash tests/just-onboarding.sh
 git diff --check
 ```
 
-The recipe list must contain only the four public commands. Doctor must not
-start a container.
+The recipe list must contain only the four public commands. Doctor may start
+only its disposable probe and agent-free image check; it must not start an
+agent or any persistent or credential-bearing container.
 
 ## Sources
 

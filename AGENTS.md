@@ -1,12 +1,10 @@
 # review — Agent Operating Contract
 
-`review` is the Bluefin review appliance: one OCI contributor image and a
-launcher with two operational modes. `review-container` runs the Hive queue
-worker — it receives Hive-assigned tasks and donates inference through the
-contributor's credentials. `review-queue` is the interactive maintainer
-review surface. `review` owns the image, credential handoff, and review
-context. Hive owns the WebSocket contributor protocol, task selection, the
-`contributor` tmux session, prompt injection, and output capture.
+`review` is the Bluefin review appliance: one OCI image fork and a launcher.
+The current `review-container` and `review-queue` recipes run the restored
+Goose/Hive worker and maintainer dashboard. Review owns the image, publication,
+launcher credential handoff, and review context; Hive owns its contributor
+protocol, task selection, tmux session, prompt injection, and output capture.
 
 ## Read order
 
@@ -21,15 +19,22 @@ Keep this repository focused: it ships the review appliance and nothing
 beside it. Persistent state stays limited to launcher configuration and the
 review-queue landing record the launcher mounts for the dashboard.
 
-The interactive recipes run in the foreground of the terminal that launched
-them, and Ctrl-C stops them: a maintainer steers `review-queue`, and an
-attended `review-container` stays under its terminal. The one sanctioned
+The interactive recipes run the image runtime in the foreground of the
+terminal that launched them, and Ctrl-C stops them. The one permitted
 background path is the detached worker: `REVIEW_DETACH=1` labels the
 container `review.owner=detached`, a later launch refuses to reclaim it, and
 `just review-stop` is its explicit lifecycle verb. No launch path may
 background a run implicitly — no `nohup`, no unlabeled `podman run -d`, no
 job that silently outlives the terminal. Cleanup of interactive runs remains
 a startup concern: a launch reclaims whatever a previous run left behind.
+
+Every launcher path that can execute agent-controlled work uses gVisor's
+host-side `runsc` OCI runtime explicitly. The launcher first runs a
+credential-free rootless Podman probe and verifies the probe container's
+reported OCI runtime; a missing, unusable, or mismatched runtime fails before
+an agent starts or credentials are mounted. There is no fallback to Podman's
+configured default. Build, audit, and unrelated utility containers are not
+agent execution paths and do not inherit this runtime policy.
 
 That rule scopes how the launcher starts the container; it is not a ban
 on `&` anywhere in the repository. Backgrounding is required where it is what
@@ -49,8 +54,23 @@ only when that PID is alive, in the same boot, and still names the container in
 
 Hive is the sole authority for selecting and assigning contributor tasks: do
 not skip, reorder, prioritize, or decline a Hive assignment mid-protocol. The
-one sanctioned filter is own-work exclusion on the maintainer-facing queue
+one permitted filter is own-work exclusion on the maintainer-facing queue
 view — a reviewer never receives their own authored pull requests to review.
+
+This appliance owns no lab and depends on none. Nothing in this repository
+may require, integrate with, or gate on maintainer-local infrastructure: a
+review decision that needs someone's private endpoint to be reachable is
+wrong by construction. When a check backed by such a service cannot run,
+the deliverable it would have validated is verified from published registry
+evidence instead, and the absence of that evidence is reported as a
+finding, never as a blocked pull request.
+
+Latest upstream, everywhere. Every dependency — base image, runtimes,
+tools, protocols — tracks the newest upstream version, and Renovate moves
+every pin automatically. A pin is a checkpoint the automation advances,
+never a human gate: no dependency bump may wait on manual review, an audit
+checklist, or a conditional workflow. If a bump breaks something, the fix
+is forward — a follow-up change — not a brake on the update stream.
 
 The work the appliance produces for other repositories is toil reduction for
 under-maintained projects, not feature work: agents repair what is broken and
@@ -153,7 +173,6 @@ bash scripts/check-skill-frontmatter.sh
 bash tests/generate-skills.sh
 bash tests/sbom-manifest.sh
 bash tests/image-contract.sh
-bash tests/hive-compatibility.sh
 bash tests/bluefin-review.sh
 bash tests/dashboard-contract.sh
 bash tests/worktree-guard.sh

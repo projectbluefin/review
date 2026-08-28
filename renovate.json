@@ -21,30 +21,20 @@
       "depNameTemplate": "kubestellar/hive",
       "packageNameTemplate": "https://github.com/kubestellar/hive",
       "datasourceTemplate": "git-refs"
-    },
-    {
-      "description": "Track projectbluefin/lab main as the pinned lab-skills checkout projected into the contributor image.",
-      "customType": "regex",
-      "managerFilePatterns": [
-        "/^image\\/Containerfile$/"
-      ],
-      "matchStrings": [
-        "ARG LAB_SKILLS_COMMIT=(?<currentDigest>[0-9a-f]{40})"
-      ],
-      "currentValueTemplate": "main",
-      "depNameTemplate": "projectbluefin/lab",
-      "packageNameTemplate": "https://github.com/projectbluefin/lab",
-      "datasourceTemplate": "git-refs"
     }
   ],
   "packageRules": [
     {
-      "description": "Automerge digest/pin/patch/minor via GitHub native auto-merge (merge queue handles squash)",
+      "description": "Latest upstream is the project posture (AGENTS.md): every update automerges — digest, pin, patch, minor, and major alike. A pin is a checkpoint the automation moves, never a human gate.",
       "matchUpdateTypes": [
         "digest",
         "pin",
+        "pinDigest",
         "patch",
-        "minor"
+        "minor",
+        "major",
+        "rollback",
+        "replacement"
       ],
       "automerge": true,
       "platformAutomerge": true
@@ -58,37 +48,6 @@
         "ghcr.io/projectbluefin/lab-runner"
       ],
       "pinDigests": true
-    },
-    {
-      "description": "The Hive pin carries the contributor relay protocol, so it must never ride the blanket digest automerge rule above (later rules win). .github/workflows/hive-pin-gate.yml re-enables GitHub-native auto-merge only when no consumed Hive file changed between the old and new SHA; otherwise it posts the diff and labels the PR for a human.",
-      "matchDepNames": [
-        "kubestellar/hive"
-      ],
-      "automerge": false,
-      "platformAutomerge": false,
-      "semanticCommitType": "chore",
-      "semanticCommitScope": "deps",
-      "commitMessageTopic": "the pinned kubestellar/hive contributor runtime",
-      "labels": [
-        "dependencies"
-      ]
-    },
-    {
-      "description": "Never auto-merge the FSDK base image, digest or tag. docs/skills/image-build.md item 11 requires measuring manifest, filesystem, layer and cold/warm build deltas on native amd64 and arm64 for every composition change, and item 2 requires auditing the exact base digest at runtime because FSDK source, labels and SBOM records can disagree with the filesystem. A green CI check is not that audit, and an automerging digest rule on a rolling tag is the 'floating base image' red flag with extra steps. Unlike kubestellar/hive above this gets no conditional gate: a base image has no enumerable consumed surface to diff, so the human audit is the only control. Placed last so it wins over the blanket rule above and the identical one in the inherited projectbluefin/renovate-config preset.",
-      "matchManagers": [
-        "dockerfile"
-      ],
-      "matchPackageNames": [
-        "ghcr.io/projectbluefin/lab-runner"
-      ],
-      "automerge": false,
-      "platformAutomerge": false,
-      "semanticCommitType": "chore",
-      "semanticCommitScope": "deps",
-      "commitMessageTopic": "the pinned FSDK lab-runner base image",
-      "labels": [
-        "dependencies"
-      ]
     }
   ]
 }

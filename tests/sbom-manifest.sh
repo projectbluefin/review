@@ -19,9 +19,8 @@ CMH_X86_64="0146adfaac8363ec9fcdb5895f7624db5b2e8617a283887938b7fb97a1dd4356"
 CMH_AARCH64="dfd4ff98ea4db30ed078af9c31b6f86e3da4836d0573aa87e225e5a5b54d3c7c"
 RG_X86_64="33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c"
 RG_AARCH64="800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915"
-HIVE_COMMIT="5db84c3b2cb7ce48635bba702115a34838690e03"
+HIVE_COMMIT="8ac1994a4994ec3454f83c2ed5a989abd430e1af"
 SKILLS_COMMIT="b6f5c370cca19398fbbbe43a0182dca6783a80cb"
-LAB_SKILLS_COMMIT="4673dd5062bcebb26779da76789ccde006ea2366"
 REVISION="fd4437560fb87eae4707070b224ab1901ab6f0c6"
 
 generate() {
@@ -47,7 +46,6 @@ generate() {
     --ripgrep-sha256-aarch64 "$RG_AARCH64" \
     --hive-commit "$HIVE_COMMIT" \
     --skills-commit "$SKILLS_COMMIT" \
-    --lab-skills-commit "$LAB_SKILLS_COMMIT" \
     "$@"
 }
 
@@ -68,8 +66,8 @@ for doc in "$tmpdir/amd64.spdx.json" "$tmpdir/arm64.spdx.json"; do
   check "$doc" '.dataLicense == "CC0-1.0"' "$doc: missing CC0-1.0 data license"
   check "$doc" '.documentNamespace | test("^https://github.com/projectbluefin/review/sbom/")' \
     "$doc: documentNamespace is not under the review repository"
-  check "$doc" '.packages | length == 12' "$doc: must describe exactly the 12 archive-installed components"
-  check "$doc" '[.packages[].SPDXID] | unique | length == 12' "$doc: SPDXIDs must be unique"
+  check "$doc" '.packages | length == 11' "$doc: must describe exactly the 11 archive-installed components"
+  check "$doc" '[.packages[].SPDXID] | unique | length == 11' "$doc: SPDXIDs must be unique"
   check "$doc" 'all(.packages[]; .filesAnalyzed == false
     and (.downloadLocation | test("^https://"))
     and (.externalRefs[0].referenceType == "purl"))' \
@@ -90,7 +88,6 @@ check "$tmpdir/amd64.spdx.json" '
     "contributor-relay.sh": "'"$HIVE_COMMIT"'",
     "backends.conf": "'"$HIVE_COMMIT"'",
     "bluefin-organization-skills": "'"$SKILLS_COMMIT"'",
-    "bluefin-lab-skills": "'"$LAB_SKILLS_COMMIT"'",
     "review-git-hooks": "'"$REVISION"'"
   }' "amd64 manifest: component names or versions diverge"
 

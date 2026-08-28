@@ -14,6 +14,7 @@ report_file=""
 require_oci=false
 require_attestations=false
 require_github_attestation=false
+direct_copy=false
 verify_base_evidence=false
 attestation_repository=""
 expected_source=""
@@ -43,6 +44,8 @@ Options:
                            provenance bundles, verified by signature.
   --require-github-attestation
                            Verify GitHub artifact provenance for the digest.
+  --direct-copy            Require the derived image to preserve the exact
+                           base layers and runtime contract.
   --attestation-repository OWNER/REPO
                            Repository expected to have created the artifact attestation.
   --expected-source URL    Require matching OCI source and URL values.
@@ -74,6 +77,10 @@ while [[ $# -gt 0 ]]; do
     ;;
   --require-github-attestation)
     require_github_attestation=true
+    shift
+    ;;
+  --direct-copy)
+    direct_copy=true
     shift
     ;;
   --attestation-repository)
@@ -235,7 +242,7 @@ goose_label_digest() {
 # publisher knows; without --expected-revision it is a presence check only.
 required_sbom_components() {
   local arch="$1" goose_sha256="$2" suffix
-  local hive_commit skills_commit lab_skills_commit codex_version
+  local hive_commit skills_commit codex_version
   case "$arch" in
   amd64) suffix=X86_64 ;;
   arm64) suffix=AARCH64 ;;
@@ -246,7 +253,6 @@ required_sbom_components() {
   esac
   hive_commit="$(containerfile_arg HIVE_COMMIT)"
   skills_commit="$(containerfile_arg SKILLS_COMMIT)"
-  lab_skills_commit="$(containerfile_arg LAB_SKILLS_COMMIT)"
   codex_version="$(containerfile_arg CODEX_VERSION)"
   printf 'goose\t%s\t%s\n' "$(containerfile_arg GOOSE_CHANNEL)" "$goose_sha256"
   printf 'gh\t%s\t\n' "$(containerfile_arg GH_VERSION)"
@@ -258,7 +264,6 @@ required_sbom_components() {
   printf 'contributor-relay.sh\t%s\t\n' "$hive_commit"
   printf 'backends.conf\t%s\t\n' "$hive_commit"
   printf 'bluefin-organization-skills\t%s\t\n' "$skills_commit"
-  printf 'bluefin-lab-skills\t%s\t\n' "$lab_skills_commit"
   printf 'review-git-hooks\t%s\t\n' "$expected_revision"
 }
 
@@ -511,6 +516,23 @@ if "$require_attestations"; then
         error "published linux/${platform} SPDX SBOM predicate could not be read"
       fi
       [[ "$fail" == "$checks_before" ]] || platform_verified=false
+    if verify_predicate "${derived_repository}@${digest}" "$spdx_predicate"; then
+      if ! "$direct_copy"; then
+        checks_before="$fail"
+        if spdx_document="$(fetch_spdx_predicate "${derived_repository}@${digest}")"; then
+          platform_labels="$(skopeo inspect --config "docker://${derived_repository}@${digest}" |
+            jq -r '.config.Labels // {} | to_entries[] | "\(.key)=\(.value)"')"
+          check_sbom_components "$spdx_document" "published linux/${platform} SPDX SBOM" "$platform" \
+            "$(goose_label_digest "$platform" "$platform_labels")"
+        else
+          error "published linux/${platform} SPDX SBOM predicate could not be read"
+        fi
+        [[ "$fail" == "$checks_before" ]] || platform_verified=false
+      fi
+    else
+      error "published linux/${platform} image is missing a verifiable SPDX SBOM attestation"
+      platform_verified=false
+    fi
     else
       error "published linux/${platform} image is missing a verifiable SPDX SBOM attestation"
       platform_verified=false
@@ -596,15 +618,29 @@ append "- Local unpacked delta (derived - base): $(($(jq -r '.[0].Size' <<<"$der
 
 mapfile -t base_layers < <(jq -r '.[0].RootFS.Layers[]' <<<"$base_inspect")
 mapfile -t derived_layers < <(jq -r '.[0].RootFS.Layers[]' <<<"$derived_inspect")
-if [[ "${#derived_layers[@]}" -le "${#base_layers[@]}" ]]; then
-  error "derived image does not add layers to the exact base image"
-else
+if "$direct_copy"; then
+  if [[ "${#derived_layers[@]}" -ne "${#base_layers[@]}" ]]; then
+    error "direct-copy image changed the base layer count"
+  fi
   for index in "${!base_layers[@]}"; do
-    [[ "${base_layers[$index]}" == "${derived_layers[$index]}" ]] ||
-      error "derived rootfs layer ${index} does not preserve the exact base layer"
+    [[ "${derived_layers[$index]:-}" == "${base_layers[$index]}" ]] ||
+      error "direct-copy image changed base layer ${index}"
   done
+else
+  if [[ "${#derived_layers[@]}" -le "${#base_layers[@]}" ]]; then
+    error "derived image does not add layers to the exact base image"
+  else
+    for index in "${!base_layers[@]}"; do
+      [[ "${base_layers[$index]}" == "${derived_layers[$index]}" ]] ||
+        error "derived rootfs layer ${index} does not preserve the exact base layer"
+    done
+  fi
 fi
-append "- Composition: derived rootfs preserves ${#base_layers[@]} base layer(s) and adds $((${#derived_layers[@]} - ${#base_layers[@]})) layer(s)."
+if "$direct_copy"; then
+  append "- Composition: direct copy preserves all ${#base_layers[@]} base layer(s) with no filesystem delta."
+else
+  append "- Composition: derived rootfs preserves ${#base_layers[@]} base layer(s) and adds $((${#derived_layers[@]} - ${#base_layers[@]})) layer(s)."
+fi
 
 base_labels="$(jq -r '.[0].Config.Labels // {} | to_entries[] | "\(.key)=\(.value)"' <<<"$base_inspect")"
 derived_labels="$(jq -r '.[0].Config.Labels // {} | to_entries[] | "\(.key)=\(.value)"' <<<"$derived_inspect")"
@@ -633,8 +669,20 @@ if "$require_oci"; then
 
   expected_oci_value() {
     case "$1" in
-    org.opencontainers.image.title) printf '%s' 'Bluefin review contributor' ;;
-    org.opencontainers.image.description) printf '%s' 'Foreground contributor runtime for projectbluefin/review.' ;;
+    org.opencontainers.image.title)
+      if "$direct_copy"; then
+        printf '%s' 'Bluefin review lab-runner fork'
+      else
+        printf '%s' 'Bluefin review contributor'
+      fi
+      ;;
+    org.opencontainers.image.description)
+      if "$direct_copy"; then
+        printf '%s' 'Direct fork of the Project Bluefin lab-runner image.'
+      else
+        printf '%s' 'Foreground contributor runtime for projectbluefin/review.'
+      fi
+      ;;
     org.opencontainers.image.url | org.opencontainers.image.source) printf '%s' "$expected_source" ;;
     org.opencontainers.image.revision) printf '%s' "$expected_revision" ;;
     org.opencontainers.image.version) printf '%s' "$expected_version" ;;
@@ -724,7 +772,7 @@ runtime_inventory() {
   ' bash "$2" "$3" "$4"
 }
 
-base_required="bash cat chmod cp curl git grep jq ls mkdir mv python3 rm sed sh sort tail tee touch tr uname wc ssh kubectl tic infocmp argo just nginx find cmp diff"
+base_required="bash cat chmod cp curl git grep jq ls mkdir mv python3 rm sed sh sort tail tee touch tr uname wc ssh kubectl tic infocmp argo just nginx find cmp diff gzip skopeo shellcheck hadolint actionlint"
 # Two different rules used to be spelled the same way here, which made the
 # audit fail for a change that was actually correct.
 #
@@ -749,7 +797,7 @@ base_required="bash cat chmod cp curl git grep jq ls mkdir mv python3 rm sed sh 
 package_managers="apt dnf apk"
 review_owned="node npm gh tmux codex codex-code-mode-host goose rg"
 base_forbidden="${review_owned} ${package_managers}"
-derived_required="bash node npm corepack gh tmux codex codex-code-mode-host goose rg find cmp diff grep cat ls infocmp"
+derived_required="bash node npm corepack gh tmux codex codex-code-mode-host goose rg find cmp diff grep cat ls infocmp gzip skopeo shellcheck hadolint actionlint"
 derived_forbidden="$package_managers"
 # Base commands Hive's relay calls directly and review must never shim over.
 # image/Containerfile proves their semantics at build time against the real
@@ -774,6 +822,12 @@ for image_kind in base derived; do
     required="$base_required"
     forbidden="$base_forbidden"
     terms="xterm-256color tmux-256color"
+  elif "$direct_copy"; then
+    image="$derived_image"
+    arch="$derived_arch"
+    required="$base_required"
+    forbidden="$base_forbidden"
+    terms="xterm-256color tmux-256color"
   else
     image="$derived_image"
     arch="$derived_arch"
@@ -794,7 +848,7 @@ for image_kind in base derived; do
   for command in $forbidden; do
     forbid_line "$inventory" forbidden "$command"
   done
-  if [[ "$image_kind" == derived ]]; then
+  if [[ "$image_kind" == derived && ! "$direct_copy" ]]; then
     for command in $derived_unshadowed; do
       unshadowed_path_line "$inventory" "$command"
     done

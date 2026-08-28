@@ -5,6 +5,11 @@ This document is the canonical local model for `review`. It adapts
 repository's two-mode review appliance. Read it after
 `AGENTS.md` and before task-specific skills.
 
+The published image derives from the pinned lab-runner base and includes the
+Goose/Hive contributor worker and maintainer dashboard. Its two launch modes
+share the same image while keeping Hive assignment authority separate from
+the human review surface.
+
 The model is documentation: the launcher, image, tests, skills, and
 user-facing instructions must describe the same roles and authority
 boundaries. When source evidence changes the model, update this document and
@@ -68,10 +73,14 @@ carries the operational form of this section.
 ## Repository boundary
 
 `review` owns the contributor image, credential handoff, and review context.
+Its launcher also owns the outer execution boundary: agent-capable containers
+must run under the host's explicitly selected gVisor `runsc` runtime after a
+credential-free rootless Podman proof. Backend-native sandboxes remain defense
+in depth; they do not replace that boundary.
 Hive owns the contributor WebSocket protocol, task selection, assignment prompt
 injection, the `contributor` tmux session, and output capture. The launcher
 must not decline, retry, or otherwise manage assignments mid-protocol; the
-one sanctioned filter is own-work exclusion on the maintainer-facing queue
+one permitted filter is own-work exclusion on the maintainer-facing queue
 view, so a reviewer never receives their own authored pull requests.
 
 The human Maintainer Reviewer is the decision point. A Factory Worker,
@@ -123,7 +132,6 @@ Keep the model executable and compact:
 bash scripts/check-skill-frontmatter.sh
 bash tests/generate-skills.sh
 bash tests/image-contract.sh
-bash tests/hive-compatibility.sh
 bash tests/bluefin-review.sh
 bash tests/dashboard-contract.sh
 bash tests/worktree-guard.sh
