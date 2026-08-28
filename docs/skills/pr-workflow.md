@@ -100,13 +100,12 @@ size, priority, source — is issue-body prose or project-field metadata, never 
 label. Do not invent a priority taxonomy, and do not build a second state
 machine out of comments, slash commands, or local scripts.
 
-Alongside those seven, this repository runs exactly three local automation
+Alongside those seven, this repository runs exactly two local automation
 labels, each owned by a named mechanism and applied by it alone: `lgtm`
 (applied by Hive's authenticated queue endpoint after a maintainer opts in — see
-[`review-dashboard.md`](review-dashboard.md)), `hive-protocol-change`
-(`.github/workflows/hive-pin-gate.yml`, when a Hive pin bump touches a consumed
-contributor runtime file), and `dependencies` (Renovate, per `renovate.json`).
-Adding a fourth means adding the mechanism that owns it, in the same change.
+[`review-dashboard.md`](review-dashboard.md)) and `dependencies` (Renovate,
+per `renovate.json`). Adding a third means adding the mechanism that owns
+it, in the same change.
 
 The full contract, including the human and agent action lists, lives in
 `projectbluefin/common`'s `docs/skills/label-workflow.md`. Read it there rather

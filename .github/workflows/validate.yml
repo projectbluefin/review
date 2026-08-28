@@ -60,6 +60,11 @@ jobs:
           set -euo pipefail
           bash tests/generate-skills.sh
 
+      - name: SBOM manifest generator contract
+        run: |
+          set -euo pipefail
+          bash tests/sbom-manifest.sh
+
       - name: Harness registry and adapter contracts
         run: |
           set -euo pipefail
@@ -123,23 +128,12 @@ jobs:
       - name: Interactive launcher docs and shell stay aligned
         run: |
           set -euo pipefail
-          # The sed and grep patterns intentionally contain literal
-          # dollar-sign syntax for the embedded shell checks.
-          # shellcheck disable=SC2016
-          HIVE_PIN="$(sed -n 's/^hive_commit := "\(.*\)"$/\1/p' justfile)"
-          test -n "$HIVE_PIN"
-          IMAGE_HIVE_PIN="$(sed -n 's/^ARG HIVE_COMMIT=\([0-9a-f]\{40\}\)$/\1/p' image/Containerfile)"
-          test "$HIVE_PIN" = "$IMAGE_HIVE_PIN"
-          grep -Fq 'gpt-5.6-luna' justfile
-          grep -Fq 'require_copilot_provider' justfile
-          # shellcheck disable=SC2016
-          grep -Fq 'fetch --depth 1 origin "$HIVE_COMMIT"' justfile
-          grep -Fq 'REVIEW_HIVE_COMMIT' justfile
-          grep -Fq 'Run: goose configure' justfile
-          grep -Fq "$HIVE_PIN" README.md
-          grep -Fq 'REVIEW_HIVE_COMMIT' README.md
-          grep -Fq 'gpt-5.6-luna' README.md
-          grep -Fq 'github_copilot' README.md
+          bash tests/readme-quickstart.sh
+          grep -Fq 'review-container' justfile
+          grep -Fq 'review-queue' justfile
+          grep -Fq 'ghcr.io/projectbluefin/review:stable' justfile
+          grep -Fq 'review-entrypoint' image/Containerfile
+          grep -Fq 'ghcr.io/projectbluefin/review:stable' README.md
 
       - name: Resolve official Goose canary asset identities
         id: goose
@@ -186,9 +180,15 @@ jobs:
           # OCI, not Docker schema 2: the shipped format is what publish emits.
           test "$(podman image inspect review:test --format '{{.ManifestType}}')" = "application/vnd.oci.image.manifest.v1+json"
 
-      - name: Import shipped TUI module set as runtime user
+      - name: Execute shipped review runtime
         run: |
           set -euo pipefail
+          podman run --rm \
+            --entrypoint /usr/local/bin/bluefin-review \
+            review:test --help
+          podman run --rm \
+            --entrypoint /usr/local/bin/goose \
+            review:test --version
           podman run --rm \
             --entrypoint /usr/local/bin/codex \
             review:test --version
@@ -199,6 +199,14 @@ jobs:
             --entrypoint /opt/bluefin/tui/.venv/bin/python \
             review:test \
             -c "import sys; sys.path.insert(0, '/opt/bluefin/tui'); import bluefin_review_tui"
+          podman run --rm --entrypoint /usr/bin/bash review:test -lc '
+            set -eu
+            node --version >/dev/null
+            gh --version >/dev/null
+            tmux -V >/dev/null
+            pi --version >/dev/null
+            test -x /usr/local/bin/review-entrypoint
+          '
 
       - name: Audit exact FSDK and built review image
         run: |

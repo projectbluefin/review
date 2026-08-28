@@ -9,3 +9,8 @@
 # The skills generator runs at build time to project the org's docs/skills
 # manifest into Goose's native Agent Skills layout.
 !scripts/generate-skills.py
+# The SBOM manifest generator runs at build time to record archive-installed
+# components as an SPDX document inside the image.
+!scripts/generate-sbom-manifest.py
+**/__pycache__/
+**/*.pyc

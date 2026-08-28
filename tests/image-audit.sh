@@ -14,6 +14,7 @@ report_file=""
 require_oci=false
 require_attestations=false
 require_github_attestation=false
+direct_copy=false
 verify_base_evidence=false
 attestation_repository=""
 expected_source=""
@@ -43,6 +44,8 @@ Options:
                            provenance bundles, verified by signature.
   --require-github-attestation
                            Verify GitHub artifact provenance for the digest.
+  --direct-copy            Require the derived image to preserve the exact
+                           base layers and runtime contract.
   --attestation-repository OWNER/REPO
                            Repository expected to have created the artifact attestation.
   --expected-source URL    Require matching OCI source and URL values.
@@ -74,6 +77,10 @@ while [[ $# -gt 0 ]]; do
     ;;
   --require-github-attestation)
     require_github_attestation=true
+    shift
+    ;;
+  --direct-copy)
+    direct_copy=true
     shift
     ;;
   --attestation-repository)
@@ -200,6 +207,122 @@ unshadowed_path_line() {
   elif [[ "$resolved" == /usr/local/bin/* ]]; then
     error "review shadows the base ${name}: resolves to ${resolved}; use the FSDK seam, not a shim"
   fi
+}
+
+containerfile_arg() {
+  sed -n "s/^ARG $1=\\(.*\\)\$/\\1/p" image/Containerfile | head -n 1
+}
+
+# The Goose asset digest the build actually verified. CI resolves it from the
+# canary release API immediately before building, so the Containerfile
+# defaults can be older than what shipped; the image's own labels are the
+# record of what was verified. $1: amd64|arm64, $2: labels as key=value lines.
+goose_label_digest() {
+  local arch="$1" labels="$2" label_arch
+  case "$arch" in
+  amd64) label_arch=x86_64 ;;
+  arm64) label_arch=aarch64 ;;
+  *)
+    echo "goose_label_digest needs amd64 or arm64, got: ${arch}" >&2
+    return 2
+    ;;
+  esac
+  sed -n "s/^io\\.projectbluefin\\.review\\.goose\\.${label_arch}-unknown-linux-musl\\.sha256=\\([0-9a-f]\\{64\\}\\)\$/\\1/p" \
+    <<<"$labels"
+}
+
+# The components syft cannot see in the image: everything review installs
+# from a release archive or fetched source file rather than through a package
+# manager (#78). Expected versions come from the same Containerfile pins the
+# build consumed, so a pin bump cannot silently drift the audit away from the
+# SBOM. The third field is the verified archive digest where the pin is a
+# build argument; it reaches the published SBOM as the purl checksum
+# qualifier, the one digest field syft's sbom-cataloger merge preserves.
+# review-git-hooks is versioned by the review source revision, which only the
+# publisher knows; without --expected-revision it is a presence check only.
+required_sbom_components() {
+  local arch="$1" goose_sha256="$2" suffix
+  local hive_commit skills_commit codex_version
+  case "$arch" in
+  amd64) suffix=X86_64 ;;
+  arm64) suffix=AARCH64 ;;
+  *)
+    echo "required_sbom_components needs amd64 or arm64, got: ${arch}" >&2
+    return 2
+    ;;
+  esac
+  hive_commit="$(containerfile_arg HIVE_COMMIT)"
+  skills_commit="$(containerfile_arg SKILLS_COMMIT)"
+  codex_version="$(containerfile_arg CODEX_VERSION)"
+  printf 'goose\t%s\t%s\n' "$(containerfile_arg GOOSE_CHANNEL)" "$goose_sha256"
+  printf 'gh\t%s\t\n' "$(containerfile_arg GH_VERSION)"
+  printf 'tmux\t%s\t\n' "$(containerfile_arg TMUX_VERSION)"
+  printf 'codex\t%s\t%s\n' "$codex_version" "$(containerfile_arg "CODEX_${suffix}_SHA256")"
+  printf 'codex-code-mode-host\t%s\t%s\n' "$codex_version" "$(containerfile_arg "CODEX_CODE_MODE_HOST_${suffix}_SHA256")"
+  printf 'ripgrep\t%s\t%s\n' "$(containerfile_arg RIPGREP_VERSION)" "$(containerfile_arg "RIPGREP_${suffix}_SHA256")"
+  printf 'contributor-agent.sh\t%s\t\n' "$hive_commit"
+  printf 'contributor-relay.sh\t%s\t\n' "$hive_commit"
+  printf 'backends.conf\t%s\t\n' "$hive_commit"
+  printf 'bluefin-organization-skills\t%s\t\n' "$skills_commit"
+  printf 'review-git-hooks\t%s\t\n' "$expected_revision"
+}
+
+check_sbom_components() {
+  local sbom_json="$1" source_desc="$2" arch="$3" goose_sha256="$4"
+  local name expected expected_sha actual
+  while IFS=$'\t' read -r name expected expected_sha; do
+    [[ -n "$name" ]] || continue
+    actual="$(jq -r --arg name "$name" \
+      '[.packages[]? | select(.name == $name) | .versionInfo][0] // empty' \
+      <<<"$sbom_json")"
+    if [[ -z "$actual" ]]; then
+      error "${source_desc} omits review-owned component: ${name}"
+      continue
+    fi
+    if [[ -z "$expected" ]]; then
+      [[ "$name" == review-git-hooks ]] ||
+        error "no expected version derivable from image/Containerfile for ${name}"
+      continue
+    fi
+    [[ "$actual" == "$expected" ]] ||
+      error "${source_desc} records ${name} at ${actual}, expected ${expected}"
+    # The digest rides as the purl checksum qualifier: raw in the in-image
+    # manifest, percent-encoded after syft re-encodes the locator.
+    if [[ "$name" == goose && -z "$expected_sha" ]]; then
+      error "${source_desc}: image does not record the verified Goose ${arch} asset digest"
+      continue
+    fi
+    if [[ -n "$expected_sha" ]] && ! jq -e --arg name "$name" --arg sha "$expected_sha" \
+      '[.packages[]? | select(.name == $name) |
+        .externalRefs[]? | select(.referenceType == "purl") | .referenceLocator |
+        test("checksum=sha256(:|%3A)" + $sha)] | any' \
+      <<<"$sbom_json" >/dev/null; then
+      error "${source_desc} records ${name} without its verified archive digest ${expected_sha}"
+    fi
+  done < <(required_sbom_components "$arch" "$goose_sha256")
+}
+
+# The SBOM predicate lives in a signed Sigstore bundle in the registry's
+# referrers API; the signature is verified separately and the content is read
+# from the same attestation. gh attestation download writes one JSONL line per
+# bundle, with the in-toto statement base64-encoded in the DSSE envelope.
+fetch_spdx_predicate() {
+  local reference="$1" download_dir bundle_file statement
+  download_dir="$(mktemp -d)"
+  if ! (
+    cd "$download_dir"
+    gh attestation download "oci://${reference}" \
+      --repo "$attestation_repository" \
+      --predicate-type "$spdx_predicate" >/dev/null
+  ); then
+    rm -rf "$download_dir"
+    return 1
+  fi
+  bundle_file="$(find "$download_dir" -name '*.jsonl' -print -quit)"
+  statement="$(head -n 1 "$bundle_file" | jq -r '.dsseEnvelope.payload // empty' | base64 -d 2>/dev/null || true)"
+  rm -rf "$download_dir"
+  jq -e --arg predicate_type "$spdx_predicate" \
+    'select(.predicateType == $predicate_type) | .predicate' <<<"$statement"
 }
 
 normalize_arch() {
@@ -379,10 +502,26 @@ if "$require_attestations"; then
   while IFS=$'\t' read -r platform digest; do
     [[ -n "$platform" ]] || continue
     platform_verified=true
-    verify_predicate "${derived_repository}@${digest}" "$spdx_predicate" || {
+    # An attached SBOM is not coverage: the document must also name the
+    # archive-installed components review owns (#78), on every platform, or
+    # publication fails here.
+    if verify_predicate "${derived_repository}@${digest}" "$spdx_predicate"; then
+      if ! "$direct_copy"; then
+        checks_before="$fail"
+        if spdx_document="$(fetch_spdx_predicate "${derived_repository}@${digest}")"; then
+          platform_labels="$(skopeo inspect --config "docker://${derived_repository}@${digest}" |
+            jq -r '.config.Labels // {} | to_entries[] | "\(.key)=\(.value)"')"
+          check_sbom_components "$spdx_document" "published linux/${platform} SPDX SBOM" "$platform" \
+            "$(goose_label_digest "$platform" "$platform_labels")"
+        else
+          error "published linux/${platform} SPDX SBOM predicate could not be read"
+        fi
+        [[ "$fail" == "$checks_before" ]] || platform_verified=false
+      fi
+    else
       error "published linux/${platform} image is missing a verifiable SPDX SBOM attestation"
       platform_verified=false
-    }
+    fi
     verify_predicate "${derived_repository}@${digest}" "$slsa_provenance_predicate" || {
       error "published linux/${platform} image is missing a verifiable SLSA provenance attestation"
       platform_verified=false
@@ -464,15 +603,29 @@ append "- Local unpacked delta (derived - base): $(($(jq -r '.[0].Size' <<<"$der
 
 mapfile -t base_layers < <(jq -r '.[0].RootFS.Layers[]' <<<"$base_inspect")
 mapfile -t derived_layers < <(jq -r '.[0].RootFS.Layers[]' <<<"$derived_inspect")
-if [[ "${#derived_layers[@]}" -le "${#base_layers[@]}" ]]; then
-  error "derived image does not add layers to the exact base image"
-else
+if "$direct_copy"; then
+  if [[ "${#derived_layers[@]}" -ne "${#base_layers[@]}" ]]; then
+    error "direct-copy image changed the base layer count"
+  fi
   for index in "${!base_layers[@]}"; do
-    [[ "${base_layers[$index]}" == "${derived_layers[$index]}" ]] ||
-      error "derived rootfs layer ${index} does not preserve the exact base layer"
+    [[ "${derived_layers[$index]:-}" == "${base_layers[$index]}" ]] ||
+      error "direct-copy image changed base layer ${index}"
   done
+else
+  if [[ "${#derived_layers[@]}" -le "${#base_layers[@]}" ]]; then
+    error "derived image does not add layers to the exact base image"
+  else
+    for index in "${!base_layers[@]}"; do
+      [[ "${base_layers[$index]}" == "${derived_layers[$index]}" ]] ||
+        error "derived rootfs layer ${index} does not preserve the exact base layer"
+    done
+  fi
 fi
-append "- Composition: derived rootfs preserves ${#base_layers[@]} base layer(s) and adds $((${#derived_layers[@]} - ${#base_layers[@]})) layer(s)."
+if "$direct_copy"; then
+  append "- Composition: direct copy preserves all ${#base_layers[@]} base layer(s) with no filesystem delta."
+else
+  append "- Composition: derived rootfs preserves ${#base_layers[@]} base layer(s) and adds $((${#derived_layers[@]} - ${#base_layers[@]})) layer(s)."
+fi
 
 base_labels="$(jq -r '.[0].Config.Labels // {} | to_entries[] | "\(.key)=\(.value)"' <<<"$base_inspect")"
 derived_labels="$(jq -r '.[0].Config.Labels // {} | to_entries[] | "\(.key)=\(.value)"' <<<"$derived_inspect")"
@@ -501,8 +654,20 @@ if "$require_oci"; then
 
   expected_oci_value() {
     case "$1" in
-    org.opencontainers.image.title) printf '%s' 'Bluefin review contributor' ;;
-    org.opencontainers.image.description) printf '%s' 'Foreground contributor runtime for projectbluefin/review.' ;;
+    org.opencontainers.image.title)
+      if "$direct_copy"; then
+        printf '%s' 'Bluefin review lab-runner fork'
+      else
+        printf '%s' 'Bluefin review contributor'
+      fi
+      ;;
+    org.opencontainers.image.description)
+      if "$direct_copy"; then
+        printf '%s' 'Direct fork of the Project Bluefin lab-runner image.'
+      else
+        printf '%s' 'Foreground contributor runtime for projectbluefin/review.'
+      fi
+      ;;
     org.opencontainers.image.url | org.opencontainers.image.source) printf '%s' "$expected_source" ;;
     org.opencontainers.image.revision) printf '%s' "$expected_revision" ;;
     org.opencontainers.image.version) printf '%s' "$expected_version" ;;
@@ -592,7 +757,7 @@ runtime_inventory() {
   ' bash "$2" "$3" "$4"
 }
 
-base_required="bash cat chmod cp curl git grep jq ls mkdir mv python3 rm sed sh sort tail tee touch tr uname wc ssh kubectl tic infocmp argo just nginx find cmp diff"
+base_required="bash cat chmod cp curl git grep jq ls mkdir mv python3 rm sed sh sort tail tee touch tr uname wc ssh kubectl tic infocmp argo just nginx find cmp diff gzip skopeo shellcheck hadolint actionlint"
 # Two different rules used to be spelled the same way here, which made the
 # audit fail for a change that was actually correct.
 #
@@ -617,7 +782,7 @@ base_required="bash cat chmod cp curl git grep jq ls mkdir mv python3 rm sed sh 
 package_managers="apt dnf apk"
 review_owned="node npm gh tmux codex codex-code-mode-host goose rg"
 base_forbidden="${review_owned} ${package_managers}"
-derived_required="bash node npm corepack gh tmux codex codex-code-mode-host goose rg find cmp diff grep cat ls infocmp"
+derived_required="bash node npm corepack gh tmux codex codex-code-mode-host goose rg find cmp diff grep cat ls infocmp gzip skopeo shellcheck hadolint actionlint"
 derived_forbidden="$package_managers"
 # Base commands Hive's relay calls directly and review must never shim over.
 # image/Containerfile proves their semantics at build time against the real
@@ -642,6 +807,12 @@ for image_kind in base derived; do
     required="$base_required"
     forbidden="$base_forbidden"
     terms="xterm-256color tmux-256color"
+  elif "$direct_copy"; then
+    image="$derived_image"
+    arch="$derived_arch"
+    required="$base_required"
+    forbidden="$base_forbidden"
+    terms="xterm-256color tmux-256color"
   else
     image="$derived_image"
     arch="$derived_arch"
@@ -662,7 +833,7 @@ for image_kind in base derived; do
   for command in $forbidden; do
     forbid_line "$inventory" forbidden "$command"
   done
-  if [[ "$image_kind" == derived ]]; then
+  if [[ "$image_kind" == derived && ! "$direct_copy" ]]; then
     for command in $derived_unshadowed; do
       unshadowed_path_line "$inventory" "$command"
     done
@@ -701,6 +872,17 @@ NODE
       error "derived runtime cannot execute codex --version"
     "$engine" run --rm --entrypoint /usr/local/bin/codex-code-mode-host "$image" --help >/dev/null ||
       error "derived runtime cannot execute codex-code-mode-host --help"
+    # The image carries the SPDX manifest of its archive-installed components
+    # (#78) for the publish workflow's syft run to ingest; a build that loses
+    # it would publish an incomplete SBOM, so assert it here where a missing
+    # manifest is still a local, unpublishable defect.
+    if sbom_manifest="$("$engine" run --rm --entrypoint /usr/bin/cat "$image" \
+      /opt/bluefin/sbom/review-components.spdx.json 2>/dev/null)"; then
+      check_sbom_components "$sbom_manifest" "derived image SBOM manifest" "$arch" \
+        "$(goose_label_digest "$arch" "$derived_labels")"
+    else
+      error "derived image is missing /opt/bluefin/sbom/review-components.spdx.json"
+    fi
     grep -q '^identity:1000:dev$' <<<"$inventory" ||
       error "derived runtime must execute as uid 1000 (dev)"
   fi

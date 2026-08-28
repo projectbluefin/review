@@ -207,6 +207,7 @@ jobs:
             --build-arg GOOSE_REFRESH="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --build-arg GOOSE_X86_64_SHA256="$GOOSE_X86_64_SHA256" \
             --build-arg GOOSE_AARCH64_SHA256="$GOOSE_AARCH64_SHA256" \
+            --build-arg REVIEW_REVISION="${GITHUB_SHA}" \
             --secret id=github_token,src="$secret_file" \
             --label "org.opencontainers.image.title=Bluefin review contributor" \
             --label "org.opencontainers.image.description=Foreground contributor runtime for projectbluefin/review." \
@@ -238,7 +239,7 @@ jobs:
           podman run --rm --entrypoint /usr/bin/bash review:smoke \
             -lc 'TERM=xterm-256color infocmp xterm-256color >/dev/null; infocmp tmux-direct >/dev/null; TERM=xterm-256color tmux new-session -d -s terminfo-smoke "sleep 30"; tmux has-session -t terminfo-smoke; test "$(tmux show -gv default-terminal)" = tmux-direct; tmux kill-session -t terminfo-smoke'
 
-      - name: Prove the shipped runtime on this architecture
+      - name: Execute the shipped review runtime on this architecture
         shell: bash
         env:
           EXPECTED_UNAME: ${{ matrix.uname }}
@@ -246,10 +247,20 @@ jobs:
           set -euo pipefail
           container_arch="$(podman run --rm --entrypoint /usr/bin/uname review:smoke -m)"
           test "$container_arch" = "$EXPECTED_UNAME"
+          podman run --rm --entrypoint /usr/local/bin/bluefin-review review:smoke --help
+          podman run --rm --entrypoint /usr/local/bin/goose review:smoke --version
           podman run --rm --entrypoint /usr/local/bin/codex review:smoke --version
           podman run --rm --entrypoint /usr/local/bin/codex-code-mode-host review:smoke --help
           podman run --rm --entrypoint /opt/bluefin/tui/.venv/bin/python review:smoke \
             -c "import sys; sys.path.insert(0, '/opt/bluefin/tui'); import bluefin_review_tui"
+          podman run --rm --entrypoint /usr/bin/bash review:smoke -lc '
+            set -eu
+            node --version >/dev/null
+            gh --version >/dev/null
+            tmux -V >/dev/null
+            pi --version >/dev/null
+            test -x /usr/local/bin/review-entrypoint
+          '
           echo "Native container: ${container_arch}"
 
       - name: Log in to GHCR
@@ -310,7 +321,13 @@ jobs:
       # the multi-architecture index instead would silently produce one
       # platform's inventory and attach it to an artifact claiming both.
       - name: Generate the SPDX SBOM for this architecture
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        env:
+          # Off by default: ingest the image's own SPDX manifest of
+          # archive-installed components (#78), baked in at build time from
+          # the resolved pins. Without this cataloger the SBOM describes only
+          # what package-manager metadata exposes.
+          SYFT_SELECT_CATALOGERS: "+sbom-cataloger"
         with:
           image: ${{ steps.push.outputs.image }}@${{ steps.push.outputs.digest }}
           registry-username: ${{ github.actor }}

@@ -62,6 +62,12 @@ cat >"$tmpdir/index.json" <<EOF
       "name": "invalid-entry",
       "description": "Must stay below the skills directory.",
       "entry_point": "../outside.md"
+    },
+    {
+      "id": "excluded-skill",
+      "name": "excluded-skill",
+      "description": "Excluded by the build.",
+      "entry_point": "docs/skills/valid-skill.md"
     }
   ]
 }
@@ -70,6 +76,7 @@ EOF
 python3 "$repo_root/scripts/generate-skills.py" \
   --index "$tmpdir/index.json" \
   --raw-base "$tmpdir/source" \
+  --exclude excluded-skill \
   --out "$tmpdir/out" \
   2>"$tmpdir/stderr"
 
@@ -78,6 +85,8 @@ test -f "$tmpdir/out/nested-skill/SKILL.md"
 test ! -e "$tmpdir/escaped"
 grep -Fq "skipped $tmpdir/escaped: invalid id" "$tmpdir/stderr"
 grep -Fq 'skipped invalid-entry: invalid entry_point' "$tmpdir/stderr"
+test ! -e "$tmpdir/out/excluded-skill"
+grep -Fq 'skipped excluded-skill: excluded by build' "$tmpdir/stderr"
 
 # A linked sibling reference is projected beside the skill, so the body's links
 # resolve inside the image instead of dangling.

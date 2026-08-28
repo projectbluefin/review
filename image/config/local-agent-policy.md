@@ -22,8 +22,8 @@ shell builtin and reports shell functions too.
 `rg` is a preference for repository exploration, not a replacement: `grep`,
 `find`, `cat` and `ls` keep their standard behavior, so a command that needs
 one of them must call it by name.
-The tools that are not installed are `gzip` (GNU `tar` still reads `.tar.gz`
-here via `tar -I 'python3 -m gzip'`) and `fd`: use `find` for `fd`.
+The base also ships `gzip`, `skopeo`, `shellcheck`, `hadolint`, and
+`actionlint`. The tool that is not installed is `fd`: use `find` for `fd`.
 When a task needs a toolchain the runtime does not ship,
 that is an evidenced finding, not something to install;
 never reimplement a missing tool under its own name.

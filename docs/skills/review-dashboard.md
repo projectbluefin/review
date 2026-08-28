@@ -1,7 +1,7 @@
 ---
 name: review-dashboard
 version: "2.0"
-last_updated: 2026-08-20
+last_updated: 2026-08-25
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
 entry_point: docs/skills/review-dashboard.md
@@ -143,11 +143,13 @@ conflicts direct the maintainer to manual resolution before a gate.
    or trailing terminal events are `unparsable` with bounded raw evidence.
    It enables code-mode-only and the bundled official code-mode host, disables
    direct-tool fallback, and uses the review container as the shell isolation
-   boundary so the CLI never depends on a nested bubblewrap sandbox.
+   boundary so the CLI never depends on a nested bubblewrap sandbox. A
+   re-entrant harness persists its opaque continuation before waiting for an
+   external event; only that durable continuation may make the run resumable.
    Keep the decision card concise and keep bounded raw evidence reachable with
    `e`; backend prose does not belong in Textual rendering code.
 8. **Keep the acting surface explicit.** The shipped keys cover review,
-   merge, branch updates, rejection, handoff, docs, Ghost Cluster, and dupe
+   merge, branch updates, rejection, handoff, docs, and dupe
    cleanup; label and priority mutation are not part of the dashboard.
 
 ## Textual Patterns
@@ -261,10 +263,14 @@ distinct states. `[o]` is only an optional browser escape hatch.
 - **Treat the Hive API as JSON, not a browser.** The read-only status probe
   reports missing hub configuration, missing credentials, network failure,
   authentication, authorization, edge/login redirects, malformed responses,
-  and server failure as separate concise states. The queue POST never follows
-  a redirect and succeeds only when a bounded JSON response explicitly says
-  `queued`; the typed pull-request-number gate remains the authority boundary.
-  Hosted queueing remains blocked by the ingress defect tracked in #258.
+  and server failure as separate concise states. A malformed response names
+  its own shape — status, content type, byte count, and a bounded redacted
+  body excerpt in the failure state and the trace — so an intercepted SPA
+  page reads differently from invalid JSON or a JSON array. The queue POST
+  never follows a redirect and succeeds only when a bounded JSON response
+  explicitly says `queued`; the typed pull-request-number gate remains the
+  authority boundary. Hosted queueing remains blocked by the ingress defect
+  tracked in #258.
 
 ## Batch landing
 
@@ -298,6 +304,18 @@ to an outcome is marked `no outcome reported` when the agent closed its
 report with `done` and `agent died mid-batch` when it never did — each
 with the last reported state, both distinguishable from every state the
 agent can report.
+
+The brief teaches the agent to batch a repository-level blocker: a required
+check that fails on the toolchain or the base branch blocks every pull
+request in that repository identically, so the first such `blocked` verdict
+is diagnosed once and applied to the remaining same-repository rows in one
+pass — each note naming the one root cause — instead of re-diagnosing them
+one at a time. The fix never goes inside one pull request's branch: a
+mechanical root cause (a toolchain pin bump, a workflow repair) is fixed at
+the root as its own branch and pull request, named in each covered note;
+since it was not in the maintainer's confirmed selection the agent reports
+it rather than merging it. A root cause with no mechanical fix is a written
+finding in the done note.
 
 The screen is a cabinet of framed panels (`BATCHES`, `HIVE`, `AGENT LOG`,
 round `$secondary` borders with titles) over a title bar. Each batch header
@@ -368,7 +386,25 @@ target and timeout. GitHub computes mergeability asynchronously, so a
 `mergeable: UNKNOWN` answer is a cache-warming placeholder: the brief has
 the agent re-query with backoff for up to a minute and act only on the
 computed state — `blocked` on UNKNOWN alone reports nothing a maintainer
-can act on (#294).
+can act on (#294). Publish detection also has a change-level edge: a
+publish workflow can be path-filtered, scheduled, or manual, so a merge
+that touches none of its triggers owes no publication — the brief has
+the agent prove the filter from the workflow YAML and the merge commit's
+file list and report the merge itself as the deliverable, never `failed`
+for a publication the repository never promised. Above all of these
+stands one policy: this appliance owns no lab and depends on none — no
+pull request may ever report `blocked` because a maintainer-local
+service is missing; its absence or failure only moves the
+verification to ghcr evidence. The same holds for a required check that
+fails without
+testing the pull request: when the external service the check drives — a
+lab endpoint, a runner pool — is unreachable, that is infrastructure
+unavailability, not a defect, and never `blocked` on its own. The brief
+has the agent prove the distinction in the check's logs, verify the
+check's deliverable in ghcr instead (the head's `sha-<head>` image is the
+substitute evidence), and continue the normal path — approve and merge,
+or the `lgtm` label with the evidence named when branch protection
+refuses with the check still red. Merging around it stays forbidden.
 - **The completed card reuses those paths.** `L`, `a`, `m`, and `u` return to
   the queue's existing handlers, so permissions, live-head checks, exact
   commands, and typed-number confirmation remain the authority boundary.
@@ -376,7 +412,10 @@ can act on (#294).
   exact severity counts, cited file/line findings, engine and live-CI
   verification, duplicate/overlap context, mergeability, head, and
   backend/model provenance. Incomplete, failed, and unparsable results direct
-  the reviewer to raw evidence and never display a clean conclusion.
+  the reviewer to raw evidence and never display a clean conclusion. The card
+  is a point-in-time record: `ReviewScreen` pins the live and overlap
+  evidence at review start, because the queue's background workers keep
+  rewriting `stop.live`/`stop.overlap` while the review runs (#339).
 - **Never bypass branch protection.** No `--admin`, no `--delete-branch`, no
   push.
 
@@ -415,6 +454,20 @@ mutates GitHub.
 - A new mutating verb passed to the read-only `gh()` helper.
 - A default view that filters the queue without saying so.
 - A feature added with only a `tests/dashboard-contract.sh` grep behind it.
+
+## Exact-head re-review
+
+When a completed result is bound to an older full H0 while the point-in-time
+live snapshot contains a different full H1, the decision card appends a
+bounded, read-only delta: both identities, each prior finding disposition,
+newly supported H1 evidence, and an explicit statement that H0 authority is
+not carried forward. The review worker obtains changed H1 regions only through
+the bounded read-only GitHub compare endpoint; a failed, malformed, oversized,
+or partial response is concrete full-review evidence, never a guessed mapping.
+Uncertain mappings, merge-base changes, sensitive workflow changes, incomplete
+H0, and unavailable capability show their concrete fallback reasons and direct
+the maintainer to a full review. Missing or malformed delta inputs fail closed
+and do not alter ordinary same-head review cards or any action gate.
 
 ## Verification
 

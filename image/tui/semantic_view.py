@@ -39,7 +39,6 @@ class ActionID(str, Enum):
     OPEN_BROWSER = "open-browser"
     ASK_HIVE = "ask-hive"
     SHOW_DOCS_UPDATE_TASK = "show-docs-update-task"
-    SHOW_GHOST_BUILD_TASK = "show-ghost-build-task"
     NAVIGATE_UP = "navigate-up"
     NAVIGATE_DOWN = "navigate-down"
     NAVIGATE_FIRST = "navigate-first"
@@ -97,7 +96,6 @@ _ACTION_SPECS = (
     (ActionID.OPEN_BROWSER, ActionSpec("Open in browser", ordinary_journey=False)),
     (ActionID.ASK_HIVE, ActionSpec("Ask Hive")),
     (ActionID.SHOW_DOCS_UPDATE_TASK, ActionSpec("Show docs update task")),
-    (ActionID.SHOW_GHOST_BUILD_TASK, ActionSpec("Show Ghost build task")),
     (ActionID.NAVIGATE_UP, ActionSpec("Navigate up", suspended_in_editor=True)),
     (ActionID.NAVIGATE_DOWN, ActionSpec("Navigate down", suspended_in_editor=True)),
     (ActionID.NAVIGATE_FIRST, ActionSpec("Navigate first", suspended_in_editor=True)),

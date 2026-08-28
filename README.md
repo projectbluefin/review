@@ -5,8 +5,106 @@ enslaving the oppressors since 2026
 
 ![img](https://github.com/user-attachments/assets/6b8425b8-dedf-4dc9-aa54-60fa9e6cfd91)
 
-`review` comes with Goose and the official Codex CLI prebundled and passes
-through only the credential each selected client needs.
+## Start here
+
+Review has two operational modes. Pick the one that matches what you want to
+do:
+
+| Goal | Mode | Start with |
+| --- | --- | --- |
+| Review pull requests as a maintainer | Maintainer dashboard | `just review-queue` |
+| Donate an agent to Hive | Contributor worker | `just review-container` |
+| Check whether this machine is ready | Diagnostics | `just review-doctor` |
+| Stop a detached worker | Lifecycle | `just review-stop` |
+
+### One-time base setup
+
+Run the launcher from the root of this checkout; `just` reads the current
+directory's justfile. Install `just` and rootless Podman if your host does not
+already provide them, then prepare the shared GitHub and isolation prerequisites:
+
+```bash
+git clone https://github.com/projectbluefin/review.git
+cd review
+gh auth login --web --hostname github.com --scopes repo,read:org
+just review-doctor
+```
+
+The agent-capable modes also require an executable host-side gVisor `runsc`
+runtime. The doctor runs the same credential-free rootless Podman probe that a
+launch uses. If it fails, Review refuses to start an agent or mount a
+credential; follow the detailed [gVisor setup and remediation](#requirements-and-credentials)
+below, then run the doctor again. The doctor defaults to the Goose worker
+checks; for a Pi worker, export `PI_API_KEY` first, then use
+`TOOL=pi just review-doctor`.
+
+GitHub authentication is separate from model-provider authentication. `gh auth
+login` supplies the GitHub identity used for repository work; it does not
+authenticate GitHub Copilot inference.
+
+### Current clients and backends
+
+Every row also needs the base setup above. These are the combinations Review
+supports today:
+
+| Surface | Client/backend | One-time setup | Exact launch |
+| --- | --- | --- | --- |
+| Maintainer / `review-queue` | Goose + GitHub Copilot (default) | Install Goose, run `goose configure`, choose GitHub Copilot, and finish its device flow. Keep the Copilot credential in Goose's keyring or provide `GITHUB_COPILOT_TOKEN`. | `just review-queue` |
+| Maintainer / `review-queue` | Codex subscription | Run `codex login` with file credential storage so the current launcher can read `${CODEX_HOME:-$HOME/.codex}/auth.json`. | `BLUEFIN_REVIEW_BACKEND=codex just review-queue` |
+| Contributor / `review-container` | Goose + GitHub Copilot (default, `TOOL=goose`) | The same Goose/Copilot setup as above. A separate GitHub token is still needed for contributor Git operations. | `just review-container` |
+| Contributor / `review-container` | Codex subscription (`TOOL=codex`) | The same file-auth `auth.json` from `codex login`; explicitly selecting Codex does not require host Goose or Copilot. | `TOOL=codex just review-container` |
+| Contributor / `review-container` | Pi (`TOOL=pi`) | Set `PI_API_KEY`; the launcher passes it to the selected Pi process as its Anthropic credential. | `TOOL=pi just review-container` |
+
+Goose is fixed to GitHub Copilot here: `GOOSE_PROVIDER` may be unset or
+`github_copilot`. Contributor model profiles are defaults from the justfile:
+`luna` (or no profile) uses `gpt-5.6-luna` at `max`, `opus5` uses
+`claude-opus-5` at `high` with a `264000` context limit, and `kimi` uses
+`kimi-k3` at `max` with the same clamp. Environment values still override
+those defaults.
+
+### Copy/paste examples
+
+```bash
+# Default maintainer review: Goose + GitHub Copilot.
+just review-queue
+
+# Maintainer review with the bundled Codex harness.
+BLUEFIN_REVIEW_BACKEND=codex just review-queue
+
+# Default Hive contributor worker: Goose + GitHub Copilot.
+just review-container
+
+# Hive contributor worker with Codex.
+TOOL=codex just review-container
+
+# Hive contributor worker with Pi, after PI_API_KEY is set in the shell.
+TOOL=pi just review-container
+
+# Optional Goose profile and effort.
+just review-container opus5 high
+
+# Deliberately detached contributor worker.
+REVIEW_DETACH=1 just review-container
+
+# Stop the default detached worker.
+just review-stop
+
+# Walk one repository's live open pull requests instead of the static queue.
+just review-queue projectbluefin/review
+```
+
+### How Review is split
+
+Review is the human review experience plus a Hive contributor appliance:
+
+- `review-queue` is the maintainer dashboard and does not register with Hive.
+- `review-container` contributes compute through Hive's contributor worker.
+- Hive owns task selection and assignment.
+- `BLUEFIN_REVIEW_BACKEND=codex` preselects Codex for a maintainer review; it
+  never changes the worker backend. Use `TOOL=codex` or `TOOL=pi` for workers.
+
+`review` comes with Goose, the official Codex CLI, and Pi prebundled and
+passes through only the credential each selected client needs.
 
 **These are NOT anonymous "donations"** - it's tied to the person's github account, reputation in the queue is based on your real life reputation in the project. The cream will rise to the top.
 
@@ -51,8 +149,8 @@ silently create a second workflow, authority path, or task queue.
 2. **Interactive maintainer dashboard** (`review-queue`): the review surface.
    Goose or an explicitly selected Codex harness reviews a pull request in
    place and streams its verdict, alongside
-   high-velocity triage with batching, agent-assisted
-   documentation updates (#134), and Ghost Cluster build dispatch (#133).
+   high-velocity triage with batching, and agent-assisted
+   documentation updates (#134).
 
 The watcher feedback loop — comparing automated pre-reviews with maintainer
 decisions and feeding the lessons back into `projectbluefin/common` — is
@@ -98,7 +196,7 @@ four public recipes:
 | `just review-container [profile] [effort]` | Run the Hive queue worker: the contributor container that receives assigned tasks and donates inference. `REVIEW_DETACH=1` runs it as a detached background worker. |
 | `just review-stop [name]` | Stop a detached worker. Refuses attended runs and containers this launcher did not start. |
 | `just review-queue [profile] [effort] [flags…]` | Walk the Bluefin PR queue interactively in the contributor container. |
-| `just review-doctor` | Perform read-only launch diagnostics. |
+| `just review-doctor` | Check launch readiness, including the required gVisor/runsc boundary. Starts no agent. |
 
 Interactive runs remain attached to their originating terminal, and Ctrl-C or
 closing that terminal stops them. A detached worker (`REVIEW_DETACH=1`) is
@@ -132,13 +230,64 @@ an operations task outside this repository automation.
 - `gh auth login --web --hostname github.com --scopes repo,read:org` is a hard
   prerequisite for every recipe.
 - `podman`.
-- Goose configured for GitHub Copilot, or `GITHUB_COPILOT_TOKEN`, for
-  contributor work and Goose reviews.
+- A trusted host `runsc` (gVisor) installation. `review-container` and
+  `review-queue` fail before starting an agent or mounting credentials unless
+  a credential-free rootless Podman probe reports `OCIRuntime=runsc`. Run
+  `just review-doctor` to check it. Bluefin provisioning is tracked by
+  [bluefin#1139](https://github.com/projectbluefin/bluefin/issues/1139) and the
+  Review contract is [#348](https://github.com/projectbluefin/review/issues/348);
+  the launcher never downloads a runtime or falls back to Podman's default.
+
+  Until the base ships it, install it user-local (no root):
+
+  ```bash
+  arch=$(uname -m)
+  url=https://storage.googleapis.com/gvisor/releases/release/latest/${arch}
+  curl -fsSLO ${url}/runsc -O ${url}/runsc.sha512
+  sha512sum -c runsc.sha512
+  install -m 0755 runsc ~/.local/bin/runsc && rm runsc runsc.sha512
+  ```
+
+  Rootless containers cannot delegate cgroup setup to systemd, so Podman needs
+  a shim that passes `--ignore-cgroups`. The real binary stays on `PATH` under
+  its own name for the launcher's version check:
+
+  ```bash
+  printf '#!/usr/bin/env bash\nexec %s/.local/bin/runsc --ignore-cgroups "$@"\n' \
+    "$HOME" > ~/.local/bin/runsc-podman
+  chmod 0755 ~/.local/bin/runsc-podman
+  ```
+
+  Then register it with Podman. Do not blindly append the table: a second
+  `[engine.runtimes]` is a TOML duplicate-key error and Podman refuses to read
+  the file at all, which breaks every container on the machine. This handles an
+  absent file, an existing file without the table, and one that already has it:
+
+  ```bash
+  conf=~/.config/containers/containers.conf
+  mkdir -p ~/.config/containers
+  if grep -q 'runsc-podman' "$conf" 2>/dev/null; then
+    echo "runsc already registered"
+  elif grep -q '^\[engine.runtimes\]' "$conf" 2>/dev/null; then
+    sed -i "/^\[engine.runtimes\]/a runsc = [\"$HOME/.local/bin/runsc-podman\"]" "$conf"
+  else
+    printf '[engine.runtimes]\nrunsc = ["%s/.local/bin/runsc-podman"]\n' "$HOME" >> "$conf"
+  fi
+  ```
+
+  Verify with `just review-doctor`; the isolation check must report
+  `ready; rootless Podman probe passed`.
+- Goose configured for GitHub Copilot (`goose configure`), or
+  `GITHUB_COPILOT_TOKEN`, for contributor work and Goose reviews. The
+  `GOOSE_PROVIDER` value must be unset or `github_copilot`.
 - `codex login` with file credential storage completed on the host for Codex
   subscription reviews. The image already contains the pinned official CLI;
   explicitly selected Codex reviews do not require host Goose or Copilot.
 - For contributor Git operations, a separate GitHub token via
   `REVIEW_GH_TOKEN`.
+
+Build and publish validation uses Podman, Buildah, Skopeo, `jq`, and the
+GitHub CLI.
 
 Goose is the default Hive contributor backend and GitHub Copilot is its only
 supported provider. Maintainer-side `review-queue` may explicitly preselect
@@ -269,7 +418,6 @@ regression `tests/dashboard_pilot.py` drives the real app to prove.
 | `r` | **start a review with Goose** — streams live, reports COMPLETE / INCOMPLETE / FAILED |
 | `L` | leave a review on GitHub: approve, request changes, or comment (also from the review screen) |
 | `d` | docs-update agent task (tracked as #134) |
-| `g` | Ghost Cluster build dispatch (tracked as #133) |
 | `o` | optional browser escape hatch |
 | `v` | view the complete diff — full screen, coloured, paginated, with loading/error state |
 | `c` | comment |
@@ -632,10 +780,13 @@ All configuration is read at launch.
 | `GOOSE_MODEL` | Optional GitHub Copilot model override. |
 | `GOOSE_THINKING_EFFORT` | Optional Copilot reasoning-effort override. |
 | `GITHUB_COPILOT_TOKEN` | Optional Copilot credential override. |
-| `TOOL` | Agent backend selector; only `goose` is accepted. |
+| `TOOL` | Contributor agent backend selector: `goose` (default), `codex`, or `pi`. It does not select the maintainer dashboard backend. |
 
-`~/.config/review/last-selections.env` stores launcher configuration
-state such as the last Goose/provider selection between runs.
+The maintainer dashboard may remember non-secret harness preferences at
+`~/.config/bluefin-review/harness.json` (or the equivalent
+`XDG_CONFIG_HOME` path). Contributor backend and provider selection are read
+from the environment for each launch; no secret or provider selection is
+stored by the launcher.
 
 `~/.local/state/review/` stores the pinned Hive checkout.
 It is the only state this launcher owns. Goose and provider
@@ -671,9 +822,8 @@ The image derives from the digest-pinned Project Bluefin FSDK lab runner and
 layers the pinned Hive runtime at `8ac1994a4994ec3454f83c2ed5a989abd430e1af`,
 the current Goose canary snapshot, the pinned official Codex CLI, GitHub CLI,
 tmux, uv with the Textual
-dashboard runtime, hooks, generated
-organization skills, and the pinned `projectbluefin/lab` skills (projected as
-`lab-<id>` so the Ghost Cluster operating knowledge rides along). Goose
+dashboard runtime, hooks, and generated
+organization skills. Goose
 publishes that snapshot from its active `main`
 branch; each archive is verified against GitHub's signed build provenance
 before installation.
@@ -705,7 +855,13 @@ description, project URL/source, revision, version, creation time, license,
 and exact FSDK base name/digest metadata in both platform labels and manifest
 annotations. Publishing attaches a signed SLSA provenance bundle and a signed
 SPDX SBOM to the published index digest, verifiable with `gh attestation
-verify`. CI verifies the FSDK input's GitHub attestation and its
+verify`. The SBOM covers the archive-installed components — Goose, the GitHub
+CLI, tmux, Codex, ripgrep, the pinned Hive runtime files, the skill bundles,
+and the review git hooks — because the image carries a build-time SPDX
+manifest of them (`/opt/bluefin/sbom/review-components.spdx.json`, generated
+from the resolved Containerfile pins) that the publish scan ingests; the
+post-publish audit fails when any of them is missing from either platform's
+attested SBOM. CI verifies the FSDK input's GitHub attestation and its
 linux/amd64+linux/arm64 manifest before a build; after publication it verifies
 both review attestations, labels, annotations, subject digest, and exactly
 those two platforms.

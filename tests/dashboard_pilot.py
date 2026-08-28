@@ -75,6 +75,21 @@ def check(condition: bool, description: str) -> None:
         failures.append(description)
 
 
+async def settle_evidence(app, pilot) -> None:
+    """Drain the dashboard's mount-time evidence workers (#339).
+
+    Row highlight, the Hive probe, and harness discovery run as thread
+    workers whose UI callbacks rewrite a stop's live/overlap evidence — and
+    one of those callbacks (render_evidence/hive_loaded) spawns a follow-up
+    worker (render_context) whose own callback is the final rewrite. Drain
+    worker-and-callback rounds until nothing in flight can clobber fixture
+    evidence between its assignment and the start of the review.
+    """
+    for _ in range(3):
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+
 def write_stub(path: Path, body: str) -> str:
     path.write_text("#!/usr/bin/env bash\n" + body)
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
@@ -101,6 +116,11 @@ async def main() -> int:
         'if [ "$1 $2" = "api user" ]; then\n'
         '  if [ -n "${GH_USER_FAIL-}" ]; then echo "authentication required" >&2; exit 1; fi\n'
         '  echo castrojo; exit 0;\n'
+        'fi\n'
+        'if [ "$1" = "api" ] && [[ "$2" == repos/*/compare/* ]]; then\n'
+        '  if [ -n "${RE_REVIEW_COMPARE_FAIL-}" ]; then echo "compare unavailable" >&2; exit 1; fi\n'
+        f'  printf "compare:%s\\n" "${{RE_REVIEW_COMPARE_JSON-UNSET}}" >>"{gh_log}"\n'
+        '  if [ -n "${RE_REVIEW_COMPARE_JSON+x}" ]; then printf "%s\\n" "$RE_REVIEW_COMPARE_JSON"; else printf "%s\\n" "{}"; fi; exit 0\n'
         'fi\n'
         f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
         'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
@@ -751,6 +771,9 @@ async def main() -> int:
         *,
         head_sha: str = "0123456789abcdef0123456789abcdef01234567",
         reviewed_head: str = "",
+        prior_result: tui.ReviewResult | None = None,
+        compare_json: str | None = None,
+        compare_fail: bool = False,
     ):
         review_stub(exit_code, output)
         app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
@@ -760,6 +783,7 @@ async def main() -> int:
                 if app.stops:
                     break
                 await pilot.pause(0.05)
+            await settle_evidence(app, pilot)
             app.stops[0].live = {
                 "baseRefOid": "fedcba9876543210fedcba9876543210fedcba98",
                 "headRefOid": head_sha,
@@ -772,8 +796,17 @@ async def main() -> int:
                 ],
             }
             app.stops[0].overlap = {"duplicates": [44], "overlaps": [45, 46]}
+            app.stops[0].review_result = prior_result
             root_screen = app.screen
             original_adapter = tui.adapt_current_engine
+            if compare_json is not None:
+                os.environ["RE_REVIEW_COMPARE_JSON"] = compare_json
+            else:
+                os.environ.pop("RE_REVIEW_COMPARE_JSON", None)
+            if compare_fail:
+                os.environ["RE_REVIEW_COMPARE_FAIL"] = "1"
+            else:
+                os.environ.pop("RE_REVIEW_COMPARE_FAIL", None)
             if reviewed_head:
                 def stale_adapter(*args, **kwargs):
                     result = original_adapter(*args, **kwargs)
@@ -811,6 +844,8 @@ async def main() -> int:
             await pilot.press("q")
             await pilot.pause()
             tui.adapt_current_engine = original_adapter
+            os.environ.pop("RE_REVIEW_COMPARE_JSON", None)
+            os.environ.pop("RE_REVIEW_COMPARE_FAIL", None)
             check(app.screen is root_screen, "q must close ReviewScreen")
             return str(status.render()), set(status.classes), str(card.render())
 
@@ -2868,6 +2903,11 @@ async def main() -> int:
         workdir / "gh",
         f'printf "%s\\n" "$*" >>"{gh_log}"\n'
         'if [ "$1 $2" = "api user" ]; then echo castrojo; exit 0; fi\n'
+        'if [ "$1" = "api" ] && [[ "$2" == repos/*/compare/* ]]; then\n'
+        '  if [ -n "${RE_REVIEW_COMPARE_FAIL-}" ]; then echo "compare unavailable" >&2; exit 1; fi\n'
+        f'  printf "compare:%s\\n" "${{RE_REVIEW_COMPARE_JSON-UNSET}}" >>"{gh_log}"\n'
+        '  if [ -n "${RE_REVIEW_COMPARE_JSON+x}" ]; then printf "%s\\n" "$RE_REVIEW_COMPARE_JSON"; else printf "%s\\n" "{}"; fi; exit 0\n'
+        'fi\n'
         f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
         'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
         'if [ "$1 $2" = "pr list" ]; then echo "[]"; exit 0; fi\n'
@@ -3500,6 +3540,11 @@ async def main() -> int:
         workdir / "gh",
         f'printf "%s\\n" "$*" >>"{gh_log}"\n'
         'if [ "$1 $2" = "api user" ]; then echo castrojo; exit 0; fi\n'
+        'if [ "$1" = "api" ] && [[ "$2" == repos/*/compare/* ]]; then\n'
+        '  if [ -n "${RE_REVIEW_COMPARE_FAIL-}" ]; then echo "compare unavailable" >&2; exit 1; fi\n'
+        f'  printf "compare:%s\\n" "${{RE_REVIEW_COMPARE_JSON-UNSET}}" >>"{gh_log}"\n'
+        '  if [ -n "${RE_REVIEW_COMPARE_JSON+x}" ]; then printf "%s\\n" "$RE_REVIEW_COMPARE_JSON"; else printf "%s\\n" "{}"; fi; exit 0\n'
+        'fi\n'
         f'case "$1 $2" in "api repos/"*) cat "{perm_file}"; exit 0 ;; esac\n'
         'if [ "$1 $2" = "pr view" ]; then echo "{}"; exit 0; fi\n'
         'if [ "$1 $2" = "pr list" ]; then echo "[]"; exit 0; fi\n'
@@ -3735,6 +3780,357 @@ async def main() -> int:
         "next action  Rerun the review on the current head." in card,
         f"a stale review must direct a rerun, got {card!r}",
     )
+
+    # The H0 result is retained by the real Stop and the actual `gh api
+    # repos/<repo>/compare/H0...H1` boundary supplies H1 change evidence.
+    # No test-only dashboard metadata participates in this journey.
+    h0 = "a" * 40
+    h1 = "0123456789abcdef0123456789abcdef01234567"
+    base = "fedcba9876543210fedcba9876543210fedcba98"
+    prior = tui.ReviewResult(
+        1, "findings", {"critical": 0, "high": 2, "medium": 1, "low": 0},
+        [
+            {"severity": "high", "file": "image/entrypoint.sh", "line": 87, "end_line": 89, "title": "H0 changed"},
+            {"severity": "medium", "file": "tests/image-contract.sh", "line": 401, "title": "H0 unchanged"},
+            {"severity": "high", "file": "gone.py", "line": 7, "title": "H0 unmappable"},
+        ],
+        provenance={"head_sha": h0, "base_sha": base, "approval": "must not carry"},
+    )
+    re_review_output = "\n".join([
+        "goose review: check 'main' completed: 3 finding(s)",
+        '{"severity":"high","path":"image/entrypoint.sh","line_start":87,"line_end":89,"summary":"H1 changed","check":"main"}',
+        '{"severity":"medium","path":"tests/image-contract.sh","line_start":401,"line_end":401,"summary":"H1 unchanged","check":"main"}',
+        '{"severity":"low","path":"new.py","line_start":3,"line_end":3,"summary":"H1 [new]","check":"main"}',
+        "goose review: orchestrator emitted 3 finding(s) from 1 check(s) (main: ran, 3 finding(s))",
+    ])
+    mapped_compare = json.dumps({"total_files": 1, "files": [{
+        "filename": "image/entrypoint.sh", "status": "modified",
+        "patch": "\n".join(
+            ["@@ -80,5 +80,11 @@"] + ["-old"] * 5 + ["+new"] * 11
+        ),
+    }]})
+    text, classes, card = await run_review(
+        0, re_review_output, prior_result=prior, compare_json=mapped_compare,
+    )
+    check("RE-REVIEW" in card and f"reviewed {h0}" in card and f"current {h1}" in card,
+          "the production compare journey must name both exact H0 and H1 identities")
+    check(f"H1 manifest  base {base}  head {h1}  result findings" in card,
+          "the production delta must carry its current H1 manifest and result")
+    check("image/entrypoint.sh:87=changed-region" in card and
+          "tests/image-contract.sh:401=unchanged-region" in card and
+          "gone.py:7=invalidated-unmappable" in card,
+          "the production delta must render bounded changed, unchanged, and unmappable H0 dispositions: " + repr(card))
+    check("new.py:3 (new.py:3)" in card and "No authority carried from H0." in card and "must not carry" not in card,
+          "new H1 evidence must be escaped and H0 authority must not carry forward")
+    check(any(f"api repos/projectbluefin/bluefinctl/compare/{h0}...{h1}" in line
+              for line in gh_log.read_text().splitlines()),
+          "the Pilot must stub and exercise the production gh compare boundary")
+
+    # The official compare response has no total_files field. A bounded page
+    # with complete patch metadata must still reach deterministic delta
+    # classification, and the request must make its page bound explicit.
+    official_compare = json.dumps({
+        "status": "ahead", "ahead_by": 14, "behind_by": 0,
+        "total_commits": 14, "commits": [],
+        "files": [{
+            "filename": "image/entrypoint.sh", "status": "modified",
+            "patch": "\n".join(
+                ["@@ -80,5 +80,11 @@"] + ["-old"] * 5 + ["+new"] * 11
+            ),
+        }],
+    })
+    text, classes, card = await run_review(
+        0, re_review_output, prior_result=prior,
+        compare_json=official_compare,
+    )
+    check(
+        "FULL REVIEW REQUIRED" not in card
+        and "image/entrypoint.sh:87=changed-region" in card,
+        f"the official no-total_files compare shape must reach deterministic mapping: {card!r}",
+    )
+    check(
+        any(
+            f"api repos/projectbluefin/bluefinctl/compare/{h0}...{h1}" in line
+            and "--method GET" in line
+            and "--field per_page=128" in line
+            and "--field page=1" in line
+            for line in gh_log.read_text().splitlines()
+        ),
+        "the official compare request must explicitly bind its bounded first page",
+    )
+
+    # Agent-sourced H1 paths and finding identifiers are attacker-shaped
+    # markup input. The real ReviewScreen must render them literally, not let
+    # Rich interpret a tag or raise while composing the decision card.
+    attacker_path = "[blink]OWNED"
+    attacker_output = "\n".join([
+        "goose review: check 'main' completed: 1 finding(s)",
+        json.dumps({
+            "severity": "high", "path": attacker_path, "line_start": 9,
+            "line_end": 9, "summary": "[blink]OWNED", "check": "main",
+        }),
+        "goose review: orchestrator emitted 1 finding(s) from 1 check(s) (main: ran, 1 finding(s))",
+    ])
+    attacker_compare = json.dumps({"total_files": 1, "files": [{
+        "filename": attacker_path, "status": "modified",
+        "patch": "@@ -1 +9 @@\n-old\n+new",
+    }]})
+    text, classes, card = await run_review(
+        0, attacker_output, prior_result=prior, compare_json=attacker_compare,
+    )
+    check(
+        f"{attacker_path}:9" in card and "RE-REVIEW" in card,
+        "the real re-review Pilot must render attacker-shaped evidence literally",
+    )
+
+    # GitHub compare responses must carry a trustworthy file count. Malformed
+    # types, negative values, and counts inconsistent with the returned page
+    # cannot support H0 mapping and must fall back to a full review.
+    for label, malformed_compare in (
+        ("a string total_files", {"total_files": "1", "files": []}),
+        ("a negative total_files", {"total_files": -1, "files": []}),
+        ("a smaller total_files", {
+            "total_files": 0,
+            "files": [{"filename": "image/entrypoint.sh", "patch": "@@ -80 +80 @@"}],
+        }),
+    ):
+        _text, _classes, malformed_card = await run_review(
+            0, re_review_output, prior_result=prior,
+            compare_json=json.dumps(malformed_compare),
+        )
+        check(
+            "FULL REVIEW REQUIRED" in malformed_card
+            and "mapping-uncertain" in malformed_card,
+            f"{label} must fail closed to full review: {malformed_card!r}",
+        )
+
+    # A file entry with a textual patch but no unified-diff hunk is partial
+    # evidence, just like an omitted patch; it cannot prove unchanged H0.
+    _text, _classes, no_hunk_card = await run_review(
+        0, re_review_output, prior_result=prior,
+        compare_json=json.dumps({
+            "total_files": 1,
+            "files": [{"filename": "image/entrypoint.sh", "patch": "partial file evidence"}],
+        }),
+    )
+    check(
+        "FULL REVIEW REQUIRED" in no_hunk_card
+        and "mapping-uncertain" in no_hunk_card,
+        f"a no-hunk partial file entry must fail closed: {no_hunk_card!r}",
+    )
+
+    for label, truncated_patch in (
+        ("a bodyless hunk", "@@ -80,5 +80,5 @@"),
+        ("a truncated hunk", "@@ -80,5 +80,5 @@\n-old\n+new"),
+    ):
+        _text, _classes, truncated_card = await run_review(
+            0, re_review_output, prior_result=prior,
+            compare_json=json.dumps({
+                "total_files": 1,
+                "files": [{"filename": "image/entrypoint.sh", "patch": truncated_patch}],
+            }),
+        )
+        check(
+            "FULL REVIEW REQUIRED" in truncated_card
+            and "mapping-uncertain" in truncated_card,
+            f"{label} must fail closed to full review: {truncated_card!r}",
+        )
+
+    _text, _classes, omitted_patch_card = await run_review(
+        0, re_review_output, prior_result=prior,
+        compare_json=json.dumps({
+            "total_files": 1,
+            "files": [{"filename": "image/entrypoint.sh"}],
+        }),
+    )
+    check(
+        "FULL REVIEW REQUIRED" in omitted_patch_card
+        and "mapping-uncertain" in omitted_patch_card,
+        f"an omitted patch must fail closed: {omitted_patch_card!r}",
+    )
+
+    # A pure addition is valid unified-diff evidence: the old side starts at
+    # zero with zero lines, while the new side has real added lines. It must
+    # remain deterministic rather than being rejected with every start-zero
+    # hunk.
+    pure_add_output = "\n".join([
+        "goose review: check 'main' completed: 1 finding(s)",
+        json.dumps({
+            "severity": "low", "path": "added.py", "line_start": 1,
+            "line_end": 2, "summary": "added evidence", "check": "main",
+        }),
+        "goose review: orchestrator emitted 1 finding(s) from 1 check(s) (main: ran, 1 finding(s))",
+    ])
+    pure_add_compare = json.dumps({"total_files": 1, "files": [{
+        "filename": "added.py", "status": "added",
+        "patch": "@@ -0,0 +1,2 @@\n+one\n+two",
+    }]})
+    _text, _classes, pure_add_card = await run_review(
+        0, pure_add_output, prior_result=prior, compare_json=pure_add_compare,
+    )
+    check(
+        "FULL REVIEW REQUIRED" not in pure_add_card
+        and "added.py:1 (added.py:1)" in pure_add_card,
+        f"a valid pure-add hunk must map deterministically: {pure_add_card!r}",
+    )
+
+    # A pure deletion has no H1 line range. It must not let a matching H0
+    # finding fall through as unchanged evidence.
+    pure_delete_output = "\n".join([
+        "goose review: check 'main' completed: 1 finding(s)",
+        json.dumps({
+            "severity": "high", "path": "image/entrypoint.sh", "line_start": 87,
+            "line_end": 89, "summary": "deleted evidence", "check": "main",
+        }),
+        "goose review: orchestrator emitted 1 finding(s) from 1 check(s) (main: ran, 1 finding(s))",
+    ])
+    pure_delete_compare = json.dumps({"total_files": 1, "files": [{
+        "filename": "image/entrypoint.sh", "status": "modified",
+        "patch": "@@ -87,3 +0,0 @@\n-old\n-old\n-old",
+    }]})
+    _text, _classes, pure_delete_card = await run_review(
+        0, pure_delete_output, prior_result=prior,
+        compare_json=pure_delete_compare,
+    )
+    check(
+        "FULL REVIEW REQUIRED" in pure_delete_card
+        and "mapping-uncertain" in pure_delete_card
+        and "image/entrypoint.sh:87=unchanged-region" not in pure_delete_card,
+        f"a pure-deletion hunk must fail closed: {pure_delete_card!r}",
+    )
+
+    for label, malformed_hunk in (
+        ("a zero-count hunk", "@@ -0,0 +0,0 @@"),
+        ("a nonzero old count at start zero", "@@ -0,1 +1,1 @@\n-old\n+new"),
+        ("a nonzero new count at start zero", "@@ -1,1 +0,1 @@\n-old\n+new"),
+    ):
+        _text, _classes, malformed_hunk_card = await run_review(
+            0, re_review_output, prior_result=prior,
+            compare_json=json.dumps({
+                "total_files": 1,
+                "files": [{"filename": "image/entrypoint.sh", "patch": malformed_hunk}],
+            }),
+        )
+        check(
+            "FULL REVIEW REQUIRED" in malformed_hunk_card
+            and "mapping-uncertain" in malformed_hunk_card,
+            f"{label} must fail closed: {malformed_hunk_card!r}",
+        )
+
+    # An empty filename is not a map key. Exercise it with both a deletion
+    # hunk and the zero-count form so neither shape bypasses the guard.
+    for label, empty_filename_patch in (
+        ("an empty filename deletion", "@@ -87,1 +0,0 @@\n-old"),
+        ("an empty filename zero-count hunk", "@@ -0,0 +0,0 @@"),
+    ):
+        _text, _classes, empty_filename_card = await run_review(
+            0, re_review_output, prior_result=prior,
+            compare_json=json.dumps({
+                "total_files": 1,
+                "files": [{"filename": "", "patch": empty_filename_patch}],
+            }),
+        )
+        check(
+            "FULL REVIEW REQUIRED" in empty_filename_card
+            and "mapping-uncertain" in empty_filename_card,
+            f"{label} must fail closed: {empty_filename_card!r}",
+        )
+
+    stale_prior = tui.ReviewResult(
+        1, "findings", {"critical": 0, "high": 1, "medium": 0, "low": 0},
+        [{"severity": "high", "file": "stale.py", "line": 7, "title": "H0 stale"}],
+        provenance={"head_sha": h0, "base_sha": base},
+    )
+    stale_output = "\n".join([
+        "goose review: check 'main' completed: 1 finding(s)",
+        '{"severity":"high","path":"stale.py","line_start":7,"line_end":7,"summary":"H1 stale","check":"main"}',
+        "goose review: orchestrator emitted 1 finding(s) from 1 check(s) (main: ran, 1 finding(s))",
+        "REVIEW INCOMPLETE — a check returned no verdict",
+    ])
+    text, classes, card = await run_review(
+        65, stale_output, prior_result=stale_prior,
+        compare_json=json.dumps({"total_files": 0, "files": []}),
+    )
+    check("stale.py:7=stale-re-evaluate" in card,
+          "an incomplete H1 result must mark matching H0 evidence stale for re-evaluation")
+
+    text, classes, card = await run_review(
+        0, re_review_output, prior_result=prior, compare_fail=True,
+    )
+    check("FULL REVIEW REQUIRED" in card and "mapping-uncertain" in card and "capability-absent" in card,
+          "a failed production compare must fail closed with concrete uncertainty and capability reasons: " + repr(card))
+
+    sensitive_compare = json.dumps({"total_files": 1, "files": [{
+        "filename": ".github/workflows/publish.yml", "status": "modified",
+        "patch": "@@ -1 +1 @@\n-old\n+new",
+    }]})
+    text, classes, card = await run_review(
+        0, re_review_output, prior_result=prior, compare_json=sensitive_compare,
+    )
+    check("sensitive-surface-changed" in card,
+          "a sensitive H1 compare path must require a full review: " + repr(card))
+
+    risk_compare = json.dumps({"total_files": 129, "files": []})
+    text, classes, card = await run_review(
+        0, re_review_output, prior_result=prior, compare_json=risk_compare,
+    )
+    check("bounded-risk-exceeded" in card,
+          "a compare beyond the bounded review budget must require a full review")
+
+    merge_base_prior = tui.ReviewResult(
+        prior.version, prior.state, prior.counts, prior.findings,
+        provenance={"head_sha": h0, "base_sha": "b" * 40},
+    )
+    text, classes, card = await run_review(
+        0, re_review_output, prior_result=merge_base_prior, compare_json=mapped_compare,
+    )
+    check("merge-base-changed" in card,
+          "a changed exact merge base must require a full review")
+
+    incomplete_prior = tui.ReviewResult(
+        prior.version, "incomplete", prior.counts, prior.findings,
+        provenance={"head_sha": h0, "base_sha": base},
+    )
+    text, classes, card = await run_review(
+        0, re_review_output, prior_result=incomplete_prior, compare_json=mapped_compare,
+    )
+    check("prior-review-incomplete" in card,
+          "an incomplete H0 review must not supply authority to H1")
+
+    malformed_prior = tui.ReviewResult(
+        prior.version, prior.state, prior.counts, prior.findings,
+        provenance={"head_sha": h0},
+    )
+    text, classes, card = await run_review(0, re_review_output, prior_result=malformed_prior)
+    check("FULL REVIEW REQUIRED" in card and "historical H0 merge base unavailable" in card,
+          "missing historical H0 evidence must fail closed instead of hiding the delta")
+
+    same_head_prior = tui.ReviewResult(
+        prior.version, prior.state, prior.counts, prior.findings,
+        provenance={"head_sha": h1, "base_sha": base},
+    )
+    text, classes, card = await run_review(0, re_review_output, prior_result=same_head_prior)
+    check("RE-REVIEW" not in card,
+          "a same-head result must preserve the ordinary decision card without a re-review projection")
+
+    # Harness discovery is asynchronous and can report after the dashboard's
+    # widgets have been torn down. Exercise the actual app lifecycle and prove
+    # the late callback is harmless rather than only grepping NoMatches.
+    late_app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+    late_options = []
+    async with late_app.run_test() as pilot:
+        for _ in range(200):
+            if late_app.harness_options:
+                late_options = list(late_app.harness_options)
+                break
+            await pilot.pause(0.05)
+        check(late_options, "the late-discovery Pilot needs real harness options")
+        late_app.exit()
+    try:
+        late_app.harness_loaded(late_options)
+        check(True, "late harness discovery after unmount must be harmless")
+    except Exception as error:
+        check(False, f"late harness discovery after unmount raised {error!r}")
 
     # ── the regression that started this: a review whose checks returned no
     # verdict must never read as clean ───────────────────────────────────
@@ -3984,6 +4380,7 @@ async def main() -> int:
                 if app.stops:
                     break
                 await pilot.pause(0.05)
+            await settle_evidence(app, pilot)
             app.stops[0].live = {
                 "isDraft": False,
                 "baseRefOid": "fedcba9876543210fedcba9876543210fedcba98",
@@ -4085,8 +4482,12 @@ async def main() -> int:
     outcomes = [r["outcome"] for r in records if r.get("action") == "review"]
     check(
         outcomes == [
-            "complete", "complete", "incomplete", "stale", "incomplete", "failed",
-            "complete", "incomplete", "complete", "stopped", "stopped",
+            "complete", "complete", "incomplete", "stale", "complete",
+            "complete", "complete", "complete", "complete", "complete", "complete", "complete", "complete", "complete",
+            "complete", "complete", "complete", "complete", "complete", "complete", "complete",
+            "incomplete",
+            "complete", "complete", "complete", "complete", "complete", "complete", "complete",
+            "incomplete", "failed", "complete", "incomplete", "complete", "stopped", "stopped",
             "complete", "error",
         ],
         f"every review must be traced with its outcome, got {outcomes}",

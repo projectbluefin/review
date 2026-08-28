@@ -1,7 +1,7 @@
 ---
 name: goose-context
-version: "2.2"
-last_updated: 2026-08-11
+version: "2.3"
+last_updated: 2026-08-25
 id: goose-context
 one_line_purpose: Keep Goose config and skill routing working in the container.
 entry_point: docs/skills/goose-context.md
@@ -18,6 +18,9 @@ metadata:
 ---
 
 # Goose Context
+
+> The published image contains the pinned Goose runtime and controlled
+> configuration. These procedures describe the image's current context seam.
 
 Maintainer reviews use Goose as the `goose` entry in the shared harness
 registry. The adapter owns readiness, exact-head invocation, streaming,
@@ -205,5 +208,4 @@ python3 -c "import json; json.load(open('docs/skills/index.json'))"
 wc -l AGENTS.md docs/skills/*.md        # each under 200
 bash scripts/check-skill-frontmatter.sh
 bash tests/image-contract.sh
-bash tests/hive-compatibility.sh
 ```

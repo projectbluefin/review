@@ -103,6 +103,25 @@ done
 # org/user endpoint split, index children count as carrying a tag.
 grep -q 'ghcr.io/token' "$landing_py" ||
   fail "the landing brief must verify :stable through the anonymous ghcr token flow"
+# This appliance owns no lab: the brief must treat an unreachable external
+# check service as infrastructure unavailability and substitute ghcr
+# evidence — never a blocked pull request.
+grep -q 'infrastructure' "$landing_py" ||
+  fail "the landing brief must treat an unreachable check service as infrastructure unavailability"
+grep -q 'substitute evidence' "$landing_py" ||
+  fail "the landing brief must verify an unreachable check's deliverable in ghcr"
+grep -q 'owns no lab and depends on none' "$landing_py" ||
+  fail "the landing brief must state the appliance depends on no lab"
+grep -q 'owns no lab' "$repo_root/AGENTS.md" ||
+  fail "AGENTS.md must codify that nothing gates on maintainer-local infrastructure"
+grep -qiE 'ghost' "$landing_py" &&
+  fail "the landing brief must not carry ghost-lab special cases"
+# A path-filtered, scheduled, or manual publish workflow owes no publication
+# for a merge outside its triggers: the merge itself is the deliverable.
+grep -q 'path-filtered' "$landing_py" ||
+  fail "the landing brief must cover conditional publish workflows"
+grep -q 'no publication of it exists' "$landing_py" ||
+  fail "the landing brief must not fail a merge that owes no publication"
 
 # The gate is the typed pull request number: no y/yes, no timeout.
 grep -q 'class ConfirmMutation' "$tui" || fail "the ConfirmMutation gate must exist"
@@ -151,8 +170,8 @@ grep -q 'isDraft' "$tui" || fail "merge must refuse drafts from live evidence"
 grep -q 'pulls_cache.pop' "$tui" || fail "mutations must invalidate the pull cache"
 
 # Tracked gaps are named as issues, not silent stubs.
-grep -q 'GHOST_BUILD_ISSUE = "projectbluefin/review#' "$tui" ||
-  fail "the ghost-build stub must name its tracking issue"
+grep -q 'GHOST_BUILD_ISSUE' "$tui" &&
+  fail "ghost build dispatch must not exist — this appliance owns no lab"
 grep -q 'DOCS_UPDATE_ISSUE = "projectbluefin/review#' "$tui" ||
   fail "the docs-update stub must name its tracking issue"
 
@@ -191,6 +210,7 @@ fi
 
 "${venv}/bin/python" -m py_compile "$tui"
 "${venv}/bin/python" "$repo_root/tests/review_result_contract.py"
+"${venv}/bin/python" "$repo_root/tests/review_run_contract.py"
 "${venv}/bin/python" "$repo_root/tests/review_evidence_manifest_contract.py"
 "${venv}/bin/python" "$repo_root/tests/review_evidence_manifest_unit.py"
 "${venv}/bin/python" "$repo_root/tests/action_plan_contract.py"

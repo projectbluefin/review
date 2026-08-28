@@ -36,13 +36,16 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
+        oversized = b'{"pad":"' + b"x" * hive_api.MAX_BODY + b'"}'
         cases = {
             "/ok": (200, b'{"hub":"online"}', "application/json"),
             "/auth": (401, b'{"error":"secret-token"}', "application/json"),
             "/forbidden": (403, b'{"error":"no standing"}', "application/json"),
             "/login-edge": (302, b"", "text/html"),
-            "/html": (200, b"<html>login</html>", "text/html"),
+            "/html": (200, b"<!doctype html>\n<html>secret-token</html>", "text/html"),
             "/broken-json": (200, b'{"hub":', "application/json"),
+            "/list": (200, b'["a", "list"]', "application/json"),
+            "/oversized": (200, oversized, "application/json"),
             "/server": (503, b'{"error":"maintenance"}', "application/json"),
         }
         code, body, content_type = cases[self.path]
@@ -75,12 +78,26 @@ def main() -> None:
     thread.start()
     base = f"http://127.0.0.1:{server.server_port}"
     try:
+        oversized_excerpt = '{"pad":"' + "x" * (hive_api.MAX_SNIPPET - len('{"pad":"'))
         expected = {
             "/auth": "authentication rejected (401)",
             "/forbidden": "authorization rejected (403)",
             "/login-edge": "API routing redirected (302)",
-            "/html": "malformed API response",
-            "/broken-json": "malformed API response",
+            "/html": (
+                "malformed API response: 200 text/html "
+                "'<!doctype html> <html>[redacted]</html>'"
+            ),
+            "/broken-json": (
+                "malformed API response: 200 application/json, invalid JSON '{\"hub\":'"
+            ),
+            "/list": (
+                "malformed API response: 200 application/json, not a JSON object "
+                "'[\"a\", \"list\"]'"
+            ),
+            "/oversized": (
+                f"malformed API response: 200 application/json, "
+                f"over {hive_api.MAX_BODY} bytes '{oversized_excerpt}'"
+            ),
             "/server": "Hive server error (503)",
         }
         ok = hive_api.request(f"{base}/ok", "secret-token")
@@ -91,6 +108,23 @@ def main() -> None:
             check(result.message == message, f"{path}: {result.message!r}")
             check("secret-token" not in json.dumps(result.as_dict()), "token leaked")
             check(len(json.dumps(result.as_dict())) < 600, "error is not bounded")
+
+        # The malformed classification must name its own shape (#337): the
+        # status, content type, byte count, and a bounded redacted excerpt
+        # are what tell an intercepted SPA page apart from invalid JSON.
+        html = hive_api.request(f"{base}/html", "secret-token")
+        check(html.category == "malformed", str(html))
+        html_detail = html.data.get("detail", "")
+        check("status=200" in html_detail, html_detail)
+        check("content-type=text/html" in html_detail, html_detail)
+        check("bytes=" in html_detail, html_detail)
+        check("<!doctype html> <html>[redacted]</html>" in html_detail, html_detail)
+
+        broken = hive_api.request(f"{base}/broken-json", "secret-token")
+        check(broken.category == "malformed", str(broken))
+        broken_detail = broken.data.get("detail", "")
+        check("content-type=application/json" in broken_detail, broken_detail)
+        check("body='{\"hub\":'" in broken_detail, broken_detail)
 
         missing = hive_api.request(f"{base}/ok", "")
         check(missing.message == "authentication token missing", str(missing))
