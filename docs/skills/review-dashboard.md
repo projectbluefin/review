@@ -269,8 +269,12 @@ distinct states. `[o]` is only an optional browser escape hatch.
   page reads differently from invalid JSON or a JSON array. The queue POST
   never follows a redirect and succeeds only when a bounded JSON response
   explicitly says `queued`; the typed pull-request-number gate remains the
-  authority boundary. Hosted queueing remains blocked by the ingress defect
-  tracked in #258.
+  authority boundary. A failed Hive probe leaves the queue and review
+  evidence visible, marks any retained worker assignments as last-known
+  rather than current, and reports that current assignment state is unknown.
+  Hive probes run only at startup or after an explicit maintainer refresh;
+  direct GitHub review and merge actions remain available while Hive is down.
+  Hosted queueing remains blocked by the ingress defect tracked in #258.
 
 ## Batch landing
 

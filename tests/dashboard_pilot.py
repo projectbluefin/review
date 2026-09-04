@@ -1974,6 +1974,32 @@ async def main() -> int:
             data = self.status if path.endswith("status") else self.contributors
             return tui.hive_api.Result(True, "ok", "online", data)
 
+    class FlappingHive(FakeHive):
+        def __init__(self):
+            super().__init__(
+                {"hub": "online", "actionable_items": 185},
+                {
+                    "contributors": [
+                        {
+                            "github_username": "someone-else",
+                            "current_task": {
+                                "task_id": "ct-1",
+                                "repo": "projectbluefin/bluefinctl",
+                                "number": 31,
+                            },
+                        }
+                    ],
+                },
+            )
+            self.online = True
+            self.calls = []
+
+        def __call__(self, path):
+            self.calls.append(path)
+            if not self.online:
+                return tui.hive_api.Result(False, "network", "network error", {})
+            return super().__call__(path)
+
     real_hive_get = tui.hive_get
     real_base = tui.hive_api_base
     tui.hive_api_base = lambda: "https://hub.example"
@@ -2049,6 +2075,78 @@ async def main() -> int:
                 and "pr review" not in gh_log.read_text(),
                 "consulting Hive must not mutate anything",
             )
+
+        # A hub can disappear after a successful probe. Keep the last-known
+        # assignment visible as stale evidence, say that current assignment
+        # state is unknown, and leave direct GitHub merge actions available.
+        flapping_hive = FlappingHive()
+        tui.hive_get = flapping_hive
+        stale_app = tui.ReviewDashboard(tui.QueueFilters(url=queue_file.as_uri()))
+        async with stale_app.run_test() as pilot:
+            for _ in range(200):
+                if stale_app.hive_state and stale_app.stops:
+                    break
+                await pilot.pause(0.05)
+            check(
+                stale_app.hive_workers,
+                "the outage regression needs a last-known Hive assignment",
+            )
+            flapping_hive.online = False
+            stale_app.load_hive()
+            for _ in range(200):
+                if getattr(stale_app, "hive_unavailable", False):
+                    break
+                await pilot.pause(0.05)
+            check(
+                stale_app.hive_unavailable,
+                "Hive outage must be explicit after a failed refresh",
+            )
+            check(
+                stale_app.hive_workers_stale and stale_app.hive_workers,
+                "Hive outage must retain last-known workers as stale evidence",
+            )
+            failed_probe_calls = len(flapping_hive.calls)
+            await pilot.pause(0.5)
+            check(
+                len(flapping_hive.calls) == failed_probe_calls,
+                "Hive outage must not trigger automatic probe retries",
+            )
+            check(
+                stale_app.hive_worker_for(stale_app.stops[0]) is None,
+                "stale workers must not be presented as current assignments",
+            )
+            status = str(stale_app.query_one("#status-bar", tui.Static).render())
+            check(
+                "Hive: unavailable — network error" in status
+                and "last-known assignments retained" in status,
+                f"status must explain the outage without hiding retained evidence: {status!r}",
+            )
+            for _ in range(200):
+                context = str(stale_app.query_one("#context", tui.Static).render())
+                if "last known Hive assignment" in context:
+                    break
+                await pilot.pause(0.05)
+            check(
+                "last known Hive assignment" in context
+                and "current assignment is unknown" in context,
+                f"context must mark stale Hive evidence explicitly: {context!r}",
+            )
+            stop = stale_app.stops[0]
+            stop.live = {
+                "isDraft": False,
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
+                "statusCheckRollup": [{"conclusion": "SUCCESS"}],
+            }
+            stale_app.merge_rights[stop.repository] = True
+            stale_app.action_merge_now()
+            await pilot.pause()
+            check(
+                isinstance(stale_app.screen, tui.ConfirmMutation),
+                "Hive outage must not block the direct GitHub merge gate",
+            )
+            if isinstance(stale_app.screen, tui.ConfirmMutation):
+                await pilot.press("escape")
 
         # An unreachable hub degrades to a plain statement, never a crash.
         hive_failure_states = {

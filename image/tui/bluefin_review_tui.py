@@ -2112,6 +2112,8 @@ class ReviewDashboard(App):
         # old permanent "Hive: not consulted" amounted to.
         self.hive_state = ""
         self.hive_workers: list[dict] = []
+        self.hive_unavailable = False
+        self.hive_workers_stale = False
         # Keys to re-select after a refresh: a refresh that silently empties
         # the batch you spent a minute building is worse than no refresh.
         self.reselect: set[str] = set()
@@ -2197,19 +2199,24 @@ class ReviewDashboard(App):
                 "[Diagnostics] [Sign in] [Install] [Retry] · no fallback"
             )
 
-    @work(thread=True)
+    @work(thread=True, group="hive", exclusive=True)
     def load_hive(self) -> None:
-        """Ask Hive what it is doing. Read-only, and never blocking."""
+        """Ask Hive what it is doing. Read-only, and never blocking.
+
+        Hive probes are only retried by an explicit maintainer action. The
+        exclusive worker prevents repeated key presses from stacking network
+        calls while the hub is unavailable.
+        """
         if not hive_api_base():
-            self.call_from_thread(self.hive_loaded, "not configured", [])
+            self.call_from_thread(self.hive_failed, "not configured")
             return
         status = hive_get("/api/v1/status")
         if not status.ok:
-            self.call_from_thread(self.hive_loaded, status.message, [])
+            self.call_from_thread(self.hive_failed, status.message)
             return
         contributor_result = hive_get("/api/v1/contributors")
         if not contributor_result.ok:
-            self.call_from_thread(self.hive_loaded, contributor_result.message, [])
+            self.call_from_thread(self.hive_failed, contributor_result.message)
             return
         contributors = contributor_result.data.get("contributors", [])
         workers = [
@@ -2230,6 +2237,18 @@ class ReviewDashboard(App):
     def hive_loaded(self, state: str, workers: list[dict]) -> None:
         self.hive_state = state
         self.hive_workers = workers
+        self.hive_unavailable = False
+        self.hive_workers_stale = False
+        self.refresh_status()
+        stop = self.current
+        if stop:
+            self.render_context(stop)
+
+    def hive_failed(self, state: str) -> None:
+        """Keep the dashboard usable when a read-only Hive probe fails."""
+        self.hive_state = state
+        self.hive_unavailable = True
+        self.hive_workers_stale = bool(self.hive_workers)
         self.refresh_status()
         stop = self.current
         if stop:
@@ -2248,6 +2267,12 @@ class ReviewDashboard(App):
 
     def hive_worker_for(self, stop: Stop) -> dict | None:
         """The contributor Hive currently has on this exact pull request."""
+        if self.hive_workers_stale:
+            return None
+        return self.last_known_hive_worker_for(stop)
+
+    def last_known_hive_worker_for(self, stop: Stop) -> dict | None:
+        """Return the last worker evidence, even when the hub is unavailable."""
         for worker in self.hive_workers:
             task = worker["task"]
             if (
@@ -2261,18 +2286,6 @@ class ReviewDashboard(App):
         """Ask Hive again, and say what it is working on right now."""
         self.notify("asking Hive…")
         self.load_hive()
-        if not self.hive_workers:
-            return
-        lines = []
-        for worker in self.hive_workers[:6]:
-            task = worker["task"]
-            repo = str(task.get("repo", "?"))
-            number = task.get("number", 0)
-            lines.append(
-                f"{escape(worker['login'])}: "
-                f"{link(f'{repo}#{number}', pr_url(repo, number))}"
-            )
-        self.notify("Hive is working on:\n" + "\n".join(lines))
 
     def action_steer(self) -> None:
         """Focus the steering box: free text that rides along with the next
@@ -2570,11 +2583,19 @@ class ReviewDashboard(App):
                 key=lambda pair: action_rank(pair[0]),
             )
         )
+        hive = escape(self.hive_state or "asking…")
+        if self.hive_unavailable:
+            retained = (
+                " (last-known assignments retained)"
+                if self.hive_workers_stale
+                else ""
+            )
+            hive = f"unavailable — {hive}{retained}"
         self.query_one("#status-bar", Static).update(
             f" Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
             f"| {('source ' + self.source_state + (' — ' + self.source_message if self.source_message else ''))} "
             f"| {('snapshot ' + freshness) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
-            f"| batch: {selected}{stuck}{agents}{landed} | Hive: {escape(self.hive_state or 'asking…')}"
+            f"| batch: {selected}{stuck}{agents}{landed} | Hive: {hive}"
         )
 
     def action_filter(self) -> None:
@@ -2846,6 +2867,7 @@ class ReviewDashboard(App):
             lines.append(f"  {summary}")
         lines.append(f"skills   ~/.agents/skills (org inventory)")
         worker = self.hive_worker_for(stop)
+        last_worker = self.last_known_hive_worker_for(stop)
         if worker:
             # The one thing worth interrupting a review for: an agent is
             # changing this pull request right now, so the diff on screen is
@@ -2855,6 +2877,19 @@ class ReviewDashboard(App):
             lines.append(
                 f"hive     {link(login, 'https://github.com/' + login)} "
                 f"is working on THIS now ({escape(task_id)})"
+            )
+        elif last_worker and self.hive_unavailable:
+            login = last_worker["login"]
+            task_id = str(last_worker["task"].get("task_id", "?"))
+            lines.append(
+                f"hive     last known Hive assignment: "
+                f"{link(login, 'https://github.com/' + login)} "
+                f"({escape(task_id)}); current assignment is unknown"
+            )
+        elif self.hive_unavailable:
+            lines.append(
+                f"hive     {escape(self.hive_state)} — current assignment is unknown "
+                f"{escape('([H] asks again)')}"
             )
         elif self.hive_state:
             lines.append(
