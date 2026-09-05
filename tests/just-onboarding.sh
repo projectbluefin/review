@@ -160,10 +160,52 @@ EOF
 cat >"$fake_bin/podman" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+# Isolation is fail-closed, so every agent-capable launch now calls
+# 'podman --runtime=runsc run'. Drop the flag before dispatching so the
+# existing argument assertions keep matching.
+if [[ "${1:-}" == --runtime=runsc ]]; then
+  shift
+fi
+# The disposable gVisor probe is a diagnostic, not a launch. It must never
+# reach RUNNER_LOG, or the 'exactly one foreground run' assertions break.
+if [[ "${1:-}" == run && "$*" == *'--name review-runtime-probe-'* ]]; then
+  probe_cidfile=
+  probe_label=
+  while (($#)); do
+    case "$1" in
+      --cidfile)
+        probe_cidfile="$2"
+        shift 2
+        ;;
+      --label)
+        case "$2" in review.probe=*) probe_label="${2#review.probe=}" ;; esac
+        shift 2
+        ;;
+      *) shift ;;
+    esac
+  done
+  [[ "${FAKE_RUNSC_PROBE_FAILS:-0}" == 1 ]] && exit "${FAKE_RUNSC_PROBE_STATUS:-125}"
+  probe_id="probe-id-${probe_label}"
+  printf '%s\n' "$probe_id" >"$probe_cidfile"
+  printf '%s\n' "$probe_label" >"${TMPDIR:-/tmp}/${probe_id}.label"
+  : >"${TMPDIR:-/tmp}/${probe_id}.exists"
+  exit 0
+fi
 # Image resolution is a separate concern from launching: it gets its own log
 # so the 'exactly one foreground run' assertions stay meaningful, and it
 # fails on demand so the missing-tag path can be exercised.
 case "${1:-}" in
+  info)
+    # require_runsc_host asks whether rootless Podman is in play.
+    printf '%s\n' "${FAKE_PODMAN_ROOTLESS:-true}"
+    exit 0
+    ;;
+  rm)
+    # Only the disposable probe is removed by name here.
+    probe_target="${*: -1}"
+    rm -f "${TMPDIR:-/tmp}/${probe_target}.label" "${TMPDIR:-/tmp}/${probe_target}.exists"
+    exit 0
+    ;;
   image | manifest | pull)
     printf '%s\n' "$*" >>"${IMAGE_LOG:?}"
     [[ "${FAKE_PODMAN_IMAGE_MISSING:-0}" == 1 ]] && exit 1
@@ -174,6 +216,11 @@ case "${1:-}" in
     exit 0
     ;;
   container)
+    # The disposable probe tracks its own existence with a marker file.
+    if [[ "${3:-}" == probe-id-* ]]; then
+      [[ -f "${TMPDIR:-/tmp}/${3}.exists" ]] && exit 0
+      exit 1
+    fi
     # 'container exists' — only review-stop asks.
     [[ "${FAKE_PODMAN_RUNNING:-0}" == 1 ]] && exit 0
     exit 1
@@ -182,6 +229,19 @@ case "${1:-}" in
     # Only the liveness and ownership probes use 'podman inspect'; nothing is
     # running unless a scenario asks for it.
     case "$*" in
+      *review.probe*)
+        probe_target="${*: -1}"
+        cat "${TMPDIR:-/tmp}/${probe_target}.label"
+        exit 0
+        ;;
+      *.OCIRuntime*)
+        if [[ "$*" == *.State.Running* ]]; then
+          printf 'true %s\n' "${FAKE_PODMAN_PROBE_RUNTIME:-runsc}"
+        else
+          printf '%s\n' "${FAKE_PODMAN_PROBE_RUNTIME:-runsc}"
+        fi
+        exit 0
+        ;;
     esac
     printf '%s\n' "$*" >>"${IMAGE_LOG:?}"
     case "$*" in
@@ -255,6 +315,13 @@ if [[ "${FAKE_PODMAN_DETACH_SUCCESS:-0}" == 1 && "${detached:-false}" == true ]]
   exit 0
 fi
 exit 97
+EOF
+cat >"$fake_bin/runsc" <<'EOF'
+#!/usr/bin/env bash
+# The host isolation runtime. A scenario can make it unusable to prove the
+# launcher fails closed instead of falling back to Podman's default.
+[[ "${FAKE_RUNSC_BROKEN:-0}" == 1 ]] && exit 1
+printf 'runsc version test\n'
 EOF
 chmod +x "$fake_bin"/*
 
@@ -1274,27 +1341,51 @@ sed -E 's/^[[:space:]]*#.*$//' "$justfile" >"$code"
 # which pairs --detach with the 'detached' owner label so a later launch
 # refuses to reclaim it and review-stop can stop it. Any other detach is a
 # hole.
-assert_eq "$(grep -cE 'podman run --rm --detach --replace --name' "$code")" 1 \
+assert_eq "$(grep -cE 'podman (--runtime=runsc )?run --rm --detach --replace --name' "$code")" 1 \
   "expected exactly one detached launch site (the marked worker)"
 assert_eq "$(grep -c 'review.owner=detached' "$code")" 1 \
   "the detached label is stamped at exactly one launch site"
 assert_eq "$(grep -c '"detached"' "$code")" 2 \
   "both the ownership check and review-stop must honor the detached marker"
-if grep -nE 'podman run' "$code" | grep -vE -- '--detach|--interactive --tty'; then
+if grep -nE 'podman (--runtime=runsc )?run' "$code" | grep -vE -- '--detach|--interactive --tty'; then
   fail "every podman run is either the marked detached worker or interactive"
 fi
 # A lone trailing '&' backgrounds the launch; '&&' and '2>&1' must not match.
-if grep -nE '(podman run).*[^&>]&[[:space:]]*$' "$code"; then
+if grep -nE '(podman (--runtime=runsc )?run).*[^&>]&[[:space:]]*$' "$code"; then
   fail "a launch line must never end in a background '&'"
 fi
 if grep -nE '(^|[^[:alnum:]_])(nohup|setsid)([^[:alnum:]_]|$)' "$code"; then
   fail "nohup/setsid must never appear on a launch path"
 fi
-assert_eq "$(grep -cE 'podman run --rm --interactive --tty' "$code")" 2 \
+assert_eq "$(grep -cE 'podman (--runtime=runsc )?run --rm --interactive --tty' "$code")" 2 \
   "expected exactly two foreground podman run sites (contributor container and queue walk)"
 # A stale container from a hard-killed terminal must never block a relaunch.
-assert_eq "$(grep -cE 'podman run --rm --interactive --tty --replace --name' "$code")" 2 \
+assert_eq "$(grep -cE 'podman (--runtime=runsc )?run --rm --interactive --tty --replace --name' "$code")" 2 \
   "every named foreground run must reclaim its name with --replace"
+# Isolation is fail-closed: no agent-capable launch may reach Podman's
+# default runtime, or any other runtime. This is a universal check, not a
+# count: 'podman --runtime=crun run' would satisfy every count below while
+# putting a credential-carrying agent outside the gVisor boundary.
+if grep -nE 'podman[[:space:]]+(--runtime=[^[:space:]]+[[:space:]]+)?run' "$code" |
+  grep -v -- '--runtime=runsc'; then
+  fail "every podman run must select the runsc isolation runtime"
+fi
+# Four sites select it — the two foreground launches, the marked detached
+# worker, and the disposable isolation probe itself. The count additionally
+# pins that no new launch site appears unnoticed.
+assert_eq "$(grep -cE 'podman --runtime=runsc run' "$code")" 4 \
+  "every agent-capable launch must select the runsc runtime explicitly"
+# Isolation failure guidance names the tracked provisioning contract and
+# stops there: an embedded installer is unsupported guidance. A mutable
+# release/latest download is not a pin, and an --ignore-cgroups wrapper is
+# not provisioning, so neither may appear anywhere in the launcher.
+if grep -n 'release/latest' "$code"; then
+  fail "launcher guidance must not embed a mutable release/latest download"
+fi
+if grep -n -- '--ignore-cgroups' "$code"; then
+  fail "launcher guidance must not recommend an --ignore-cgroups wrapper"
+fi
+
 begin "static: a launch cannot detach through an option form or a second line"
 # The greps above read one physical line at a time and only recognise a
 # space-delimited '-d'/'--detach' sitting on the same line as 'podman run'.
@@ -1313,11 +1404,30 @@ sed -e :a -e '/\\$/N; s/\\\n//; ta' "$code" >"$joined"
 # the marked worker launch asserted above — is excluded so everything else
 # stays under the strict scan.
 launch_args="$scratch/justfile-launch-args"
+# Exactly one isolation probe launch may exist. Pinning the count first is
+# what makes excluding it safe: a substring filter would drop *any* line
+# containing 'review.probe=', so a real launch could smuggle --detach past
+# the scan below simply by mentioning the probe label.
+assert_eq "$(grep -c 'review.probe=' "$joined")" 1 \
+  "exactly one isolation probe launch may exist"
+probe_launch="$(grep -m1 'review.probe=' "$joined")"
 awk '
   /CONTAINER_ARGS\+?=\(/           { inargs = 1 }
   inargs                           { print; if ($0 ~ /\)[[:space:]]*$/) inargs = 0; next }
-  /podman[[:space:]]+(run|create)/ { print }
-' "$joined" | grep -vE 'podman run --rm --detach --replace --name' >"$launch_args"
+  /podman[[:space:]]+(--runtime=[^[:space:]]+[[:space:]]+)?(run|create)/ { print }
+' "$joined" | grep -vE 'podman (--runtime=runsc )?run --rm --detach --replace --name' |
+  grep -vxF "$probe_launch" >"$launch_args"
+# Excluding the probe above is only safe because it is a diagnostic, not a
+# launch: it carries no credential, starts no agent, and is reaped by trap.
+# Prove that against the one captured line, never against a blob -- a
+# blob-wide check is satisfied by the real probe and never sees a second one.
+if grep -qE -- '--volume|--env|--userns' <<<"$probe_launch"; then
+  fail "the isolation probe must never mount a credential or map a user namespace"
+fi
+for probe_flag in '--network=none' '--pull=never' '--entrypoint /usr/bin/sleep'; do
+  grep -qF -- "$probe_flag" <<<"$probe_launch" ||
+    fail "the isolation probe must launch with ${probe_flag}"
+done
 # 'podman run --detach-keys' is a foreground detach *sequence*, not
 # backgrounding, so the character after '--detach' has to be checked.
 if grep -nE -- '--detach([^-]|$)' "$launch_args"; then
@@ -1499,3 +1609,6 @@ if [[ "$failures" -gt 0 ]]; then
   exit 1
 fi
 printf '\nAll review onboarding assertions passed.\n'
+
+# The dedicated gVisor isolation contract runs its own scenarios.
+bash "$repo_root/tests/runsc-isolation.sh"

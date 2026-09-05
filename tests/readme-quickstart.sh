@@ -31,6 +31,14 @@ require_before() {
   fi
 }
 
+require_absent() {
+  local text="$1" message="$2"
+  if grep -Fq -- "$text" "$readme"; then
+    printf '%s\n' "$message" >&2
+    failures=$((failures + 1))
+  fi
+}
+
 require_heading
 require_before '^## +(Start here|Quick start)([[:space:]]|$)' '^## +What this is for([[:space:]]|$)'
 
@@ -44,6 +52,13 @@ require_text 'TOOL=codex'
 require_text 'TOOL=pi'
 require_text 'REVIEW_DETACH=1'
 require_text 'just review-stop'
+
+# The unsupported manual runsc installation recipe was removed from the
+# README: provisioning is review#348 and there is no supported manual
+# recipe. Neither a mutable release/latest download nor an
+# --ignore-cgroups wrapper may reappear in README guidance.
+require_absent 'release/latest' 'README must not embed a mutable release/latest download'
+require_absent '--ignore-cgroups' 'README must not recommend an --ignore-cgroups wrapper'
 
 if [[ "$failures" -ne 0 ]]; then
   printf '%d README onboarding assertion(s) failed.\n' "$failures" >&2

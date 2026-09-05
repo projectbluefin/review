@@ -30,8 +30,12 @@ gh auth login --web --hostname github.com --scopes repo,read:org
 just review-doctor
 ```
 
-The doctor defaults to the Goose worker checks; for a Pi worker, export
-`PI_API_KEY` first, then use
+The agent-capable modes also require an executable host-side gVisor `runsc`
+runtime. The doctor runs the same credential-free rootless Podman probe that a
+launch uses. If it fails, Review refuses to start an agent or mount a
+credential; follow the detailed [gVisor setup and remediation](#requirements-and-credentials)
+below, then run the doctor again. The doctor defaults to the Goose worker
+checks; for a Pi worker, export `PI_API_KEY` first, then use
 `TOOL=pi just review-doctor`.
 
 GitHub authentication is separate from model-provider authentication. `gh auth
@@ -192,7 +196,7 @@ four public recipes:
 | `just review-container [profile] [effort]` | Run the Hive queue worker: the contributor container that receives assigned tasks and donates inference. `REVIEW_DETACH=1` runs it as a detached background worker. |
 | `just review-stop [name]` | Stop a detached worker. Refuses attended runs and containers this launcher did not start. |
 | `just review-queue [profile] [effort] [flags…]` | Walk the Bluefin PR queue interactively in the contributor container. |
-| `just review-doctor` | Check launch readiness. Starts no agent. |
+| `just review-doctor` | Check launch readiness, including the required gVisor/runsc boundary. Starts no agent. |
 
 Interactive runs remain attached to their originating terminal, and Ctrl-C or
 closing that terminal stops them. A detached worker (`REVIEW_DETACH=1`) is
@@ -226,6 +230,18 @@ an operations task outside this repository automation.
 - `gh auth login --web --hostname github.com --scopes repo,read:org` is a hard
   prerequisite for every recipe.
 - `podman`.
+- A trusted host `runsc` (gVisor) installation. `review-container` and
+  `review-queue` fail before starting an agent or mounting credentials unless
+  a credential-free rootless Podman probe reports `OCIRuntime=runsc`. Run
+  `just review-doctor` to check it. Bluefin provisioning is tracked by
+  [bluefin#1139](https://github.com/projectbluefin/bluefin/issues/1139) and the
+  Review contract is [#348](https://github.com/projectbluefin/review/issues/348);
+  the launcher never downloads a runtime or falls back to Podman's default.
+  There is no supported manual installation recipe: a mutable
+  latest-release download and a cgroup-suppressing wrapper are not
+  provisioning. This change remains held until #348 provides one. On a
+  provisioned host, `just review-doctor` reports the isolation check as
+  `ready; rootless Podman probe passed`.
 - Goose configured for GitHub Copilot (`goose configure`), or
   `GITHUB_COPILOT_TOKEN`, for contributor work and Goose reviews. The
   `GOOSE_PROVIDER` value must be unset or `github_copilot`.

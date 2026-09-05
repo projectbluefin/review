@@ -20,7 +20,8 @@
 #   review-stop       Stop a detached worker. Refuses attended runs and
 #                     containers this launcher did not start.
 #   review-doctor     Preflight diagnostics. Starts no agent and mounts no
-#                     credential.
+#                     credential; the only thing it runs is a disposable,
+#                     credential-free gVisor/runsc isolation probe.
 #   review-queue      The interactive maintainer review surface: a
 #                     full-screen dashboard over the Bluefin PR queue,
 #                     running in the contributor container — no Hive
@@ -54,6 +55,8 @@
 # Every interactive launch path ends in an 'exec' or a final foreground
 # command whose exit status propagates verbatim; the detached path is an
 # explicit, labeled podman run -d. tests/just-onboarding.sh pins all of it.
+# Agent-capable launches additionally select runsc explicitly after a
+# credential-free rootless probe; there is no default-runtime fallback (#348).
 # ─────────────────────────────────────────────────────────────────────────
 #
 # Bluefin's root Justfile (/usr/share/ublue-os/just/00-entry.just) imports a
@@ -362,6 +365,138 @@ ensure_contributor_image() {
   echo "  or build the commit you have: ref=ghcr.io/projectbluefin/review:sha-\$(git rev-parse HEAD)" >&2
   echo "    podman build -f image/Containerfile -t \"\$ref\" . && REVIEW_CONTRIBUTOR_IMAGE=\"\$ref\" just review-container" >&2
   return 1
+}
+
+isolation_runtime_failure() {
+  local classification="$1" detail="$2"
+  echo "ERROR: isolation runtime: gVisor/runsc (${classification})" >&2
+  echo "  ${detail}" >&2
+  echo "  Review did not start an agent or mount credentials." >&2
+  # Provisioning is #348; there is no supported manual install recipe.
+  echo "  Supported provisioning: https://github.com/projectbluefin/review/issues/348" >&2
+  return 1
+}
+
+runsc_runtime_probe() (
+  set -euo pipefail
+  local image="$1" runtime_root="${XDG_RUNTIME_DIR:-/tmp}"
+  local probe_dir probe_name probe_token cidfile probe_id= probe_status=0
+  local probe_evidence probe_owner cleanup_status=0
+  probe_dir="$(mktemp -d "${runtime_root%/}/review-runtime-probe-XXXXXX")"
+  probe_name="$(basename "$probe_dir")"
+  probe_token="${probe_name#review-runtime-probe-}"
+  cidfile="$probe_dir/cid"
+
+  cleanup_runtime_probe() {
+    local owned_probe= exists_status=0 verification_status=0
+    if [[ -s "$cidfile" ]]; then
+      probe_id="$(cat "$cidfile")"
+      timeout --kill-after=2s 5s podman container exists "$probe_id" || exists_status=$?
+      if [[ "$exists_status" -eq 0 ]]; then
+        owned_probe="$(
+          timeout --kill-after=2s 5s podman inspect \
+            --format '{{index .Config.Labels "review.probe"}}' "$probe_id"
+        )" || cleanup_status=70
+        if [[ "$owned_probe" != "$probe_token" ]]; then
+          cleanup_status=70
+        elif ! timeout --kill-after=2s 5s podman rm --force "$probe_id" >/dev/null; then
+          cleanup_status=70
+        else
+          timeout --kill-after=2s 5s podman container exists "$probe_id" ||
+            verification_status=$?
+          [[ "$verification_status" -eq 1 ]] || cleanup_status=70
+        fi
+      elif [[ "$exists_status" -ne 1 ]]; then
+        cleanup_status=70
+      fi
+    fi
+    rm -f "$cidfile"
+    rmdir "$probe_dir" 2>/dev/null || cleanup_status=70
+    return "$cleanup_status"
+  }
+  finish_runtime_probe() {
+    local original_status=$?
+    trap - EXIT HUP INT TERM
+    cleanup_runtime_probe || cleanup_status=$?
+    if [[ "$cleanup_status" -ne 0 ]]; then
+      echo 'runsc probe cleanup failed; the diagnostic may still exist.' >&2
+      exit "$cleanup_status"
+    fi
+    exit "$original_status"
+  }
+  trap finish_runtime_probe EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  timeout --kill-after=2s 20s podman --runtime=runsc run --rm --detach \
+    --name "$probe_name" --cidfile "$cidfile" --label "review.probe=$probe_token" \
+    --network=none --pull=never --entrypoint /usr/bin/sleep "$image" 30 \
+    >/dev/null || probe_status=$?
+  [[ "$probe_status" -eq 0 ]] || return "$probe_status"
+  [[ -s "$cidfile" ]] || return 70
+  probe_id="$(cat "$cidfile")"
+  probe_evidence="$(
+    timeout --kill-after=2s 5s podman inspect \
+      --format '{{.State.Running}} {{.OCIRuntime}}' "$probe_id"
+  )" || probe_status=$?
+  [[ "$probe_status" -eq 0 ]] || return "$probe_status"
+  probe_owner="$(
+    timeout --kill-after=2s 5s podman inspect \
+      --format '{{index .Config.Labels "review.probe"}}' "$probe_id"
+  )" || probe_status=$?
+  [[ "$probe_status" -eq 0 ]] || return "$probe_status"
+  printf '%s %s\n' "$probe_evidence" "$probe_owner"
+)
+
+require_runsc_host() {
+  local runsc_path rootless
+  runsc_path="$(command -v runsc 2>/dev/null || true)"
+  if [[ -z "$runsc_path" || ! -f "$runsc_path" || ! -x "$runsc_path" ]]; then
+    isolation_runtime_failure missing 'runsc is not installed as an executable host command.'
+    return
+  fi
+  if ! "$runsc_path" --version >/dev/null 2>&1; then
+    isolation_runtime_failure 'installed but unusable' 'runsc --version failed.'
+    return
+  fi
+  rootless="$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)"
+  if [[ "$rootless" != true ]]; then
+    isolation_runtime_failure 'incompatible with this host/Podman configuration' \
+      'Podman is not operating rootless for this user.'
+    return
+  fi
+}
+
+require_runsc_runtime() {
+  local image="$1" probe_status=0 probe_evidence running probe_runtime probe_owner
+  probe_evidence="$(runsc_runtime_probe "$image")" || probe_status=$?
+  if [[ "$probe_status" -ne 0 ]]; then
+    if [[ "$probe_status" -eq 125 ]]; then
+      isolation_runtime_failure 'incompatible with this host/Podman configuration' \
+        'Rootless Podman rejected runsc or could not start it.'
+    else
+      isolation_runtime_failure 'installed but unusable' \
+        "The disposable runsc probe exited with status ${probe_status}."
+    fi
+    return
+  fi
+
+  read -r running probe_runtime probe_owner <<<"$probe_evidence"
+  if [[ "$running" != true ]]; then
+    isolation_runtime_failure 'installed but unusable' \
+      'The disposable runsc probe was not running during runtime inspection.'
+    return
+  fi
+  if [[ "$probe_runtime" != runsc ]]; then
+    isolation_runtime_failure 'incompatible with this host/Podman configuration' \
+      "Podman reported the probe runtime as ${probe_runtime:-unknown}, not runsc."
+    return
+  fi
+  if [[ -z "$probe_owner" ]]; then
+    isolation_runtime_failure 'incompatible with this host/Podman configuration' \
+      'Podman did not preserve the probe ownership label.'
+    return
+  fi
 }
 
 resolve_copilot_token() {
@@ -784,11 +919,21 @@ review-container profile="" effort="":
     KIMI_MODEL="{{kimi_model}}"
     KIMI_CONTEXT_LIMIT="{{kimi_context_limit}}"
 
+    # Isolation is a security boundary. The host check runs before image
+    # retrieval, then the credential-free disposable proof runs as soon as
+    # the contributor image is available. No state, credential, model setup,
+    # or Hive registration may happen before both checks pass.
     command -v podman &>/dev/null || {
       echo "ERROR: Podman is required to run the contributor container." >&2
       echo "  Install Podman, then re-run review-container." >&2
       exit 1
     }
+    require_runsc_host
+
+    CONTRIBUTOR_IMAGE="{{contributor_image}}"
+    ensure_contributor_image "$CONTRIBUTOR_IMAGE"
+    require_runsc_runtime "$CONTRIBUTOR_IMAGE"
+    echo "✓ isolation runtime: gVisor/runsc"
 
     STATE_DIR="${HOME}/.local/state/review"
     HIVE_SRC_DIR="${STATE_DIR}/hive-src"
@@ -816,9 +961,7 @@ review-container profile="" effort="":
     ensure_hive_contributor_env
     report_hive_selection
 
-    CONTRIBUTOR_IMAGE="{{contributor_image}}"
     require_no_running_instance "$CONTAINER_NAME"
-    ensure_contributor_image "$CONTRIBUTOR_IMAGE"
 
     # REVIEW_DETACH=1 runs the worker as a deliberate background container:
     # no terminal, entrypoint follows the agent without attaching, logs
@@ -828,12 +971,12 @@ review-container profile="" effort="":
     DETACH="${REVIEW_DETACH:-0}"
     if [[ "$DETACH" == 1 ]]; then
       CONTAINER_ARGS=(
-        podman run --rm --detach --replace --name "$CONTAINER_NAME"
+        podman --runtime=runsc run --rm --detach --replace --name "$CONTAINER_NAME"
         --label "review.owner=detached"
       )
     else
       CONTAINER_ARGS=(
-        podman run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
+        podman --runtime=runsc run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
         --label "$(owner_run_label)"
       )
     fi
@@ -992,11 +1135,14 @@ review-queue *queue_args:
     KIMI_CONTEXT_LIMIT="{{kimi_context_limit}}"
 
     resolve_review_backend
+    # Isolation is a security boundary, so it is proven before any credential
+    # is resolved or staged.
     command -v podman &>/dev/null || {
       echo "ERROR: Podman is required to run the contributor container." >&2
       echo "  Install Podman, then re-run review-queue." >&2
       exit 1
     }
+    require_runsc_host
 
     require_goose_backend "$TOOL"
     if [[ "$REVIEW_BACKEND" == codex ]]; then
@@ -1028,9 +1174,11 @@ review-queue *queue_args:
     CONTRIBUTOR_IMAGE="{{contributor_image}}"
     require_no_running_instance "$CONTAINER_NAME"
     ensure_contributor_image "$CONTRIBUTOR_IMAGE"
+    require_runsc_runtime "$CONTRIBUTOR_IMAGE"
+    echo "✓ isolation runtime: gVisor/runsc"
 
     CONTAINER_ARGS=(
-      podman run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
+      podman --runtime=runsc run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
       --label "$(owner_run_label)"
       --userns "keep-id:uid=1000,gid=1000"
       # Podman does not pass COLORTERM through on its own.
@@ -1108,8 +1256,9 @@ review-queue *queue_args:
     "${CONTAINER_ARGS[@]}"
 
 # Preflight check: is this machine actually ready for 'just review-container'?
-# Starts no agent and mounts no credential.
-[doc("Preflight diagnostics for this machine. Starts no agent.")]
+# Starts no agent and mounts no credential; the one thing it runs is a
+# disposable, credential-free gVisor/runsc isolation probe.
+[doc("Preflight diagnostics for this machine. Starts no agent; probes isolation.")]
 review-doctor:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -1207,6 +1356,27 @@ review-doctor:
       echo "  ✗ ${DOCTOR_CONTRIBUTOR_IMAGE} cannot be resolved"
       echo "    Published tags are 'stable', the version tags and 'sha-<commit>'; ':latest' does not exist."
       echo "    Override with REVIEW_CONTRIBUTOR_IMAGE (a 'sha-' tag or digest pins a build), or build image/Containerfile locally."
+      fail=$((fail+1))
+    fi
+    echo ""
+
+    # Isolation is fail-closed at launch, so the doctor reports it the same
+    # way. The probe is disposable, credential-free and agent-free: it is the
+    # only thing this recipe starts.
+    echo "=== Isolation runtime (gVisor/runsc) ==="
+    if ! require_runsc_host; then
+      fail=$((fail+1))
+    elif ! ensure_contributor_image "$DOCTOR_CONTRIBUTOR_IMAGE" >/dev/null 2>&1; then
+      # The probe runs with --pull=never, so it needs the image in local
+      # storage. Say that plainly instead of blaming the isolation runtime.
+      echo "  ✗ isolation could not be verified: ${DOCTOR_CONTRIBUTOR_IMAGE} is not available locally"
+      echo "    The disposable probe never pulls; resolve the contributor image check above first."
+      fail=$((fail+1))
+    elif require_runsc_runtime "$DOCTOR_CONTRIBUTOR_IMAGE"; then
+      echo "  ✓ isolation runtime: gVisor/runsc (ready; rootless Podman probe passed)"
+      echo "  ✓ disposable credential-free agent-free probe removed"
+      pass=$((pass+2))
+    else
       fail=$((fail+1))
     fi
     echo ""

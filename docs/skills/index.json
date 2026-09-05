@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-25",
+  "generated_at": "2026-08-26",
   "schema_version": "1.0",
   "skills": [
     {
@@ -132,8 +132,8 @@
         "container"
       ],
       "description": "Maintains the four container-only review recipes and their credential boundaries. Use when editing justfile.",
-      "version": "3.3",
-      "last_updated": "2026-08-20",
+      "version": "3.4",
+      "last_updated": "2026-08-26",
       "doc_type": "runbook"
     },
     {

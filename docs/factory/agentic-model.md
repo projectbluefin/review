@@ -73,6 +73,10 @@ carries the operational form of this section.
 ## Repository boundary
 
 `review` owns the contributor image, credential handoff, and review context.
+Its launcher also owns the outer execution boundary: agent-capable containers
+must run under the host's explicitly selected gVisor `runsc` runtime after a
+credential-free rootless Podman proof. Backend-native sandboxes remain defense
+in depth; they do not replace that boundary.
 Hive owns the contributor WebSocket protocol, task selection, assignment prompt
 injection, the `contributor` tmux session, and output capture. The launcher
 must not decline, retry, or otherwise manage assignments mid-protocol; the

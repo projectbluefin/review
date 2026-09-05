@@ -28,6 +28,14 @@ background a run implicitly — no `nohup`, no unlabeled `podman run -d`, no
 job that silently outlives the terminal. Cleanup of interactive runs remains
 a startup concern: a launch reclaims whatever a previous run left behind.
 
+Every launcher path that can execute agent-controlled work uses gVisor's
+host-side `runsc` OCI runtime explicitly. The launcher first runs a
+credential-free rootless Podman probe and verifies the probe container's
+reported OCI runtime; a missing, unusable, or mismatched runtime fails before
+an agent starts or credentials are mounted. There is no fallback to Podman's
+configured default. Build, audit, and unrelated utility containers are not
+agent execution paths and do not inherit this runtime policy.
+
 That rule scopes how the launcher starts the container; it is not a ban
 on `&` anywhere in the repository. Backgrounding is required where it is what
 preserves signal responsiveness. Bash defers a trap handler while it waits on
@@ -168,6 +176,7 @@ bash tests/image-contract.sh
 bash tests/bluefin-review.sh
 bash tests/dashboard-contract.sh
 bash tests/worktree-guard.sh
+bash tests/runsc-isolation.sh
 bash tests/just-onboarding.sh
 git diff --check
 just --list
