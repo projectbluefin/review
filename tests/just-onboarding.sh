@@ -187,6 +187,17 @@ case "${1:-}" in
     [[ "${FAKE_PODMAN_IMAGE_MISSING:-0}" == 1 ]] && exit 1
     exit 0
     ;;
+  system)
+    # Only 'system connection list' is consulted, to resolve the engine
+    # podman run would actually use (#400). FAKE_PODMAN_CONNECTIONS holds
+    # tab-separated 'name\turi\tdefault' rows, one per line; empty means no
+    # connections are configured, i.e. a purely local podman.
+    if [[ "${2:-}" == "connection" && "${3:-}" == "list" ]]; then
+      [[ -n "${FAKE_PODMAN_CONNECTIONS:-}" ]] && printf '%s\n' "${FAKE_PODMAN_CONNECTIONS}"
+      exit 0
+    fi
+    exit 97
+    ;;
   stop)
     printf '%s\n' "$*" >>"${RUNNER_LOG:?}"
     exit 0
@@ -327,6 +338,8 @@ run_recipe() {
       -u REVIEW_HIVE -u REVIEW_CONTRIBUTOR_IMAGE \
       -u REVIEW_QUEUE_NAME -u REVIEW_SCALE -u XDG_STATE_HOME -u FAKE_GIT_TOPLEVEL \
       -u REVIEW_LAB -u REVIEW_LAB_BROKER -u REVIEW_PERSONAL_SKILLS \
+      -u FAKE_PODMAN_CONNECTIONS -u REVIEW_QUEUE_ALLOW_REMOTE_STATE \
+      -u CONTAINER_HOST -u CONTAINER_CONNECTION \
       -u HIVE_HUB \
       -u FAKE_KUBECTL_ANNOTATION_GET_FAIL -u FAKE_KUBECTL_ANNOTATE_FAIL \
       -u FAKE_KUBECTL_DEPLOYMENT_GET_FAIL -u FAKE_KUBECTL_HAS_LAST_APPLIED \
@@ -617,6 +630,34 @@ assert_file_not_contains "HIVE_HUB" "$runner_log"
 assert_contains "has an unsupported HIVE_HUB; the dashboard requires one wss:// or https:// URL" "$OUT"
 assert_contains "starting the maintainer review dashboard (Hive not configured)" "$OUT"
 rm -f "$home/.config/hive/contributor.multi.env"
+
+begin "review-queue: a remote podman connection fails closed before launching (#400)"
+reset_logs
+# A remote default connection resolves the dashboard state bind on the
+# ENGINE host, not this one; landing batches would be written where no
+# local tool can ever find them again. Refuse to launch instead of quietly
+# binding the wrong filesystem.
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_PODMAN_CONNECTIONS="$(printf 'ghost\tssh://jorge@ghost:22/run/user/1000/podman/podman.sock\ttrue')"
+assert_nonzero_status "$STATUS" "a remote default connection must fail the launch"
+assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
+assert_contains "podman's default connection is remote (ssh://jorge@ghost:22/run/user/1000/podman/podman.sock)" "$OUT"
+assert_eq "$(wc -l <"$runner_log")" 0 "no podman run may happen once the engine is rejected"
+
+begin "review-queue: REVIEW_QUEUE_ALLOW_REMOTE_STATE acknowledges a remote connection"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_PODMAN_CONNECTIONS="$(printf 'ghost\tssh://jorge@ghost:22/run/user/1000/podman/podman.sock\ttrue')" \
+  REVIEW_QUEUE_ALLOW_REMOTE_STATE=1
+assert_file_contains "--name review-queue" "$runner_log"
+assert_contains "podman's default connection is remote (ssh://jorge@ghost:22/run/user/1000/podman/podman.sock); the dashboard state directory binds on that engine host" "$OUT"
+
+begin "review-queue: a non-default or absent podman connection stays local"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_PODMAN_CONNECTIONS="$(printf 'ghost\tssh://jorge@ghost:22/run/user/1000/podman/podman.sock\tfalse')"
+assert_file_contains "--name review-queue" "$runner_log"
+assert_not_contains "podman's default connection is remote" "$OUT"
 
 begin "review-queue: the dashboard state directory persists on the host"
 reset_logs
