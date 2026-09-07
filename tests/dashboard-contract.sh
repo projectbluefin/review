@@ -287,6 +287,17 @@ if grep -qE 'self\.mutate|subprocess' <<<"$handoff_body"; then
   fail "handoff must stay read-only: no mutation gate, no process execution"
 fi
 
+# --- batch engine and broker contracts ---------------------------------------
+# These suites import image/tui modules that never reach Textual, so they run
+# on the system interpreter, before the venv is built. They lived in the tree
+# unexecuted until now; tests/test-registry.sh below keeps that from recurring.
+python3 "$repo_root/tests/capacity_contract.py"
+python3 "$repo_root/tests/review_cache_contract.py"
+python3 "$repo_root/tests/review_engine_contract.py"
+python3 "$repo_root/tests/review_receipt_contract.py"
+python3 "$repo_root/tests/lab-broker-contract.py"
+python3 "$repo_root/tests/review-exec-broker-contract.py"
+
 # --- behaviour: drive the real app -------------------------------------------
 # Textual at the version the image installs, from the same hash-locked file the
 # image build uses, so the pilot exercises the runtime that ships.
@@ -318,6 +329,13 @@ fi
 "${venv}/bin/python" "$repo_root/tests/action_plan_contract.py"
 "${venv}/bin/python" "$repo_root/tests/re_review_contract.py"
 "${venv}/bin/python" "$repo_root/tests/semantic_view_contract.py"
+# review_snapshot_contract.py imports bluefin_review_tui for Stop, so it needs
+# the Textual venv rather than the stdlib-only step in validate.yml.
+"${venv}/bin/python" "$repo_root/tests/review_snapshot_contract.py"
 "${venv}/bin/python" "$repo_root/tests/dashboard_pilot.py"
+
+# Fails when a file under tests/ is not reachable from validate.yml, so a new
+# suite cannot land and then sit unexecuted the way seven of these did.
+bash "$repo_root/tests/test-registry.sh"
 
 printf 'dashboard contract OK\n'
