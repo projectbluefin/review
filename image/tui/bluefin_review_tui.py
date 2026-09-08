@@ -1008,11 +1008,13 @@ def authoritative_checks(live: dict) -> list[dict]:
 
 CI_LOG_MAX_BYTES = 64 * 1024
 CI_LOG_MAX_LINES = 200
+CI_LOG_PROCESS_MAX_BYTES = CI_LOG_MAX_BYTES * 2
 _ANSI_OSC = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
 _ANSI_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _SECRET_FORMS = (
     re.compile(r"\b(?:ghp|ghs|gho|github_pat)_[A-Za-z0-9_\-]{20,}\b"),
     re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b"),
+    re.compile(r"\b(?:xox[baprs]|npm|pypi|AIza)[-_][A-Za-z0-9_\-]{16,}\b"),
     re.compile(r"(?i)\bbearer\s+[^\s]+"),
     re.compile(r"(?i)\b(?:token|secret|password|authorization)\s*[:=]\s*[^\s]+"),
 )
@@ -1028,16 +1030,34 @@ def _check_integer(value: object) -> int | None:
     return number if number > 0 else None
 
 
-def ci_failure_evidence(live: dict) -> list[dict]:
+def ci_failure_evidence(
+    live: dict, *, repository: str = "", number: int | None = None
+) -> list[dict]:
     """Normalize current-head failed checks for an evidence-first diagnosis."""
     failures: list[dict] = []
     head_sha = str(live.get("headRefOid") or "")
+    repository = repository or str(live.get("repository") or live.get("repositoryName") or "")
+    number = number or _check_integer(live.get("number"))
     for check in authoritative_checks(live):
+        check_head = str(
+            check.get("headSha")
+            or check.get("head_sha")
+            or ((check.get("commit") or {}).get("oid") if isinstance(check.get("commit"), dict) else "")
+            or ""
+        )
+        if check_head and check_head != head_sha:
+            continue
         conclusion = str(check.get("conclusion") or check.get("state") or "").upper()
         if conclusion not in {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"}:
             continue
         suite = check.get("checkSuite") if isinstance(check.get("checkSuite"), dict) else {}
-        workflow_run = suite.get("workflowRun") if isinstance(suite.get("workflowRun"), dict) else {}
+        workflow_run = (
+            check.get("workflowRun")
+            if isinstance(check.get("workflowRun"), dict)
+            else suite.get("workflowRun")
+            if isinstance(suite.get("workflowRun"), dict)
+            else {}
+        )
         annotations = check.get("annotations") or []
         if isinstance(annotations, dict):
             annotations = annotations.get("nodes") or []
@@ -1045,20 +1065,28 @@ def ci_failure_evidence(live: dict) -> list[dict]:
         for annotation in annotations[:8] if isinstance(annotations, list) else []:
             if not isinstance(annotation, dict):
                 continue
-            normalized_annotations.append(
-                {
-                    key: str(annotation[key])[:240]
-                    for key in ("path", "start_line", "end_line", "message", "annotation_level")
-                    if key in annotation and annotation[key] is not None
-                }
-            )
+            normalized: dict[str, str] = {}
+            for source, target in (
+                ("path", "path"),
+                ("start_line", "start_line"),
+                ("startLine", "start_line"),
+                ("end_line", "end_line"),
+                ("endLine", "end_line"),
+                ("message", "message"),
+                ("annotation_level", "annotation_level"),
+                ("annotationLevel", "annotation_level"),
+            ):
+                if target not in normalized and annotation.get(source) is not None:
+                    normalized[target] = str(annotation[source])[:240]
+            normalized_annotations.append(normalized)
+        check_id = _check_integer(check.get("databaseId") or check.get("checkId"))
         run_id = next(
             (
                 value
                 for value in (
-                    _check_integer(check.get("databaseId")),
                     _check_integer(check.get("runId")),
                     _check_integer(workflow_run.get("databaseId")),
+                    _check_integer(workflow_run.get("id")),
                 )
                 if value is not None
             ),
@@ -1075,23 +1103,166 @@ def ci_failure_evidence(live: dict) -> list[dict]:
             ),
             None,
         )
+        job = check.get("job") if isinstance(check.get("job"), dict) else {}
+        steps = check.get("steps") or job.get("steps")
+        failing_step = None
+        if isinstance(steps, dict):
+            steps = steps.get("nodes") or []
+        if isinstance(steps, list):
+            for step in steps:
+                if not isinstance(step, dict):
+                    continue
+                step_conclusion = str(step.get("conclusion") or step.get("status") or "").upper()
+                if step_conclusion in {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"}:
+                    failing_step = step.get("name") or step.get("stepName")
+                    if failing_step:
+                        break
+        job_id = _check_integer(
+            check.get("jobId")
+            or job.get("databaseId")
+            or job.get("id")
+        )
+        workflow_id = _check_integer(
+            check.get("workflowId")
+            or workflow_run.get("workflowId")
+            or workflow_run.get("workflow_id")
+        )
         failures.append(
             {
-                "workflow": str(check.get("workflowName") or suite.get("workflowName") or "unknown"),
-                "job": str(check.get("name") or check.get("context") or "unknown"),
-                "step": str(check.get("stepName") or "unknown"),
+                "repository": repository or "unknown",
+                "pull_request": number,
+                "check": str(check.get("name") or check.get("context") or "unknown"),
+                "check_id": check_id,
+                "workflow": str(
+                    check.get("workflowName")
+                    or suite.get("workflowName")
+                    or workflow_run.get("workflowName")
+                    or "unknown"
+                ),
+                "workflow_id": workflow_id,
+                "job": str(
+                    check.get("name")
+                    or check.get("context")
+                    or job.get("name")
+                    or "unknown"
+                ),
+                "job_id": job_id,
+                "step": str(check.get("stepName") or failing_step or "unknown"),
                 "conclusion": conclusion,
                 "head_sha": head_sha if FULL_SHA.fullmatch(head_sha) else "",
                 "run_id": run_id,
                 "attempt": attempt,
-                "started_at": str(check.get("startedAt") or ""),
-                "completed_at": str(check.get("completedAt") or ""),
-                "url": str(check.get("detailsUrl") or check.get("url") or ""),
-                "job_id": _check_integer(check.get("jobId")),
+                "started_at": str(
+                    check.get("startedAt") or workflow_run.get("createdAt") or ""
+                ),
+                "completed_at": str(
+                    check.get("completedAt") or workflow_run.get("updatedAt") or ""
+                ),
+                "url": str(
+                    check.get("detailsUrl")
+                    or check.get("url")
+                    or workflow_run.get("url")
+                    or ""
+                ),
                 "annotations": normalized_annotations,
             }
         )
     return failures
+
+
+def format_ci_failure_evidence(
+    evidence: dict, repository: str = "", number: int | None = None
+) -> list[str]:
+    """Format every CI identity field with an explicit unknown value."""
+    repo = evidence.get("repository") or repository or "unknown"
+    pull_request = evidence.get("pull_request") or number or "unknown"
+    lines = [
+        f"repository  {repo}",
+        f"pull request {pull_request}",
+        f"head       {evidence.get('head_sha') or 'unknown'}",
+        f"check     {evidence.get('check') or 'unknown'}",
+        f"check id   {evidence.get('check_id') or 'unknown'}",
+        f"workflow   {evidence.get('workflow') or 'unknown'}",
+        f"workflow id {evidence.get('workflow_id') or 'unknown'}",
+        f"job       {evidence.get('job') or 'unknown'}",
+        f"job id    {evidence.get('job_id') or 'unknown'}",
+        f"run       {evidence.get('run_id') or 'unknown'}",
+        f"attempt   {evidence.get('attempt') or 'unknown'}",
+        f"conclusion {evidence.get('conclusion') or 'unknown'}",
+        f"started    {evidence.get('started_at') or 'unknown'}",
+        f"completed  {evidence.get('completed_at') or 'unknown'}",
+        f"step      {evidence.get('step') or 'unknown'}",
+    ]
+    annotations = evidence.get("annotations") or []
+    if annotations:
+        lines.append(f"annotations {len(annotations)}")
+        for annotation in annotations:
+            lines.append(
+                "  "
+                + str(annotation.get("path") or "unknown")
+                + ":"
+                + str(annotation.get("start_line") or "?")
+                + " "
+                + str(annotation.get("message") or "")
+            )
+    else:
+        lines.append("annotations unknown")
+    lines.append(f"evidence  {evidence.get('url') or 'unknown'}")
+    return lines
+
+
+def ci_log_failure_state(detail: str) -> str:
+    """Classify a failed on-demand log read without hiding its cause."""
+    lowered = str(detail or "").lower()
+    if "401" in lowered or "authentication" in lowered or "unauthorized" in lowered:
+        return "authentication failed"
+    if "403" in lowered or "permission" in lowered or "forbidden" in lowered:
+        return "permission denied"
+    if (
+        "404" in lowered
+        or "410" in lowered
+        or "not found" in lowered
+        or "expired" in lowered
+    ):
+        return "expired or unavailable"
+    return "transport failed"
+
+
+def ci_log_command(repository: str, evidence: dict) -> list[str]:
+    """Build the read-only command for one exact workflow run and attempt."""
+    run_id = _check_integer(evidence.get("run_id"))
+    if run_id is None:
+        return []
+    command = ["gh", "run", "view", str(run_id), "--repo", repository]
+    job_id = _check_integer(evidence.get("job_id"))
+    attempt = _check_integer(evidence.get("attempt"))
+    if job_id is not None:
+        command.extend(["--job", str(job_id)])
+    if attempt is not None:
+        command.extend(["--attempt", str(attempt)])
+    command.append("--log-failed")
+    return command
+
+
+def ci_result_is_current(
+    expected_repository: str,
+    expected_number: int,
+    expected_head: str,
+    expected_generation: int,
+    closed: bool,
+    current_repository: str,
+    current_number: int,
+    current_head: str,
+    current_generation: int,
+) -> bool:
+    """Reject a CI result after navigation, head refresh, or cancellation."""
+    return (
+        not closed
+        and expected_generation == current_generation
+        and expected_repository == current_repository
+        and expected_number == current_number
+        and expected_head == current_head
+    )
 
 
 def sanitize_ci_log(
@@ -1101,17 +1272,33 @@ def sanitize_ci_log(
     max_bytes: int = CI_LOG_MAX_BYTES,
 ) -> tuple[str, list[str]]:
     """Return bounded, redacted, terminal-control-free log evidence."""
-    if not raw:
+    if raw is None:
         return "missing", []
+    if raw == "" or raw == b"":
+        return "empty", []
     if max_lines < 1 or max_bytes < 1:
         return "invalid-limit", []
-    text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+    process_bytes = min(max_bytes * 2, CI_LOG_PROCESS_MAX_BYTES)
+    if isinstance(raw, bytes):
+        text = raw[:process_bytes].decode("utf-8", "replace")
+    else:
+        text = str(raw)[:process_bytes]
     for pattern in _SECRET_FORMS:
         text = pattern.sub("[redacted]", text)
     text = _ANSI_OSC.sub("", _ANSI_CSI.sub("", text))
-    text = "".join(character for character in text if character in "\n\t" or ord(character) >= 0x20)
+    text = "".join(
+        character
+        for character in text
+        if character in "\n\t"
+        or (
+            ord(character) >= 0x20
+            and ord(character) != 0x7F
+            and not 0x80 <= ord(character) <= 0x9F
+        )
+    )
     bounded = text.encode("utf-8", "replace")[:max_bytes].decode("utf-8", "ignore")
-    return "available", bounded.splitlines()[:max_lines]
+    lines = bounded.splitlines()[:max_lines]
+    return ("available", lines) if lines else ("empty", [])
 
 
 def effective_check_state(snapshot: str, live: dict) -> str:
@@ -2391,48 +2578,37 @@ class CIFailureScreen(ModalScreen[None]):
         self.evidence = evidence
         self.generation = 0
         self.loading = False
+        self.closed = False
+        self.expected_identity = (
+            stop.repository,
+            stop.number,
+            str(evidence.get("head_sha") or stop.head_identity),
+        )
 
     def compose(self) -> ComposeResult:
         evidence = self.evidence
-        annotations = evidence.get("annotations") or []
         lines = [
-            f"CI FAILURE TRIAGE · {escape(self.stop_record.key)}",
-            f"workflow  {escape(str(evidence.get('workflow') or 'unknown'))}",
-            f"job       {escape(str(evidence.get('job') or 'unknown'))}",
-            f"step      {escape(str(evidence.get('step') or 'unknown'))}",
-            f"conclusion {escape(str(evidence.get('conclusion') or 'unknown'))}",
-            f"head      {escape(str(evidence.get('head_sha') or 'unknown'))}",
-            f"run       {escape(str(evidence.get('run_id') or 'unknown'))}",
-            f"attempt   {escape(str(evidence.get('attempt') or 'unknown'))}",
-            f"started   {escape(str(evidence.get('started_at') or 'unknown'))}",
-            f"completed {escape(str(evidence.get('completed_at') or 'unknown'))}",
-            f"evidence  {link(str(evidence.get('url')), str(evidence.get('url')))}"
-            if evidence.get("url")
-            else "evidence  unknown",
+            "CI FAILURE TRIAGE · " + self.stop_record.key,
+            *format_ci_failure_evidence(
+                evidence, self.stop_record.repository, self.stop_record.number
+            ),
         ]
-        if annotations:
-            lines.append("annotations")
-            for annotation in annotations:
-                path = annotation.get("path", "unknown")
-                location = annotation.get("start_line", "?")
-                message = annotation.get("message", "")
-                lines.append(
-                    f"  {escape(str(path))}:{escape(str(location))} "
-                    f"{escape(str(message))}"
-                )
-        else:
-            lines.append("annotations unknown or unavailable")
         with Vertical(id="ci-failure-box"):
-            yield Static("\n".join(lines), id="ci-failure-evidence")
+            yield Static(escape("\n".join(lines)), id="ci-failure-evidence")
             yield Button("Load bounded logs", id="ci-load-logs")
-            yield Static("logs: not loaded · [i] load · [esc] back", id="ci-log-state")
+            yield Static(
+                "logs: not loaded · untrusted · [i] load · [esc] back",
+                id="ci-log-state",
+            )
             yield RichLog(highlight=False, markup=False, wrap=True, id="ci-log")
             yield Footer()
 
     def on_mount(self) -> None:
+        self.closed = False
         self.query_one("#ci-load-logs", Button).focus()
 
     def on_unmount(self) -> None:
+        self.closed = True
         self.generation += 1
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -2442,38 +2618,40 @@ class CIFailureScreen(ModalScreen[None]):
     def action_load_logs(self) -> None:
         if self.loading:
             return
-        run_id = self.evidence.get("run_id")
-        if not isinstance(run_id, int) or run_id < 1:
-            self.render_logs("unavailable: workflow run id is unknown", [])
+        if not ci_log_command(self.stop_record.repository, self.evidence):
+            self.render_logs("logs: missing · workflow run id is unknown", [])
             return
         self.loading = True
         self.generation += 1
         generation = self.generation
         self.query_one("#ci-log-state", Static).update("logs: loading bounded evidence…")
-        self.load_logs(generation, run_id)
+        self.load_logs(generation)
 
     @work(thread=True, exclusive=True)
-    def load_logs(self, generation: int, run_id: int) -> None:
-        result = gh(
-            "run",
-            "view",
-            str(run_id),
-            "--repo",
-            self.stop_record.repository,
-            "--log-failed",
-            timeout=30,
-        )
+    def load_logs(self, generation: int, run_id: int | None = None) -> None:
+        command = ci_log_command(self.stop_record.repository, self.evidence)
+        if not command:
+            self.app.call_from_thread(
+                self.render_logs, "logs: missing · workflow run id is unknown", [], generation
+            )
+            return
+        try:
+            result = gh(*command[1:], timeout=30)
+        except (OSError, subprocess.TimeoutExpired, ValueError) as error:
+            if not get_current_worker().is_cancelled:
+                self.app.call_from_thread(
+                    self.render_logs, f"logs: transport failed · {type(error).__name__}", [], generation
+                )
+            return
+        if get_current_worker().is_cancelled:
+            return
         if result.returncode == 0:
             state, lines = sanitize_ci_log(result.stdout)
-            self.app.call_from_thread(self.render_logs, f"logs: {state}", lines, generation)
+            label = "available · UNTRUSTED" if state == "available" else state
+            self.app.call_from_thread(self.render_logs, f"logs: {label}", lines, generation)
             return
-        detail = (result.stderr or result.stdout or "").lower()
-        if "403" in detail or "permission" in detail or "forbidden" in detail:
-            state = "permission denied"
-        elif "404" in detail or "not found" in detail or "expired" in detail:
-            state = "expired or unavailable"
-        else:
-            state = "transport failed"
+        detail = result.stderr or result.stdout or ""
+        state = ci_log_failure_state(detail)
         self.app.call_from_thread(self.render_logs, f"logs: {state}", [], generation)
 
     def render_logs(
@@ -2482,7 +2660,9 @@ class CIFailureScreen(ModalScreen[None]):
         lines: list[str],
         generation: int | None = None,
     ) -> None:
-        if generation is not None and generation != self.generation:
+        if generation is not None and (
+            generation != self.generation or not self._result_is_current()
+        ):
             return
         self.loading = False
         try:
@@ -2491,8 +2671,37 @@ class CIFailureScreen(ModalScreen[None]):
         except NoMatches:
             return
         log.clear()
-        for line in lines:
+        _, safe_lines = sanitize_ci_log("\n".join(lines))
+        for line in safe_lines:
             log.write(line)
+
+    def _result_is_current(self) -> bool:
+        if self.closed:
+            return False
+        repository, number, head = self.expected_identity
+        current_repository, current_number, current_head = repository, number, head
+        dashboard = self.app
+        if hasattr(dashboard, "current"):
+            try:
+                current = dashboard.current
+            except (NoMatches, AttributeError):
+                return False
+            if current is not self.stop_record:
+                return False
+            current_repository = current.repository
+            current_number = current.number
+            current_head = current.head_identity
+        return ci_result_is_current(
+            repository,
+            number,
+            head,
+            self.generation,
+            self.closed,
+            current_repository,
+            current_number,
+            current_head,
+            self.generation,
+        )
 
 
 class DiffScreen(ModalScreen[None]):
@@ -6028,8 +6237,22 @@ class ReviewDashboard(App):
         return self.pulls_cache[repo]
 
     def paint_context(
-        self, stop: Stop, text: str, dupes: list[dict], overlaps: list[dict]
+        self,
+        stop: Stop,
+        text: str,
+        dupes: list[dict],
+        overlaps: list[dict],
+        generation: int | None = None,
     ) -> None:
+        try:
+            current = self.current
+        except NoMatches:
+            return
+        if current is not stop or (
+            generation is not None
+            and self.evidence_generation.get(stop.key) != generation
+        ):
+            return
         stop.overlap = {
             "duplicates": [item["number"] for item in dupes],
             "overlaps": [item["number"] for item in overlaps],
@@ -6199,33 +6422,20 @@ class ReviewDashboard(App):
             else ""
         )
         ci_triage_block = ""
-        failures = ci_failure_evidence(live)
+        failures = ci_failure_evidence(
+            live, repository=stop.repository, number=stop.number
+        )
         if failures:
             lines_ci = ["\n[b red]CI FAILURE TRIAGE[/b red]"]
             for failure in failures:
-                attempt = f" attempt {failure['attempt']}" if failure.get("attempt") else " attempt unknown"
-                run = f" run {failure['run_id']}" if failure.get("run_id") else " run unknown"
-                step = escape(str(failure.get("step") or "unknown"))
-                lines_ci.append(
-                    f"  [red]✗ {escape(str(failure.get('conclusion') or 'unknown'))}[/red] "
-                    f"{escape(str(failure.get('workflow') or 'unknown'))} / "
-                    f"[b]{escape(str(failure.get('job') or 'unknown'))}[/b] › {step}"
-                    f" @ {escape(str(failure.get('head_sha') or 'unknown')[:12])}"
-                    f"{run}{attempt}"
-                )
-                if failure.get("started_at") or failure.get("completed_at"):
-                    lines_ci.append(
-                        f"    time: {escape(str(failure.get('started_at') or 'unknown'))[:19]}"
-                        f" -> {escape(str(failure.get('completed_at') or 'unknown'))[:19]}"
+                lines_ci.extend(
+                    "  " + escape(line)
+                    for line in format_ci_failure_evidence(
+                        failure, stop.repository, stop.number
                     )
-                annotations = failure.get("annotations") or []
-                lines_ci.append(
-                    f"    annotations: {len(annotations)}"
-                    + (" · [i] inspect logs" if failure.get("run_id") else "")
                 )
-                if failure.get("url"):
-                    url = str(failure["url"])
-                    lines_ci.append(f"    evidence: {link(url, url)}")
+                if failure.get("run_id"):
+                    lines_ci.append("  [i] inspect logs on demand · logs are untrusted")
             ci_triage_block = "\n" + "\n".join(lines_ci)
 
         self.query_one("#details", Static).update(
@@ -6261,10 +6471,10 @@ class ReviewDashboard(App):
                 else ""
             )
         )
-        self.render_context(stop)
+        self.render_context(stop, self.evidence_generation.get(stop.key, 0))
 
     @work(thread=True)
-    def render_context(self, stop: Stop) -> None:
+    def render_context(self, stop: Stop, generation: int | None = None) -> None:
         dupes, overlaps = self.cluster(stop)
         lines = ["[b]CONTEXT & VERIFICATION[/b]"]
 
@@ -6356,7 +6566,7 @@ class ReviewDashboard(App):
         # moment. Upstream: "avoid calling methods on your UI directly from a
         # threaded worker" (textual.textualize.io/guide/workers).
         self.call_from_thread(
-            self.paint_context, stop, "\n".join(lines), dupes, overlaps
+            self.paint_context, stop, "\n".join(lines), dupes, overlaps, generation
         )
 
     def render_issue_context(self, stop: Stop) -> None:
@@ -7199,7 +7409,9 @@ class ReviewDashboard(App):
         if stop.is_issue:
             self.notify("CI failure logs apply to pull requests only", severity="warning")
             return
-        failures = ci_failure_evidence(stop.live)
+        failures = ci_failure_evidence(
+            stop.live, repository=stop.repository, number=stop.number
+        )
         if not failures:
             self.notify("no current-head CI failure evidence is available", severity="warning")
             return
