@@ -26,6 +26,7 @@ import threading
 import time
 import tempfile
 import unittest
+from unittest import mock
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -1811,13 +1812,9 @@ async def main() -> int:
                 f"the plan must cover the whole selection, got {gate.plan.keys}",
             )
             await pilot.press("enter")
-            for _ in range(200):
-                if isinstance(app.screen, tui.LandingScreen):
-                    break
-                await pilot.pause(0.05)
             check(
-                isinstance(app.screen, tui.LandingScreen),
-                f"dispatch must open the live batch queue, got {type(app.screen).__name__}",
+                not isinstance(app.screen, tui.LandingScreen),
+                f"dispatch must return to the review queue, got {type(app.screen).__name__}",
             )
             task = gate.plan
             for _ in range(400):
@@ -1872,6 +1869,8 @@ async def main() -> int:
                 not any(s.selected for s in app.stops),
                 "landed pull requests must leave the batch",
             )
+            await pilot.press("w")
+            await pilot.pause()
             screen = app.screen
             if isinstance(screen, tui.LandingScreen):
                 screen.poll()
@@ -1893,17 +1892,8 @@ async def main() -> int:
             await pilot.pause()
             check(
                 not isinstance(app.screen, tui.LandingScreen),
-                "escape must return to the review queue",
+                "escape must return from the deliberate landing view",
             )
-            await pilot.press("w")
-            await pilot.pause()
-            check(
-                isinstance(app.screen, tui.LandingScreen),
-                "[w] must reopen the live batch queue",
-            )
-            await pilot.press("q")
-            await pilot.pause()
-            check(not isinstance(app.screen, tui.LandingScreen), "q must return from LandingScreen")
     del os.environ["BLUEFIN_REVIEW_INSTANCE"]
 
     # ── landing batches share repository lanes, not one global FIFO ─────
@@ -2072,6 +2062,16 @@ async def main() -> int:
                     expected in rows,
                     f"the batch queue must show {expected!r}, got {rows!r}",
                 )
+            landing_status = str(
+                screen.query_one("#landing-status", tui.Static).render()
+            )
+            check(
+                "stage" in landing_status
+                and "terminal" in landing_status
+                and "elapsed" in landing_status
+                and "ETA" not in landing_status,
+                f"landing status must show observed progress without ETA, got {landing_status!r}",
+            )
 
             def line_styles(fragment: str) -> list:
                 """The segment styles of the rendered line holding fragment."""
@@ -2148,6 +2148,55 @@ async def main() -> int:
         Path(colour_task.prompt_path),
         Path(colour_task.status_path),
     ):
+        artifact.unlink(missing_ok=True)
+    gh_log.write_text("")
+
+    # ── landing log and stop actions share one explicit batch target ───────
+    first_status = workdir / "first.jsonl"
+    second_status = workdir / "second.jsonl"
+    first_log = workdir / "first.log"
+    second_log = workdir / "second.log"
+    first_status.write_text("{\"pr\":\"projectbluefin/review#1\",\"state\":\"fixing\"}\n")
+    second_status.write_text("{\"pr\":\"projectbluefin/review#2\",\"state\":\"fixing\"}\n")
+    first_log.write_text("first batch log\n")
+    second_log.write_text("second batch log\n")
+    first_task = tui.landing.LandingTask(
+        task_id="first-batch",
+        stops=[tui.Stop("projectbluefin/review", 1, "review", "first")],
+        login="tester",
+        status_path=str(first_status),
+        log_path=str(first_log),
+        process=SimpleNamespace(pid=101),
+    )
+    second_task = tui.landing.LandingTask(
+        task_id="second-batch",
+        stops=[tui.Stop("projectbluefin/review", 2, "review", "second")],
+        login="tester",
+        status_path=str(second_status),
+        log_path=str(second_log),
+        process=SimpleNamespace(pid=202),
+    )
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    async with app.run_test() as pilot:
+        app.landing_queue.extend([first_task, second_task])
+        await app.push_screen(tui.LandingScreen(app))
+        await pilot.pause()
+        screen = app.screen
+        if isinstance(screen, tui.LandingScreen):
+            screen.select_task(first_task.task_id)
+            screen.poll()
+            log = str(screen.query_one("#landing-log", tui.RichLog).render())
+            check("first batch log" in log and "second batch log" not in log,
+                  f"selected batch log must be displayed, got {log!r}")
+            with mock.patch.object(tui.os, "getpgid", return_value=101) as getpgid, \
+                    mock.patch.object(tui.os, "killpg") as killpg:
+                screen.action_stop_agent()
+            check(getpgid.call_args.args == (101,), "stop must target the displayed batch")
+            check(killpg.call_args.args == (101, tui.signal.SIGTERM),
+                  "stop must terminate the displayed batch process group")
+            check(first_task.stop_requested and not second_task.stop_requested,
+                  "stopping one batch must not target another batch")
+    for artifact in (first_status, second_status, first_log, second_log):
         artifact.unlink(missing_ok=True)
     gh_log.write_text("")
 

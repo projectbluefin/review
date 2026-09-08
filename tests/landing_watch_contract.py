@@ -37,12 +37,15 @@ class LandingWatchContractTests(unittest.TestCase):
 
     def test_watch_target_round_trips_and_matches_exact_identity(self) -> None:
         target = landing.WatchTarget(
-            repository="org/repo;$(touch PWNED)",
+            repository="org/repo",
+            pull_request=7,
             run_id=42,
             head_sha="a" * 40,
             attempt=3,
             title="title;$(touch PWNED)",
             path="/tmp/path with spaces",
+            observed_at=100.0,
+            deadline=400.0,
         )
         restored = landing.WatchTarget.from_dict(
             json.loads(json.dumps(target.to_dict()))
@@ -58,10 +61,20 @@ class LandingWatchContractTests(unittest.TestCase):
     def test_report_watch_is_idempotent_and_refuses_terminal_rerun(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             path = str(Path(root) / "watch.jsonl")
-            target = landing.WatchTarget("org/repo", 7, "a" * 40, 1, "title", root)
+            target = landing.WatchTarget(
+                "org/repo",
+                pull_request=7,
+                run_id=1,
+                head_sha="a" * 40,
+                attempt=1,
+                title="title",
+                path=root,
+                observed_at=100.0,
+                deadline=400.0,
+            )
             self.assertEqual(landing.report_watch(path, target, "waiting-ci"), 0)
             self.assertEqual(landing.report_watch(path, target, "waiting-ci"), 0)
-            self.assertNotEqual(landing.report_watch(path, target, "merged"), 0)
+            self.assertEqual(landing.report_event(path, "org/repo#7", "merged", "merged"), 0)
             self.assertNotEqual(landing.report_watch(path, target, "waiting-ci"), 0)
 
     def test_active_timeout_continues_the_same_watch(self) -> None:
@@ -71,7 +84,17 @@ class LandingWatchContractTests(unittest.TestCase):
         self.assertEqual(result, "continue")
 
     def test_superseded_head_or_attempt_is_rejected(self) -> None:
-        target = landing.WatchTarget("org/repo", 7, "a" * 40, 1, "title", "/tmp")
+        target = landing.WatchTarget(
+            "org/repo",
+            pull_request=7,
+            run_id=1,
+            head_sha="a" * 40,
+            attempt=1,
+            title="title",
+            path="/tmp",
+            observed_at=100.0,
+            deadline=400.0,
+        )
         for kwargs in (
             {"head_sha": "b" * 40, "attempt": 1},
             {"head_sha": "a" * 40, "attempt": 2},
