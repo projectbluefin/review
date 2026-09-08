@@ -51,6 +51,22 @@ or cluster scale-out (`cluster-workers.md`).
 7. **Process Termination:** The agent runs in its own process group; `[x]` on
    the batch screen stops it cleanly via `SIGTERM`.
 
+The landing module is the status writer and command boundary. It builds argv
+and cwd separately from untrusted repository, title, and note text, and all
+status changes pass through its locked reporter. A `WatchTarget` retains the
+exact repository, pull request, head, workflow run, attempt, status, observed
+time, and deadline. A timeout while the same run remains queued or active is a
+continuation of that watch; an active run is never rerun merely because a watch
+command timed out.
+
+`LandingScreen` reads a bounded log tail by bytes and lines and preserves the
+current scroll position unless the maintainer is following the tail. The
+selected task is the target shown in the status and the target stopped by
+`[x]`. Its progress is an observation of reported stages and evidence age:
+running, waiting, stopped, failed, incomplete, and completed-with-blockers are
+kept distinct. A zero exit code alone is incomplete until the report closes
+and every selected pull request has a terminal outcome.
+
 ## `[$]` is a state machine
 
 `[$]` takes one exact-list confirmation and then mutates pull requests without

@@ -638,6 +638,8 @@ def classify_review_action(
         "request changes": "request-changes",
         "changes-requested": "request-changes",
         "request-change": "request-changes",
+        "accept-and-queue": "approve-and-queue",
+        "approved-and-queued": "approve-and-queue",
         "merge-completed": "merge",
     }.get(raw_action, raw_action)
     provenance = result.provenance if result is not None else {}
@@ -646,7 +648,12 @@ def classify_review_action(
         and provenance.get("repository") == repository
         and provenance.get("pull_request") == number
     )
-    verified_action = action_verified or raw_action == "merge-completed"
+    # A queue request is a successful acceptance action, but it is not proof
+    # that a merge completed. Only the direct merge category may carry that
+    # completion flag.
+    verified_action = normalized_action == "merge" and (
+        action_verified or raw_action == "merge-completed"
+    )
     classification = "unclassified"
     if (
         result is not None
@@ -660,15 +667,19 @@ def classify_review_action(
             or (FULL_SHA.fullmatch(action_head) and action_head == head_sha)
         )
         and action_success
-        and (normalized_action in {"approve", "request-changes"}
-             or (normalized_action == "merge" and verified_action))
+        and (
+            normalized_action in {"approve", "approve-and-queue", "request-changes"}
+            or (normalized_action == "merge" and verified_action)
+        )
     ):
         has_findings = review_state == "findings" or finding_count > 0 or bool(result.findings)
-        if normalized_action == "merge" and verified_action:
+        accepted = normalized_action in {"approve", "approve-and-queue"} or (
+            normalized_action == "merge" and verified_action
+        )
+        if accepted:
             classification = "disagreement" if has_findings else "agreement"
         else:
-            expected_action = "request-changes" if has_findings else "approve"
-            classification = "agreement" if normalized_action == expected_action else "disagreement"
+            classification = "agreement" if has_findings else "disagreement"
     return ReviewActionReceipt(
         repository,
         number,
@@ -1088,6 +1099,11 @@ def _check_integer(value: object) -> int | None:
     return number if number > 0 else None
 
 
+def _run_id_from_url(value: object) -> int | None:
+    match = re.search(r"/runs?/(\d+)(?:/|$)", str(value or ""))
+    return _check_integer(match.group(1)) if match else None
+
+
 def ci_failure_evidence(
     live: dict, *, repository: str = "", number: int | None = None
 ) -> list[dict]:
@@ -1145,6 +1161,7 @@ def ci_failure_evidence(
                     _check_integer(check.get("runId") or check.get("run_id")),
                     _check_integer(workflow_run.get("databaseId")),
                     _check_integer(workflow_run.get("id")),
+                    _run_id_from_url(check.get("detailsUrl") or check.get("url")),
                 )
                 if value is not None
             ),
@@ -6773,6 +6790,12 @@ class ReviewDashboard(App):
         if commands and isinstance(commands[0], str):
             commands = [commands]  # type: ignore[list-item]
         for command in reversed(commands):  # type: ignore[union-attr]
+            if (
+                len(command) >= 3
+                and command[2] == "queue"
+                and str(command[1]).replace("\\", "/").endswith("/hive_api.py")
+            ):
+                return "approve-and-queue"
             if "--request-changes" in command:
                 return "request-changes"
             if "--approve" in command:

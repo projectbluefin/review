@@ -69,6 +69,25 @@ class ReviewActionComparisonContractTests(unittest.TestCase):
         )
         self.assertEqual(classify(result, "queued", action_verified=True).classification, "unclassified")
 
+    def test_successful_acceptance_categories_keep_queue_distinct_from_merge(self):
+        result = review()
+
+        queued = classify(result, "approve-and-queue")
+        self.assertEqual(queued.classification, "agreement")
+        self.assertEqual(queued.action, "approve-and-queue")
+        self.assertFalse(queued.verified)
+
+        merged = classify(result, "merge", action_verified=True)
+        self.assertEqual(merged.classification, "agreement")
+        self.assertEqual(merged.action, "merge")
+        self.assertTrue(merged.verified)
+
+        category = tui.ReviewDashboard._action_category
+        self.assertEqual(
+            category(["python3", "image/tui/hive_api.py", "queue", "https://hive.example/pr/154"]),
+            "approve-and-queue",
+        )
+
     def test_changed_head_and_invalid_results_are_unclassified(self):
         result = review(findings=[{"severity": "high", "file": "a.py", "line": 1, "title": "risk"}])
         cases = [

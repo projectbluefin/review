@@ -23,6 +23,13 @@ metadata:
 
 The dashboard retains its last good live GitHub queue and read-only Hive view. Receipt-verified clean reviews, successful mutations or batch queues, and terminal landing completion request reconciliation. Requests coalesce with one bounded follow-up; there is no polling or Hive assignment/completion mutation. `R` is the explicit-read control; failed reads retain visibly aged data.
 
+`A` confirms the selected pull requests as a landing batch and returns the
+maintainer to the live queue. `w` opens the deliberate landing view, where
+`j`/`k` select an explicit batch target, `x` stops that target's owned process
+group, and Escape returns to the queue. The landing view reports observed
+stage, model and round when available, terminal/waiting/blocked/failed counts,
+elapsed time, and evidence age; it does not invent an ETA.
+
 ## When to Use
 
 Load this before editing `image/tui/bluefin_review_tui.py`,
@@ -138,6 +145,24 @@ Verified against Context7 `/textualize/textual`:
   grouping navigation, review, batching, and mutations with cyan/magenta
   badges; dismisses cleanly with `?`, `q`, or `Esc`.
 - **Evidence-first CI failure triage card**: Failing, errored, or timed-out checks surface an immediate `CI FAILURE TRIAGE` section displaying the workflow name, job/check context, failing step, head SHA, execution timestamps, and direct evidence URLs.
+- **CI evidence stays bounded and untrusted**: Log acquisition is on demand and
+  tied to the selected repository, pull request, head, run, and attempt. Missing
+  logs, permission failures, transport failures, and available logs remain
+  distinct; displayed text is bounded, redacted, and stripped of terminal
+  controls.
+- **Review/action receipts stay observational**: A completed `ReviewResult` and
+  a successful correlated action are retained only in bounded session memory,
+  keyed by repository, pull request, and exact head. Supported categories keep
+  their identity (`approve`, `request-changes`, `approve-and-queue`, or a
+  verified `merge`); a queue request is not a completed merge. Missing
+  repository/PR provenance, stale heads, failed actions, comments, branch
+  updates, and unsupported actions are `unclassified`. The receipt describes an
+  evidence/action pair and has no approval or merge authority.
+- **Responsive screens preserve focus**: Draft generation runs through a
+  Textual worker with generation and edit revision guards, while log refreshes
+  read bounded tails and restore the user's scroll position. Small terminals
+  retain the required controls with explicit compact fallbacks; no-color,
+  reduced-motion, and ASCII modes carry the same facts in text.
 - **Empty queue celebration (`ALL SYSTEMS SLAY`)**: Draining the active review source (repository-scoped, own-work excluded) triggers a one-shot 1.3s retro sequence: Round 8/Fight (400ms) → Bluefin charging `SLAYDOKEN!` (300ms) → `9999!` hit (250ms) → `K.O.` (350ms) → `ALL SYSTEMS SLAY` held frame. Startup with an empty queue skips directly to the held frame. Action-filtered views do not trigger celebration.
 - **Treat the Hive API as JSON, not a browser.** The read-only status probe reports missing hub config, missing credentials, network/auth failure, edge/login redirects, malformed responses, and server failure as separate concise states. The queue POST succeeds only when bounded JSON says `queued`; the typed PR-number gate remains the boundary. Failed probes leave queue/review evidence visible and mark retained assignments as last-known. Direct GitHub review and merge stay available.
 
@@ -174,6 +199,17 @@ On the dashboard, `B` selects or clears every visible row, `Space` toggles the h
 When a completed result is bound to an older head H0 while the live snapshot is H1,
 the decision card appends a bounded delta: both identities, prior findings, and H1 evidence.
 Fallback reasons direct to a full review if merge-base changes or responses are partial.
+
+## Acceptance Evidence
+
+Use the locked `image/tui/requirements.lock` environment for Pilot journeys.
+Pilot verifies interaction and state transitions; it does not replace rendered
+evidence. For a final candidate, capture the running application at 80x24,
+120x40, and a normal desktop size, including queue-after-`A`, landing progress,
+CI failure drill-down, editor/slow-provider, focus/resize, and the worker
+companion when applicable. Record the exact candidate SHA, scenario, terminal
+dimensions, and read-only fixture provenance. A shipped-image PTY smoke with
+fake external operations is separate proof from a headless or fixture render.
 
 ## Verification
 
