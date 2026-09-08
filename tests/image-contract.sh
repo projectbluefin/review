@@ -47,7 +47,7 @@ require image/Containerfile \
   'COPY package.json package-lock.json /opt/hive/' \
   'COPY --chmod=0755 image/bin/bluefin-review /usr/local/bin/bluefin-review' \
   'COPY --chmod=0755 image/entrypoint.sh /usr/local/bin/review-entrypoint' \
-  'PYTHONPATH=/opt/bluefin/tui:/opt/bluefin' \
+  'PYTHONPATH=/opt/bluefin' \
   'COPY image/tmux.conf /etc/tmux.conf' \
   'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-agent.sh' \
   'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-relay.sh' \

@@ -89,6 +89,19 @@ class ImportRootContractTests(unittest.TestCase):
             "the image root alone makes tui.*/harness.* importable",
         )
 
+    def test_container_smoke_uses_the_image_root(self) -> None:
+        containerfile = (ROOT / "image" / "Containerfile").read_text()
+        self.assertNotIn(
+            "PYTHONPATH=/opt/bluefin/tui:/opt/bluefin",
+            containerfile,
+            "the Containerfile smoke test must not restore the tui import root",
+        )
+        self.assertIn(
+            'import tui.$(basename "$tui_module" .py)',
+            containerfile,
+            "the Containerfile smoke test must import package-qualified modules",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

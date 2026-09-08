@@ -265,8 +265,8 @@ RUN set -eu; \
     /opt/bluefin/tui/.venv/bin/python -c "import textual; print(textual.__version__)"; \
     /opt/bluefin/tui/.venv/bin/python -m compileall -q /opt/bluefin/tui/*.py; \
     for tui_module in /opt/bluefin/tui/*.py; do \
-      PYTHONPATH=/opt/bluefin/tui:/opt/bluefin /opt/bluefin/tui/.venv/bin/python \
-        -c "import $(basename "$tui_module" .py)"; \
+      PYTHONPATH=/opt/bluefin /opt/bluefin/tui/.venv/bin/python \
+        -c "import tui.$(basename "$tui_module" .py)"; \
     done; \
     test ! -e /root/.cache/uv
 
