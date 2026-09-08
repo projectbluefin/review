@@ -937,7 +937,7 @@ Use an immutable `sha-<commit>` tag or digest with
 ## Image and context
 
 The image derives from the digest-pinned Project Bluefin FSDK lab runner and
-layers the pinned Hive runtime at `11bee81280861d03416a0c6278da35c9778cbdee`,
+layers the pinned Hive runtime at `f0c83591f71a3823cd6bb62b47cde734bd4e3ff4`,
 the current Goose canary snapshot, the pinned official Codex CLI, GitHub CLI,
 tmux, uv with the Textual
 dashboard runtime, hooks, and generated
