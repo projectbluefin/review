@@ -1059,7 +1059,7 @@ def ci_failure_evidence(
             or ((check.get("commit") or {}).get("oid") if isinstance(check.get("commit"), dict) else "")
             or ""
         )
-        if check_head and check_head != head_sha:
+        if check_head and head_sha and check_head != head_sha:
             continue
         conclusion = str(check.get("conclusion") or check.get("state") or "").upper()
         if conclusion not in {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"}:
@@ -1098,7 +1098,7 @@ def ci_failure_evidence(
             (
                 value
                 for value in (
-                    _check_integer(check.get("runId")),
+                    _check_integer(check.get("runId") or check.get("run_id")),
                     _check_integer(workflow_run.get("databaseId")),
                     _check_integer(workflow_run.get("id")),
                 )
@@ -1110,15 +1110,17 @@ def ci_failure_evidence(
             (
                 value
                 for value in (
-                    _check_integer(check.get("runAttempt")),
-                    _check_integer(workflow_run.get("runAttempt")),
+                    _check_integer(check.get("runAttempt") or check.get("run_attempt")),
+                    _check_integer(
+                        workflow_run.get("runAttempt") or workflow_run.get("run_attempt")
+                    ),
                 )
                 if value is not None
             ),
             None,
         )
         job = check.get("job") if isinstance(check.get("job"), dict) else {}
-        steps = check.get("steps") or job.get("steps")
+        steps = check.get("steps") or check.get("step_details") or job.get("steps")
         failing_step = None
         if isinstance(steps, dict):
             steps = steps.get("nodes") or []
@@ -1136,21 +1138,28 @@ def ci_failure_evidence(
             or job.get("databaseId")
             or job.get("id")
         )
+        workflow = workflow_run.get("workflow") if isinstance(workflow_run.get("workflow"), dict) else {}
         workflow_id = _check_integer(
             check.get("workflowId")
+            or check.get("workflow_id")
             or workflow_run.get("workflowId")
             or workflow_run.get("workflow_id")
+            or workflow.get("databaseId")
+            or workflow.get("id")
         )
         failures.append(
             {
                 "repository": repository or "unknown",
                 "pull_request": number,
-                "check": str(check.get("name") or check.get("context") or "unknown"),
+                    "check": str(
+                        check.get("name") or check.get("context") or "unknown"
+                    ),
                 "check_id": check_id,
                 "workflow": str(
                     check.get("workflowName")
                     or suite.get("workflowName")
                     or workflow_run.get("workflowName")
+                    or workflow_run.get("name")
                     or "unknown"
                 ),
                 "workflow_id": workflow_id,
@@ -1161,21 +1170,36 @@ def ci_failure_evidence(
                     or "unknown"
                 ),
                 "job_id": job_id,
-                "step": str(check.get("stepName") or failing_step or "unknown"),
+                "step": str(
+                    check.get("stepName")
+                    or check.get("step_name")
+                    or failing_step
+                    or "unknown"
+                ),
                 "conclusion": conclusion,
                 "head_sha": head_sha if FULL_SHA.fullmatch(head_sha) else "",
                 "run_id": run_id,
                 "attempt": attempt,
                 "started_at": str(
-                    check.get("startedAt") or workflow_run.get("createdAt") or ""
+                    check.get("startedAt")
+                    or check.get("started_at")
+                    or workflow_run.get("createdAt")
+                    or workflow_run.get("created_at")
+                    or ""
                 ),
                 "completed_at": str(
-                    check.get("completedAt") or workflow_run.get("updatedAt") or ""
+                    check.get("completedAt")
+                    or check.get("completed_at")
+                    or workflow_run.get("updatedAt")
+                    or workflow_run.get("updated_at")
+                    or ""
                 ),
                 "url": str(
                     check.get("detailsUrl")
                     or check.get("url")
                     or workflow_run.get("url")
+                    or workflow_run.get("htmlUrl")
+                    or workflow_run.get("html_url")
                     or ""
                 ),
                 "annotations": normalized_annotations,
@@ -2643,7 +2667,10 @@ class CIFailureScreen(ModalScreen[None]):
 
     @work(thread=True, exclusive=True)
     def load_logs(self, generation: int, run_id: int | None = None) -> None:
-        command = ci_log_command(self.stop_record.repository, self.evidence)
+        evidence = self.evidence
+        if run_id is not None:
+            evidence = {**evidence, "run_id": run_id}
+        command = ci_log_command(self.stop_record.repository, evidence)
         if not command:
             self.app.call_from_thread(
                 self.render_logs, "logs: missing · workflow run id is unknown", [], generation
