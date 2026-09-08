@@ -177,8 +177,8 @@ Cite upstream by pinned permalink, never a branch path.
 - Task release on disconnect:
   [`src/pkg/dashboard/contribute_ws.go#L3445-L3470` @ 894ba25](https://github.com/hivecommons/hive/blob/894ba2557d7f403ed1149691c9fbbf7388d2128a/src/pkg/dashboard/contribute_ws.go#L3445-L3470)
 - tmux terminal and mouse configuration: Context7 `/tmux/tmux`
-- Public contribute projections and assignment policy @ `fe34da5`:
+- Public contribute projections and assignment policy @ `894ba25`:
   [`server.go`, `api_contribute.go`, `contribute_sse.go`, and
   `contribute_ws.go`](https://github.com/hivecommons/hive/tree/894ba2557d7f403ed1149691c9fbbf7388d2128a/src/pkg/dashboard)
-- PR-link projection @ `fe34da5`:
+- PR-link projection @ `894ba25`:
   [`contribute_prlink.go`](https://github.com/hivecommons/hive/blob/894ba2557d7f403ed1149691c9fbbf7388d2128a/src/pkg/dashboard/contribute_prlink.go)
