@@ -3,6 +3,7 @@
 
 import atexit
 import glob
+import json
 import os
 import shutil
 import tempfile
@@ -836,6 +837,25 @@ class SlayStateMachineContractTests(unittest.TestCase):
             event = tui.landing.parse_status(str(status_path))["projectbluefin/review#382"]
             self.assertEqual(tui.landing.watch_target(event), target)
             self.assertEqual(event["state"], "waiting-ci")
+
+    def test_reporter_keeps_newline_notes_in_one_jsonl_record(self):
+        """#383: newline data is encoded, not evaluated or rejected."""
+        with tempfile.TemporaryDirectory(dir=_TEST_ROOT) as root:
+            status_path = Path(root) / "newline.jsonl"
+            self.assertEqual(
+                tui.landing.report_event(
+                    str(status_path),
+                    "projectbluefin/review#383",
+                    "failed",
+                    "first line\nsecond line",
+                ),
+                0,
+            )
+            lines = status_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertEqual(
+                json.loads(lines[0])["note"], "first line\nsecond line"
+            )
 
     def test_log_tail_bounds_file_reading_before_decoding(self):
         """#196: the landing view must not read an entire unbounded log."""

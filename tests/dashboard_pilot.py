@@ -3558,13 +3558,13 @@ async def main() -> int:
     )
     seeded_status = workdir / "cli-seeded.jsonl"
     seeded_status.write_text(
-        json.dumps({"expect": ["org/repo#a", "org/repo#b"]}, separators=(",", ":"))
+        json.dumps({"expect": ["org/repo#10", "org/repo#11"]}, separators=(",", ":"))
         + "\n"
     )
     result = subprocess.run(
         [
             sys.executable, str(landing_py), "report", "--status",
-            str(seeded_status), "event", "--pr", "org/repo#a",
+            str(seeded_status), "event", "--pr", "org/repo#10",
             "--state", "merged", "--note", "green",
         ],
         capture_output=True, text=True, timeout=30,
@@ -3573,20 +3573,20 @@ async def main() -> int:
     result = subprocess.run(
         [
             sys.executable, str(landing_py), "report", "--status",
-            str(seeded_status), "done", "--expect", "org/repo#a",
+            str(seeded_status), "done", "--expect", "org/repo#10",
             "--note", "subset",
         ],
         capture_output=True, text=True, timeout=30,
     )
     check(
-        result.returncode != 0 and "org/repo#b" in result.stderr,
+        result.returncode != 0 and "org/repo#11" in result.stderr,
         "done must refuse to close when a seeded selection member lacks a "
         f"terminal state even if --expect under-names it, got "
         f"{result.returncode}: {result.stderr}",
     )
     folded = tui.landing.parse_status(str(seeded_status))
     check(
-        "" not in folded and folded.get("org/repo#a", {}).get("state") == "merged",
+        "" not in folded and folded.get("org/repo#10", {}).get("state") == "merged",
         f"parse_status must skip the selection header, got {folded}",
     )
 

@@ -122,6 +122,18 @@ class ReviewActionComparisonContractTests(unittest.TestCase):
         stop.head_identity = OTHER_HEAD
         self.assertIsNone(ledger.action_comparison_for(stop))
 
+    def test_aliases_and_finding_counts_remain_bounded(self):
+        findings = [
+            {"severity": "low", "file": "a.py", "line": index + 1, "title": "risk"}
+            for index in range(100)
+        ]
+        result = review(state="findings", findings=findings)
+        for action in ("approve-review", "changes-requested", "request-change"):
+            receipt = classify(result, action)
+            expected = "disagreement" if action == "approve-review" else "agreement"
+            self.assertEqual(receipt.classification, expected)
+            self.assertLessEqual(receipt.finding_count, tui.MAX_ACTION_FINDINGS)
+
 
 if __name__ == "__main__":
     unittest.main()
