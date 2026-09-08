@@ -595,7 +595,7 @@ resolve_model_profile() {
   case "${profile,,}" in
     ""|gemini|gemini-3.8|gemini38)
       PROFILE_MODEL="${GEMINI_MODEL}"
-      PROFILE_EFFORT="high"
+      PROFILE_EFFORT="max"
       PROFILE_CONTEXT_LIMIT=""
       ;;
     opus5)
@@ -1168,7 +1168,7 @@ stop_cluster_contributors() {
 # Receives Hive-assigned tasks and donates inference through the
 # maintainer's credentials.
 #
-#   just review-container              # gemini: gemini-3.8-flash at high effort
+#   just review-container              # gemini: gemini-3.8-flash at max effort
 #   just review-container gemini       # the same, named explicitly
 #   just review-container sol          # gpt-5.6-sol, medium effort
 #   just review-container opus5 high   # claude-opus-5, high effort, 264k context
@@ -1222,7 +1222,7 @@ review-container profile="" effort="":
     if [[ "$raw_profile" == "cluster" || -n "${REVIEW_SCALE:-}" ]]; then
       replicas="${REVIEW_SCALE:-2}"
       model_profile="gemini"
-      model_effort="high"
+      model_effort="max"
       if [[ "$raw_profile" == "cluster" ]]; then
         if [[ "$raw_effort" =~ ^[0-9]+$ ]]; then
           replicas="$raw_effort"
@@ -1231,7 +1231,7 @@ review-container profile="" effort="":
         fi
       elif [[ -n "$raw_profile" ]]; then
         model_profile="$raw_profile"
-        model_effort="${raw_effort:-high}"
+        model_effort="${raw_effort:-max}"
       fi
       scale_cluster_contributors "$replicas" "$model_profile" "$model_effort"
       exit 0
@@ -1369,6 +1369,15 @@ review-container profile="" effort="":
     fi
     exec "${CONTAINER_ARGS[@]}"
 
+# Start an unattended contributor worker. The existing launcher owns all
+# credential checks and lifecycle behavior; this selects its explicit
+# detached path so the worker survives the launching terminal.
+[doc("Start an unattended Hive contributor worker; local runs detach by default.")]
+contribute profile="" effort="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    REVIEW_DETACH=1 just review-container "{{profile}}" "{{effort}}"
+
 # Stop a detached review worker. This is the explicit lifecycle verb for
 # containers started with REVIEW_DETACH=1; it refuses to touch anything this
 # launcher did not start (no review.owner label) and never force-removes.
@@ -1412,7 +1421,7 @@ review-stop name="review-container":
 # Foreground: q or Ctrl-C stops.
 # Arguments pass straight through to the dashboard:
 #
-#   just review-queue                      # gemini: gemini-3.8-flash at high effort
+#   just review-queue                      # gemini: gemini-3.8-flash at max effort
 #   just review-queue sol                  # gpt-5.6-sol at medium effort
 #   just review-queue k3 high              # pick the model profile and effort
 #   just review-queue owner/repo            # live open PRs for one repository

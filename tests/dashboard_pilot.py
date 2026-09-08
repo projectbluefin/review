@@ -684,7 +684,7 @@ async def main() -> int:
             base_sha[:12] + head_sha[:12],
             "goose",
             "gemini-3.8-flash",
-            "high",
+            "max",
         )
         receipt = tui.ReviewReceipt.from_result(
             run,
@@ -786,6 +786,7 @@ async def main() -> int:
             "?" in row,
             "failed or incomplete review results must carry the investigate badge",
         )
+    app.review_cache.remove_if_matches(receipt)
 
     # Cache hits and immediate failures may callback before start() returns.
     class ImmediateEventEngine(FakeReviewEngine):
@@ -860,6 +861,7 @@ async def main() -> int:
         }
     )
     app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    app.review_cache = tui.ReviewCache(workdir / "cache-fixture")
     async with app.run_test() as pilot:
         await wait_for_live_rows(app, pilot, "ready", 2)
         await settle_evidence(app, pilot)
@@ -1046,7 +1048,7 @@ async def main() -> int:
             base_sha[:12] + head_sha[:12],
             "goose",
             "gemini-3.8-flash",
-            "high",
+            "max",
         )
         receipt = tui.ReviewReceipt.from_result(
             run,
@@ -1069,6 +1071,21 @@ async def main() -> int:
             app.review_scope_version,
         )
         cache_path = app.review_cache.put(receipt)
+        expected_run = tui.ReviewRun(
+            stop.repository,
+            stop.number,
+            base_sha,
+            head_sha,
+            base_sha[:12] + head_sha[:12],
+            tui.ACTIVE_BACKEND,
+            *app.review_profile(stop.repository),
+        )
+        check(
+            app.review_cache.get(expected_run, app.review_scope_version) is not None,
+            "cache fixture must match the dashboard profile "
+            f"(backend={tui.ACTIVE_BACKEND!r}, profile={app.review_profile(stop.repository)!r}, "
+            f"stored={cache_path.name!r}, expected={app.review_cache.path_for(expected_run, app.review_scope_version).name!r})",
+        )
         os.environ["PR_VIEW_JSON"] = json.dumps(
             {
                 "author": {"login": "someone-else"},
@@ -6330,6 +6347,19 @@ async def main() -> int:
                 )
             ]
             app.stops[0].review_status = "running"
+            app.stops[0].selected = True
+            app.stops[1].selected = True
+            app.self_login = "castrojo"
+            app.stops[1].review_status = "complete"
+            app.stops[1].review_result = tui.ReviewResult(
+                1,
+                "complete",
+                {"critical": 0, "high": 0, "medium": 0, "low": 0},
+            )
+            app.stops[1].live["reviews"] = [{
+                "author": {"login": "castrojo"},
+                "state": "APPROVED",
+            }]
             app.review_engine = SimpleNamespace(
                 effective_review_cap=lambda: 6,
                 active_review_slots=lambda: 2,
@@ -6360,6 +6390,9 @@ async def main() -> int:
                 "Review — projectbluefin/bluefinctl#31",
                 "Landing — projectbluefin/common#7",
                 "Hive @hive-contributor — projectbluefin/dakota#88",
+                "Remote analysis: projectbluefin/bluefinctl#31",
+                "Local draft: projectbluefin/common#7 (clean)",
+                "GitHub review: projectbluefin/common#7 (APPROVED)",
                 "Snapshot: current",
                 "1m ago",
             ):
@@ -7659,7 +7692,7 @@ async def main() -> int:
         stop.live["headRefOid"] = stop.head_sha
         stop.review_status = "complete"
         stop.review_result = None
-        cheap_id = app.run_identity(stop, head_sha=stop.head_sha, model="gemini-3.8-flash", effort="high")
+        cheap_id = app.run_identity(stop, head_sha=stop.head_sha, model="gemini-3.8-flash", effort="max")
         app.run_store.create(cheap_id)
         app.run_store.transition(cheap_id, tui.RunState.REVIEWING)
         app.run_store.transition(cheap_id, tui.RunState.REVIEW_CLEAN)

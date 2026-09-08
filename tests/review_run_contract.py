@@ -37,6 +37,15 @@ def make_run(request=None) -> ReviewRun:
     return ReviewRun.from_request(request, backend="goose", model="gemini-3.8-flash", effort="high")
 
 
+def default_profile() -> None:
+    """The implicit Gemini review run matches the dashboard default profile."""
+    run = ReviewRun.from_request(make_request())
+    check(
+        (run.backend, run.model, run.effort) == ("goose", "gemini-3.8-flash", "max"),
+        f"default review profile must use Gemini at max, got {run!r}",
+    )
+
+
 class FakeHarness:
     name = "goose"
     availability = "READY"
@@ -157,6 +166,7 @@ def invalid_transitions() -> None:
 
 def main() -> int:
     print("review_run contract: RUNNING")
+    default_profile()
     identity()
     states()
     start_transition()

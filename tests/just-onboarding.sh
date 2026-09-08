@@ -480,7 +480,7 @@ run_recipe review-container GH_READY=1
 assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
 assert_file_contains "--env GOOSE_PROVIDER=github_copilot" "$runner_log"
 assert_file_contains "--env GOOSE_MODEL=gemini-3.8-flash" "$runner_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
+assert_file_contains "--env GOOSE_THINKING_EFFORT=max" "$runner_log"
 assert_file_not_exists "$cfg_dir/last-selections.env"
 assert_file_not_exists "$cfg_dir/secrets.env"
 assert_eq "$(wc -c <"$gum_log")" 0 "gum must not be invoked"
@@ -491,11 +491,11 @@ run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test \
   GOOSE_THINKING_EFFORT=medium
 assert_file_contains "--env GOOSE_THINKING_EFFORT=medium" "$runner_log"
 
-begin "review-container: no profile is gemini at high with the provider's own context"
+begin "review-container: no profile is gemini at max with the provider's own context"
 reset_logs
 run_recipe review-container GH_READY=1
 assert_file_contains "--env GOOSE_MODEL=gemini-3.8-flash" "$runner_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
+assert_file_contains "--env GOOSE_THINKING_EFFORT=max" "$runner_log"
 assert_file_not_contains "GOOSE_CONTEXT_LIMIT" "$runner_log"
 assert_eq "$(wc -c <"$gum_log")" 0 "a headless run must not invoke gum"
 
@@ -1063,7 +1063,7 @@ RECIPE_ARGS=(projectbluefin/review)
 run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
   FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0
 assert_file_contains "GOOSE_MODEL=gemini-3.8-flash" "$kubectl_log"
-assert_file_contains "GOOSE_THINKING_EFFORT=high" "$kubectl_log"
+assert_file_contains "GOOSE_THINKING_EFFORT=max" "$kubectl_log"
 assert_file_contains "queue --live-repo projectbluefin/review" "$runner_log"
 
 begin "turbo-review: flags first keep the cluster default"
@@ -1072,7 +1072,7 @@ RECIPE_ARGS=(--repo bluefin)
 run_recipe turbo-review GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
   FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token REVIEW_LAB=0
 assert_file_contains "GOOSE_MODEL=gemini-3.8-flash" "$kubectl_log"
-assert_file_contains "GOOSE_THINKING_EFFORT=high" "$kubectl_log"
+assert_file_contains "GOOSE_THINKING_EFFORT=max" "$kubectl_log"
 assert_file_contains "queue --repo bluefin" "$runner_log"
 
 begin "turbo-review: dashboard inherits the hub resolved for cluster workers"
@@ -1205,12 +1205,12 @@ assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
 assert_contains "unknown model profile 'gpt-9'" "$OUT"
 assert_eq "$(wc -c <"$runner_log")" 0 "no container may start on a bad profile"
 
-begin "review-queue: flags first means no profile, defaults to gemini at high effort"
+begin "review-queue: flags first means no profile, defaults to gemini at max effort"
 reset_logs
 RECIPE_ARGS=(--all)
 run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
 assert_file_contains "--env GOOSE_MODEL=gemini-3.8-flash" "$runner_log"
-assert_file_contains "--env GOOSE_THINKING_EFFORT=high" "$runner_log"
+assert_file_contains "--env GOOSE_THINKING_EFFORT=max" "$runner_log"
 assert_file_contains "queue --all" "$runner_log"
 
 begin "review-queue: explicit sol profile selects structured triage"
@@ -1277,6 +1277,14 @@ assert_file_not_contains "--interactive" "$runner_log"
 assert_file_not_contains "--tty" "$runner_log"
 assert_contains "just review-stop review-container" "$OUT"
 assert_contains "podman logs -f review-container" "$OUT"
+
+begin "contribute: launches the marked worker detached"
+reset_logs
+run_recipe contribute GH_READY=1
+assert_nonzero_status "$STATUS" "the fake podman always exits non-zero"
+assert_file_contains "run --rm --detach --replace --name review-container" "$runner_log"
+assert_file_contains "--label review.owner=detached" "$runner_log"
+assert_file_not_contains "--interactive" "$runner_log"
 
 begin "review-container: detached Codex auth survives until review-stop"
 reset_logs
@@ -1973,12 +1981,12 @@ fi
 if grep -nE '^review-(start|restart|kill|clean|down|up)[ :]' "$code"; then
   fail "no resurrection or force verbs: stop is the only lifecycle command"
 fi
-# The recipe list is exactly: launch the container, stop a detached worker,
-# diagnose, walk the PR queue, and scale workers before opening that queue.
+# The recipe list is exactly: launch foreground or unattended contributors,
+# stop a detached worker, diagnose, walk the PR queue, and scale workers.
 grep -qE '^turbo-review[ :]' "$code" ||
   fail "turbo-review must exist as the worker scale-out plus dashboard recipe"
-assert_eq "$(grep -cE '^(review[a-z-]*|turbo-review)[ :]' "$code")" 5 \
-  "expected exactly five recipes (review-container, -stop, -doctor, -queue, turbo-review)"
+assert_eq "$(grep -cE '^(contribute|review[a-z-]*|turbo-review)[ :]' "$code")" 6 \
+  "expected exactly six recipes (contribute, review-container, -stop, -doctor, -queue, turbo-review)"
 
 begin "static: upstream contribute-setup runs with upstream's own version-check opt-out"
 # Our Hive checkout is a pinned detached SHA on purpose. Upstream's private
@@ -2051,6 +2059,11 @@ grep -Fq -- '--timeout=15s' <<<"$cluster_body" ||
   fail "cluster scale-out must cap rollout observation at 15 seconds"
 if grep -q '^[[:space:]]*- name: HIVE_HUB$' "$repo_root/deploy/review-contributor.yaml"; then
   fail "the deployment manifest must leave HIVE_HUB to the launcher"
+fi
+if ! grep -A1 '^          image: ghcr.io/projectbluefin/review:stable$' \
+  "$repo_root/deploy/review-contributor.yaml" |
+  grep -Fxq '          imagePullPolicy: Always'; then
+  fail "the stable contributor deployment must always pull the published image"
 fi
 
 begin "static: turbo-review initializes models and forwards arguments through positional parameters"

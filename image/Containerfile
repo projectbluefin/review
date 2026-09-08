@@ -349,9 +349,13 @@ RUN set -eu; \
       "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-relay.sh" \
       -o /usr/local/bin/contributor-relay.sh; \
     curl --fail --location --show-error --silent \
+      "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/pi-backend.js" \
+      -o /usr/local/bin/pi-backend.js; \
+    curl --fail --location --show-error --silent \
       "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/config/backends.conf" \
       -o /usr/local/etc/hive/backends.conf; \
-    chmod 0755 /usr/local/bin/contributor-agent.sh /usr/local/bin/contributor-relay.sh
+    chmod 0755 /usr/local/bin/contributor-agent.sh /usr/local/bin/contributor-relay.sh; \
+    node -e 'require("/usr/local/bin/pi-backend.js")'
 
 # Create the non-root runtime user expected by the launcher and workflows.
 RUN set -eu; \
