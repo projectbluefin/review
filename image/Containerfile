@@ -15,7 +15,7 @@
 ARG FSDK_RUNNER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:8161102cfbe84d51f0ca7d7a8c8b0e6d7ef5f78bd4bb92454da87b74dd0be8ed
 # Kept equal to justfile's hive_commit: host setup and the
 # image runtime use the same contributor relay protocol revision.
-ARG HIVE_COMMIT=fe34da51434ad9b0924eee1492047c3c95c705ff
+ARG HIVE_COMMIT=11bee81280861d03416a0c6278da35c9778cbdee
 ARG NODE_VERSION=24.18.1
 ARG GH_VERSION=2.97.0
 ARG TMUX_VERSION=3.7b
