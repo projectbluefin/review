@@ -200,6 +200,43 @@ MAX_RE_REVIEW_NEW_EVIDENCE = 8
 SENSITIVE_RE_REVIEW_PATHS = (".github/workflows/",)
 
 SLAY_DELAYS = [0.4, 0.3, 0.25, 0.35]
+
+
+def _enabled_environment_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
+def no_color_requested() -> bool:
+    """Honor the standard opt-out without removing textual state words."""
+    return "NO_COLOR" in os.environ
+
+
+def ascii_ui_requested() -> bool:
+    """Use printable markers when the operator explicitly requests ASCII."""
+    return _enabled_environment_flag("BLUEFIN_REVIEW_ASCII")
+
+
+def reduced_motion_requested() -> bool:
+    """Disable decorative queue animation when the terminal requests it."""
+    return _enabled_environment_flag("BLUEFIN_REVIEW_REDUCED_MOTION") or _enabled_environment_flag(
+        "TEXTUAL_REDUCED_MOTION"
+    )
+
+
+def ui_glyph(unicode_glyph: str, ascii_glyph: str) -> str:
+    return ascii_glyph if ascii_ui_requested() else unicode_glyph
+
+
+def ui_style(style: str) -> str:
+    return "" if no_color_requested() else style
+
+
+def ui_span(text: str, style: str) -> str:
+    return f"[{style}]{text}[/]" if style else text
+
+
 SLAY_FRAMES = [
     # Frame 1: Round 8 / Fight (400ms)
     (
@@ -653,12 +690,18 @@ def generation_is_current(
     generation: int,
     edit_revision: int,
     closed: bool,
+    expected_target: tuple[str, int, str, str] | None = None,
+    current_target: tuple[str, int, str, str] | None = None,
 ) -> bool:
     """Guard a background draft before it writes into the editor."""
     return (
         not closed
         and expected_generation == generation
         and expected_edit_revision == edit_revision
+        and (
+            expected_target is None
+            or expected_target == current_target
+        )
     )
 
 
@@ -964,6 +1007,8 @@ def stop_style(action: str, mergeable: str, checks: str, review: str) -> str:
     turns the list into something scannable: what is ready, what is merely
     stuck behind its own branch, and what nobody can act on yet.
     """
+    if no_color_requested():
+        return ""
     if mergeable == "dirty":
         return "red"
     if checks == "failure":
@@ -980,9 +1025,9 @@ def stop_style(action: str, mergeable: str, checks: str, review: str) -> str:
 def ci_marker(checks: str) -> str:
     """Carry the snapshot's CI state as text, not colour alone."""
     return {
-        "success": "✓ CI GREEN",
-        "failure": "✗ CI FAILED",
-        "pending": "… CI PENDING",
+        "success": f"{ui_glyph('✓', '+')} CI GREEN",
+        "failure": f"{ui_glyph('✗', 'x')} CI FAILED",
+        "pending": f"{ui_glyph('…', '.')} CI PENDING",
         "unknown": "? CI UNKNOWN",
     }.get(checks, "? CI UNKNOWN")
 
@@ -1552,7 +1597,9 @@ def meter_bar(counts: dict[str, int], width: int = 24) -> str:
         if not count:
             continue
         size = max(1, round(count / total * width))
-        cells.append(f"[{colour}]{'█' * size}[/{colour}]")
+        bar = ui_glyph("█", "#") * size
+        style = ui_style(colour)
+        cells.append(f"[{style}]{bar}[/{style}]" if style else bar)
     return "".join(cells)
 
 
@@ -1630,6 +1677,16 @@ class Stop:
     def mechanical(self) -> str | None:
         """The branch-update reason, from live evidence only."""
         return mechanical_reason(self.author, self.live)
+
+
+def draft_target(stop: Stop) -> tuple[str, int, str, str]:
+    """Identify the exact stop snapshot a draft was requested for."""
+    return (
+        stop.repository,
+        stop.number,
+        str(stop.live.get("baseRefOid") or ""),
+        str(stop.live.get("headRefOid") or stop.head_identity),
+    )
 
 
 def live_review_context(live: dict, *, title: str = "") -> dict:
@@ -1864,14 +1921,14 @@ def batch_bar_style(state: str) -> str:
     filled bar, its fill naming the state with the theme's own
     text-on-muted pairing so the text stays legible on it."""
     if state == "running":
-        return "bold $text-primary on $primary-muted"
+        return ui_style("bold $text-primary on $primary-muted")
     if state == "queued":
-        return "bold $text-warning on $warning-muted"
+        return ui_style("bold $text-warning on $warning-muted")
     if state == "complete":
-        return "bold $text-success on $success-muted"
+        return ui_style("bold $text-success on $success-muted")
     if state in {"waiting", "completed-with-blockers"}:
-        return "bold $text-warning on $warning-muted"
-    return "bold $text-error on $error-muted"
+        return ui_style("bold $text-warning on $warning-muted")
+    return ui_style("bold $text-error on $error-muted")
 
 
 class LandingScreen(Screen):
@@ -1890,16 +1947,21 @@ class LandingScreen(Screen):
 
     CSS = """
     #landing-status {
-        height: 1; background: $secondary; color: $text; text-style: bold;
+        height: auto; max-height: 3; overflow: hidden;
+        background: $secondary; color: $text; text-style: bold;
     }
     #landing-rows {
-        border: round $secondary; height: auto; padding: 0 1;
+        border: round $secondary; height: 1fr; min-height: 5; padding: 0 1;
+        overflow-y: scroll;
     }
     #landing-hive {
         border: round $secondary; height: 3; padding: 0 1;
         color: $text-secondary;
     }
-    #landing-log { border: round $secondary; }
+    #landing-log {
+        border: round $secondary; height: 1fr; min-height: 5;
+        overflow-y: scroll;
+    }
     """
 
     BINDINGS = [
@@ -1954,7 +2016,13 @@ class LandingScreen(Screen):
         yield Static("batch queue", id="landing-status")
         yield Static("", id="landing-rows")
         yield Static("", id="landing-hive")
-        yield RichLog(highlight=False, markup=False, wrap=True, id="landing-log")
+        yield RichLog(
+            highlight=False,
+            markup=False,
+            wrap=True,
+            max_lines=200,
+            id="landing-log",
+        )
         yield Footer()
 
     def on_mount(self) -> None:
@@ -1978,7 +2046,7 @@ class LandingScreen(Screen):
                 continue
             active = self.dashboard._landing_task_active(task)
             outcome = landing.batch_outcome(task, active=active)
-            marker = "▶" if task is selected_task else " "
+            marker = ui_glyph("▶", ">") if task is selected_task else " "
             header = f"{marker} batch {task.task_id} — {outcome.label}"
             if active:
                 # A wait that names its target is still invisible if the
@@ -1989,7 +2057,7 @@ class LandingScreen(Screen):
             # text-wide bar and the next tick paints it to the panel's edge.
             if outcome.reason and outcome.state not in {"running", "queued"}:
                 header += f" · {escape(outcome.reason)}"
-            lines.append(f"[{batch_bar_style(outcome.state)}]{header.ljust(width)}[/]")
+            lines.append(ui_span(header.ljust(width), batch_bar_style(outcome.state)))
             events = landing.parse_status(task.status_path)
             done = events.get("", {})
             for stop in task.stops:
@@ -2002,8 +2070,10 @@ class LandingScreen(Screen):
                 # escape belongs on the fallback alone.
                 mark = str(event.get("state", "waiting"))
                 glyph, style = LANDING_STATE_STYLES.get(mark, ("?", ""))
+                glyph = ui_glyph(glyph, "*")
+                style = ui_style(style)
                 if style:
-                    badge = f"[{style}]{glyph} {mark}[/]"
+                    badge = ui_span(f"{glyph} {mark}", style)
                 else:
                     badge = f"{glyph} {escape(mark)}"
                 lines.append(
@@ -2014,7 +2084,7 @@ class LandingScreen(Screen):
             if done:
                 note = escape(str(done.get("note", "")))
                 lines.append(
-                    "  [bold $text-success]✔ done[/]"
+                    f"  {ui_span(ui_glyph('✔', '+') + ' done', ui_style('bold $text-success'))}"
                     + (f" — {note}" if note else "")
                 )
             # The final review-and-fix phase (#378): which round, which
@@ -2041,10 +2111,9 @@ class LandingScreen(Screen):
                 glyph, style = LANDING_STATE_STYLES.get(
                     mark.replace(" running", ""), ("?", "")
                 )
-                badge = (
-                    f"[{style}]{glyph} {escape(mark)}[/]" if style
-                    else f"{glyph} {escape(mark)}"
-                )
+                glyph = ui_glyph(glyph, "*")
+                style = ui_style(style)
+                badge = ui_span(f"{glyph} {escape(mark)}", style)
                 heads = " ".join(
                     f"{label} {escape(str(final.get(key)))[:7]}"
                     for key, label in (("input_head", "from"), ("output_head", "to"))
@@ -2376,6 +2445,7 @@ class ReviewBody(ModalScreen[str | None]):
         self.generation = 0
         self.edit_revision = 0
         self.closed = False
+        self.draft_target: tuple[str, int, str, str] | None = None
 
     def compose(self) -> ComposeResult:
         optional = " (empty is allowed for an approval)" if self.verdict == "approve" else ""
@@ -2403,6 +2473,7 @@ class ReviewBody(ModalScreen[str | None]):
     def on_unmount(self) -> None:
         self.closed = True
         self.generation += 1
+        self.draft_target = None
 
     def action_edit(self) -> None:
         self.query_one(TextArea).focus()
@@ -2410,6 +2481,7 @@ class ReviewBody(ModalScreen[str | None]):
     def action_cancel(self) -> None:
         self.closed = True
         self.generation += 1
+        self.draft_target = None
         self.cleanup()
         self.dismiss(None)
 
@@ -2451,6 +2523,9 @@ class ReviewBody(ModalScreen[str | None]):
         self.generation += 1
         generation = self.generation
         edit_revision = self.edit_revision
+        target = draft_target(self.stop_record)
+        self.draft_target = target
+        self.query_one(TextArea).focus()
         self.query_one("#review-body-status", Static).update(
             "draft: generating in background; editor remains available"
         )
@@ -2460,6 +2535,7 @@ class ReviewBody(ModalScreen[str | None]):
             request,
             result,
             live_review_context(self.stop_record.live),
+            target,
         )
 
     @work(thread=True, exclusive=True, group="draft")
@@ -2470,6 +2546,7 @@ class ReviewBody(ModalScreen[str | None]):
         request: ReviewRequest,
         result: ReviewResult,
         live_context: dict,
+        target: tuple[str, int, str, str],
     ) -> None:
         draft = None
         error = ""
@@ -2493,6 +2570,7 @@ class ReviewBody(ModalScreen[str | None]):
             edit_revision,
             draft,
             error,
+            target,
         )
 
     def apply_generated_draft(
@@ -2501,6 +2579,7 @@ class ReviewBody(ModalScreen[str | None]):
         edit_revision: int,
         draft,
         error: str,
+        target: tuple[str, int, str, str] | None = None,
     ) -> None:
         if not generation_is_current(
             generation,
@@ -2508,6 +2587,8 @@ class ReviewBody(ModalScreen[str | None]):
             self.generation,
             self.edit_revision,
             self.closed,
+            target,
+            draft_target(self.stop_record) if target is not None else None,
         ):
             return
         if error:
@@ -3828,14 +3909,16 @@ class ReviewDashboard(App):
         border: heavy $primary; height: auto; padding: 0 1;
         color: $text;
     }
-    #queue-pane { width: 45%; border: solid $secondary; }
-    #right-pane { width: 55%; }
-    #details-pane { height: 60%; border: solid $secondary; padding: 0 1; }
-    #context-pane { height: 40%; border: solid $secondary; padding: 0 1; }
+    #main-content { height: 1fr; min-height: 7; }
+    #queue-pane { width: 45%; min-width: 28; height: 1fr; border: solid $secondary; }
+    #right-pane { width: 55%; min-width: 0; height: 1fr; }
+    #details-pane { height: 60%; min-height: 4; border: solid $secondary; padding: 0 1; }
+    #context-pane { height: 40%; min-height: 3; border: solid $secondary; padding: 0 1; }
     #details, #context { height: auto; }
     #confirm-box {
         border: heavy magenta; background: $surface;
-        width: 80%; height: auto; padding: 1 2; margin: 4 4;
+        width: 1fr; max-width: 92%; max-height: 90%; overflow-y: auto;
+        height: auto; padding: 1 2; margin: 1 2;
     }
     #confirm-command, .confirm-command { color: magenta; text-style: bold; }
     #steer { border: solid $secondary; height: 3; }
@@ -3861,10 +3944,14 @@ class ReviewDashboard(App):
         background: $error; color: $text; text-style: bold;
     }
     #review-log { border: solid $secondary; }
-    #takeoff-box { border: heavy cyan; background: $surface; width: 80%; height: auto; padding: 1 2; margin: 4 4; }
+    #takeoff-box {
+        border: heavy cyan; background: $surface; width: 1fr; max-width: 92%;
+        max-height: 90%; overflow-y: auto; height: auto; padding: 1 2; margin: 1 2;
+    }
     #help-box {
         border: heavy cyan; background: $surface;
-        width: 76; height: auto; padding: 1 2; margin: 2 4;
+        width: 1fr; max-width: 76; max-height: 90%; overflow-y: auto;
+        height: auto; padding: 1 2; margin: 1 2;
     }
     #help-title { text-align: center; height: 1; margin-bottom: 1; border-bottom: solid $secondary; color: cyan; text-style: bold; }
     #help-columns { width: 100%; height: auto; }
@@ -3879,6 +3966,7 @@ class ReviewDashboard(App):
     #ci-failure-evidence { height: auto; max-height: 45%; overflow-y: auto; }
     #ci-log-state { height: 1; color: $text-warning; }
     #ci-log { border: solid $secondary; height: 1fr; }
+    #keys-reading, #keys-acting { overflow: hidden; }
     """
 
     BINDINGS = bindings_for("dashboard")
@@ -4104,7 +4192,7 @@ class ReviewDashboard(App):
         yield Static("loading queue…", id="status-bar")
         yield Static("AGENT ACTIVITY\nSnapshot: unavailable", id="activity")
         yield Static("Harness Autopilot — CHECKING…", id="harness-status")
-        with Horizontal():
+        with Horizontal(id="main-content"):
             with Vertical(id="queue-pane"):
                 yield ListView(id="queue")
             with Vertical(id="right-pane"):
@@ -4130,10 +4218,35 @@ class ReviewDashboard(App):
         yield Static(KEYS_READING, id="keys-reading")
         yield Static(KEYS_ACTING, id="keys-acting")
 
+    def _apply_responsive_layout(self, width: int) -> None:
+        """Keep the queue usable when the terminal is narrower than two panes."""
+        try:
+            main = self.query_one("#main-content")
+            queue = self.query_one("#queue-pane")
+            right = self.query_one("#right-pane")
+            context = self.query_one("#context-pane")
+            reading = self.query_one("#keys-reading")
+            acting = self.query_one("#keys-acting")
+        except NoMatches:
+            return
+        narrow = width <= 100
+        main.styles.layout = "vertical" if narrow else "horizontal"
+        queue.styles.width = "100%" if narrow else "45%"
+        queue.styles.height = "45%" if narrow else "1fr"
+        right.styles.width = "100%" if narrow else "55%"
+        right.styles.height = "55%" if narrow else "1fr"
+        context.styles.display = "none" if narrow else "block"
+        reading.styles.height = "auto" if narrow else 1
+        acting.styles.height = "auto" if narrow else 1
+
+    def on_resize(self, event) -> None:
+        self._apply_responsive_layout(event.size.width)
+
     def on_mount(self) -> None:
         # The queue keeps the keystrokes. The steer box is entered on purpose
         # with [/], because a focused Input swallows every single-key binding.
         self.query_one("#queue", ListView).focus()
+        self._apply_responsive_layout(self.size.width)
         with self.headroom_lock:
             self.headroom_session.refresh(ACTIVE_BACKEND)
             self.headroom_status_line = self.headroom_session.status_line(
@@ -5498,6 +5611,10 @@ class ReviewDashboard(App):
                 self.set_timer(delay, self._advance_slay_frame)
 
     def start_slay_sequence(self) -> None:
+        if reduced_motion_requested():
+            self.slay_frame = len(SLAY_FRAMES) - 1
+            self.populate(self.stops)
+            return
         self.slay_frame = 0
         self.populate(self.stops)
         self.set_timer(SLAY_DELAYS[0], self._advance_slay_frame)
@@ -5505,7 +5622,7 @@ class ReviewDashboard(App):
     def row_markup(self, stop: Stop) -> str:
         # Selection is not colour-only: a ● leads the row and the whole row
         # carries a background, so the batch in progress reads at a glance.
-        selected = "● " if stop.selected else "  "
+        selected = f"{ui_glyph('●', '*')} " if stop.selected else "  "
         if stop.is_issue:
             labels_source = stop.live.get("labels", [])
             labels_list = []
