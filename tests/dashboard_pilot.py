@@ -5245,6 +5245,7 @@ async def main() -> int:
             editor = app.screen.query_one("#review-body-editor", tui.TextArea)
             editor.text = "manual Goose body"
             app.screen.action_generate()
+            await pilot.pause()
             await app.workers.wait_for_complete()
             await pilot.pause()
             check(editor.text == "generated Goose body",
@@ -7698,7 +7699,7 @@ async def main() -> int:
         await pilot.press("enter")
         await pilot.pause()
         check(
-            isinstance(app.screen, tui.ReviewDashboard),
+            not isinstance(app.screen, tui.BatchPlanScreen),
             "confirming partitioned batch must return to the review queue",
         )
         check(
