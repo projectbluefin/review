@@ -776,59 +776,82 @@ def probe_package(package: str, manifest: str = "") -> tuple[dict, int]:
     token = body.get("token")
     if not token:
         return {**result, "error": "token mint returned no token"}, 1
-    url = f"{base}/v2/{package}/tags/list"
-    tags: list[str] = []
-    for _ in range(_PROBE_PAGES):
+
+    if manifest:
+        url = f"{base}/v2/{package}/manifests/{manifest}"
+        headers = {
+            "Accept": OCI_ACCEPT,
+            "Authorization": f"Bearer {token}",
+        }
+
+        request = urllib.request.Request(url, headers=headers)
         try:
-            page, headers = _get_json(url, token)
+            with urllib.request.urlopen(request, timeout=30) as response:
+                digest = response.headers.get("docker-content-digest", "")
+                try:
+                    body = json.loads(response.read())
+                except ValueError:
+                    return {
+                        **result,
+                        "error": f"manifest {manifest} returned invalid JSON",
+                    }, 1
         except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return {**result, "manifest": manifest, "present": False}, 0
             if exc.code in (401, 403):
                 return {
                     **result,
                     "readable": False,
-                    "signal": f"tags/list answered {exc.code}",
+                    "signal": f"manifest {manifest} answered {exc.code}",
                 }, 0
-            return {**result, "error": f"tags/list answered {exc.code}"}, 1
+            return {**result, "error": f"manifest {manifest} answered {exc.code}"}, 1
         except (urllib.error.URLError, OSError) as exc:
-            return {**result, "error": f"tags/list unreachable: {exc}"}, 1
-        except ValueError:
-            return {**result, "error": "tags/list returned invalid JSON"}, 1
-        page_tags = page.get("tags")
-        if isinstance(page_tags, list):
-            tags.extend(str(tag) for tag in page_tags)
-        cursor = re.search(r'<([^>]+)>\s*;\s*rel="next"', headers.get("link", ""))
-        if not cursor:
-            break
-        url = urllib.parse.urljoin(url, cursor.group(1))
+            return {**result, "error": f"manifest {manifest} unreachable: {exc}"}, 1
+
+        answer = {
+            **result,
+            "manifest": manifest,
+            "present": True,
+            "readable": True,
+            "digest": digest,
+        }
+        children = body.get("manifests")
+        if isinstance(children, list):
+            answer["children"] = [
+                str(child.get("digest", ""))
+                for child in children
+                if isinstance(child, dict)
+            ]
+        return answer, 0
+
     else:
-        return {**result, "error": "tags/list pagination did not terminate"}, 1
-    result = {**result, "readable": True, "tags": tags}
-    if not manifest:
-        return result, 0
-    request = urllib.request.Request(
-        f"{base}/v2/{package}/manifests/{manifest}",
-        headers={"Accept": OCI_ACCEPT, "Authorization": f"Bearer {token}"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            digest = response.headers.get("docker-content-digest", "")
+        url = f"{base}/v2/{package}/tags/list"
+        tags: list[str] = []
+        for _ in range(_PROBE_PAGES):
             try:
-                body = json.loads(response.read())
+                page, headers = _get_json(url, token)
+            except urllib.error.HTTPError as exc:
+                if exc.code in (401, 403):
+                    return {
+                        **result,
+                        "readable": False,
+                        "signal": f"tags/list answered {exc.code}",
+                    }, 0
+                return {**result, "error": f"tags/list answered {exc.code}"}, 1
+            except (urllib.error.URLError, OSError) as exc:
+                return {**result, "error": f"tags/list unreachable: {exc}"}, 1
             except ValueError:
-                body = {}
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return {**result, "manifest": manifest, "present": False}, 0
-        return {**result, "error": f"manifest {manifest} answered {exc.code}"}, 1
-    except (urllib.error.URLError, OSError) as exc:
-        return {**result, "error": f"manifest {manifest} unreachable: {exc}"}, 1
-    answer = {**result, "manifest": manifest, "present": True, "digest": digest}
-    children = body.get("manifests")
-    if isinstance(children, list):
-        answer["children"] = [
-            str(child.get("digest", "")) for child in children if isinstance(child, dict)
-        ]
-    return answer, 0
+                return {**result, "error": "tags/list returned invalid JSON"}, 1
+            page_tags = page.get("tags")
+            if isinstance(page_tags, list):
+                tags.extend(str(tag) for tag in page_tags)
+            cursor = re.search(r'<([^>]+)>\s*;\s*rel="next"', headers.get("link", ""))
+            if not cursor:
+                break
+            url = urllib.parse.urljoin(url, cursor.group(1))
+        else:
+            return {**result, "error": "tags/list pagination did not terminate"}, 1
+        return {**result, "readable": True, "tags": tags}, 0
 
 
 def publish_verdict(trigger: str, workflow: str, runs_path: str) -> tuple[dict, int]:
