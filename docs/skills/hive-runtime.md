@@ -50,10 +50,14 @@ credential handling ([`launcher.md`](launcher.md)).
    its knowledge export, and the image's controlled Goose config enables the
    `context7` extension for on-demand lookups (see `goose-context.md`).
    review starts the runtime and does not reproduce Hive's jobs. The attended
-   contributor surface may display a passive status
-   companion that reads only Hive's public `/api/contribute` projections,
-   renders unknown when fields are absent, and leaves the Hive-owned tmux
-   session authoritative.
+   contributor surface may display a passive status companion that performs
+   only authenticated GETs to `/api/v1/status`, `/api/v1/me`, and
+   `/api/v1/contributors`. It projects `hub`, `actionable_items`, and
+   `active_contributors` from status, plus `github_username`, `active`, and
+   `current_task.repo`/`number`/`title` from me; absent fields render as
+   `unknown`, active me records render as `working` or `idle`, inactive
+   records as `disconnected`, failed reads as `unavailable`, and the
+   Hive-owned tmux session remains authoritative.
 2. Attach only to inspect or deliberately steer a live session:
 
    ```bash
