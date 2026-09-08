@@ -7011,10 +7011,19 @@ class ReviewDashboard(App):
         queue.index = max(0, queue.index - max(1, queue.size.height - 1))
 
     def action_pane_previous(self) -> None:
-        self.screen.focus_previous()
+        self._focus_evidence_pane(-1)
 
     def action_pane_next(self) -> None:
-        self.screen.focus_next()
+        self._focus_evidence_pane(1)
+
+    def _focus_evidence_pane(self, step: int) -> None:
+        panes = [self.query_one("#details-pane"), self.query_one("#context-pane")]
+        focused = self.focused
+        try:
+            index = panes.index(focused)
+        except ValueError:
+            index = -1 if step > 0 else 0
+        panes[(index + step) % len(panes)].focus()
 
     def action_activate(self) -> None:
         stop = self.current
