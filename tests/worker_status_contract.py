@@ -3,6 +3,7 @@
 
 import asyncio
 import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -13,7 +14,21 @@ from tui import worker_status
 
 
 class WorkerStatusContract(unittest.TestCase):
-    def test_read_projections_uses_only_the_four_read_endpoints(self):
+    def test_direct_script_execution_uses_the_image_import_root(self):
+        environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
+        result = subprocess.run(
+            [sys.executable, "-S", str(Path(__file__).parents[1] / "image" / "tui" / "worker_status.py")],
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=5,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("No module named 'tui'", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_read_projections_uses_only_the_authenticated_read_endpoints(self):
         class Response:
             def __init__(self, path):
                 self.path = path
@@ -37,21 +52,31 @@ class WorkerStatusContract(unittest.TestCase):
         api = API()
         result = worker_status.hive_api.read_projections("https://hive.example", "token", opener=api)
         self.assertTrue(result["ok"])
-        self.assertEqual([path.rsplit("/", 1)[-1] for path, _, _ in api.paths], [
-            "status", "fleet", "triage", "metrics"
+        self.assertEqual(set(result["data"]), {"status", "me", "contributors"})
+        self.assertEqual([path.replace("https://hive.example", "") for path, _, _ in api.paths], [
+            "/api/v1/status", "/api/v1/me", "/api/v1/contributors"
         ])
         self.assertTrue(all(method == "GET" for _, method, _ in api.paths))
+        self.assertTrue(all(timeout == 15 for _, _, timeout in api.paths))
 
-    def test_projection_uses_explicit_fields_and_unknown_for_missing_values(self):
+        missing = worker_status.hive_api.read_projections("", "token", opener=api)
+        self.assertFalse(missing["ok"])
+        self.assertEqual(missing["category"], "configuration")
+
+    def test_projection_uses_status_and_me_fields_and_unknown_for_missing_values(self):
         projection = worker_status.project_status(
             {
-                "status": {"hub": "online", "actionable_items": 4, "active_contributors": 2},
-                "fleet": [{"identity": "worker-7", "state": "working", "current_task": {
-                    "repository": "projectbluefin/review", "issue": 151, "title": "Worker status"
-                }}],
-            },
-            identity="worker-7",
+                "ok": True,
+                "data": {
+                    "status": {"hub": "online", "actionable_items": 4, "active_contributors": 2},
+                    "me": {"github_username": "worker-7", "active": True, "current_task": {
+                        "repo": "projectbluefin/review", "number": 151, "title": "Worker status"
+                    }},
+                    "contributors": {"contributors": []},
+                },
+            }
         )
+        self.assertEqual(projection.connection, "online")
         self.assertEqual(projection.identity, "worker-7")
         self.assertEqual(projection.state, "working")
         self.assertEqual(projection.repository, "projectbluefin/review")
@@ -61,10 +86,30 @@ class WorkerStatusContract(unittest.TestCase):
         self.assertEqual(projection.contributors, "2")
         self.assertEqual(projection.freshness, "unknown")
 
-        unknown = worker_status.project_status({}, identity="missing")
+        unknown = worker_status.project_status({"ok": True, "data": {}})
         self.assertEqual(unknown.state, "unknown")
         self.assertEqual(unknown.repository, "unknown")
         self.assertEqual(unknown.issue, "unknown")
+
+        idle = worker_status.project_status({"ok": True, "data": {
+            "status": {"hub": "online"},
+            "me": {"github_username": "worker-7", "active": True},
+        }})
+        self.assertEqual(idle.state, "idle")
+
+        disconnected = worker_status.project_status({"ok": True, "data": {
+            "status": {"hub": "online"},
+            "me": {"github_username": "worker-7", "active": False},
+        }})
+        self.assertEqual(disconnected.state, "disconnected")
+
+    def test_unavailable_state_is_explicit(self):
+        with patch.dict(os.environ, {"REVIEW_CONTAINER_NAME": "review-2"}, clear=False):
+            projection = worker_status.unavailable_projection()
+        self.assertEqual(projection.connection, "unavailable")
+        self.assertEqual(projection.state, "disconnected")
+        self.assertEqual(projection.identity, "unknown")
+        self.assertEqual(projection.attach, "podman exec -it review-2 tmux attach -t contributor")
 
     def test_refresh_deduplicates_inflight_reads_and_backs_off_after_failure(self):
         started = asyncio.Event()
@@ -75,7 +120,7 @@ class WorkerStatusContract(unittest.TestCase):
             calls.append(1)
             started.set()
             await release.wait()
-            raise RuntimeError("offline")
+            return {"ok": False, "category": "network", "message": "network error"}
 
         async def scenario():
             controller = worker_status.RefreshController(read, clock=lambda: 10.0)
@@ -86,7 +131,7 @@ class WorkerStatusContract(unittest.TestCase):
             self.assertIs(first, second)
             release.set()
             result = await first
-            self.assertFalse(result)
+            self.assertFalse(result["ok"])
             self.assertEqual(calls, [1])
             self.assertFalse(await controller.refresh())
             self.assertEqual(calls, [1])

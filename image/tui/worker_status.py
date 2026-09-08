@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -18,6 +19,9 @@ except ModuleNotFoundError:  # importable by socket-free contract tests
     ComposeResult = object
     Vertical = Header = Footer = Static = None
 
+# This file is launched by path from the image entrypoint; keep the image root
+# on sys.path so the packaged `tui` siblings resolve exactly like the dashboard.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tui import hive_api
 
 UNKNOWN = "unknown"
@@ -58,22 +62,26 @@ def _freshness(value) -> str:
         return UNKNOWN
 
 
-def project_status(payload: dict, *, identity: str = "") -> Projection:
-    status = payload.get("status", {}) if isinstance(payload, dict) else {}
-    fleet = payload.get("fleet", []) if isinstance(payload, dict) else []
-    member = {}
-    if isinstance(fleet, list):
-        for candidate in fleet:
-            if isinstance(candidate, dict) and candidate.get("identity") == identity:
-                member = candidate
-                break
-    task = member.get("current_task") if isinstance(member.get("current_task"), dict) else {}
+def project_status(payload: dict) -> Projection:
+    envelope = payload if isinstance(payload, dict) else {}
+    data = envelope.get("data") if isinstance(envelope.get("data"), dict) else envelope
+    status = data.get("status", {})
+    me = data.get("me", {})
+    task = me.get("current_task") if isinstance(me, dict) and isinstance(me.get("current_task"), dict) else {}
+    active = me.get("active") if isinstance(me, dict) else None
+    if active is True:
+        state = "working" if task else "idle"
+    elif active is False:
+        state = "disconnected"
+    else:
+        state = UNKNOWN
+    connection = _value(status, "hub") if envelope.get("ok", True) is True else UNKNOWN
     return Projection(
-        connection="online" if payload.get("ok") is True else UNKNOWN,
-        identity=_value(member, "identity") if member else _value(status, "identity") if status else identity or UNKNOWN,
-        state=_value(member, "state", "status"),
-        repository=_value(task, "repository"),
-        issue=_value(task, "issue", "number"),
+        connection=connection,
+        identity=_value(me, "github_username"),
+        state=state,
+        repository=_value(task, "repo"),
+        issue=_value(task, "number"),
         title=_value(task, "title"),
         actionable=_value(status, "actionable_items"),
         contributors=_value(status, "active_contributors"),
@@ -84,6 +92,10 @@ def project_status(payload: dict, *, identity: str = "") -> Projection:
 def attach_command() -> str:
     name = os.environ.get("REVIEW_CONTAINER_NAME", "review-container")
     return f"podman exec -it {shlex.quote(name)} tmux attach -t contributor"
+
+
+def unavailable_projection() -> Projection:
+    return Projection(connection="unavailable", state="disconnected", attach=attach_command())
 
 
 def render_text(projection: Projection) -> str:
@@ -119,12 +131,18 @@ class RefreshController:
         try:
             result = await self.reader()
         except Exception:
-            self.next_allowed = self.clock() + self.delay
-            self.delay = min(self.max_delay, self.delay * 2)
+            self._record_failure()
             return False
+        if result is False or (isinstance(result, dict) and result.get("ok") is False):
+            self._record_failure()
+            return result
         self.delay = self.base_delay
         self.next_allowed = 0.0
         return result
+
+    def _record_failure(self):
+        self.next_allowed = self.clock() + self.delay
+        self.delay = min(self.max_delay, self.delay * 2)
 
 
 if Static is not None:
@@ -132,10 +150,9 @@ if Static is not None:
         CSS = "Screen { align: center middle; } #status { width: 90%; height: auto; padding: 1 2; }"
         BINDINGS = [("r", "refresh", "Refresh"), ("q", "quit", "Quit")]
 
-        def __init__(self, reader, *, identity="", **kwargs):
+        def __init__(self, reader, **kwargs):
             super().__init__(**kwargs)
             self.reader = reader
-            self.identity = identity
             self.controller = RefreshController(reader)
             self.projection = Projection(connection="starting", state="starting", attach=attach_command())
 
@@ -158,10 +175,9 @@ if Static is not None:
                 return
             payload = result if isinstance(result, dict) else {}
             if not payload.get("ok", True):
-                self.projection = Projection(connection="disconnected", identity=self.identity,
-                                             attach=attach_command())
+                self.projection = unavailable_projection()
             else:
-                self.projection = project_status(payload.get("data", payload), identity=self.identity)
+                self.projection = project_status(payload)
                 self.projection = Projection(**{**self.projection.__dict__, "attach": attach_command()})
             self.query_one("#status", Static).update(render_text(self.projection))
 
@@ -169,7 +185,6 @@ if Static is not None:
 def main() -> int:
     if Static is None:
         return 1
-    identity = os.environ.get("CONTRIBUTOR_ID", "")
     base = os.environ.get("HIVE_HUB", "")
     if base.startswith("wss://"):
         base = "https://" + base[len("wss://"):]
@@ -179,7 +194,7 @@ def main() -> int:
     async def reader():
         return await asyncio.to_thread(hive_api.read_projections, base, os.environ.get("GH_TOKEN", ""))
 
-    WorkerStatusApp(reader, identity=identity).run()
+    WorkerStatusApp(reader).run()
     return 0
 
 
