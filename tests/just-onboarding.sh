@@ -657,8 +657,74 @@ run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
   FAKE_PODMAN_CONNECTIONS="$(printf 'ghost\tssh://jorge@ghost:22/run/user/1000/podman/podman.sock\ttrue')"
 assert_nonzero_status "$STATUS" "a remote default connection must fail the launch"
 assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
-assert_contains "podman's default connection is remote (ssh://jorge@ghost:22/run/user/1000/podman/podman.sock)" "$OUT"
+assert_contains "podman's selected engine is remote (ssh://ghost:22/run/user/1000/podman/podman.sock)" "$OUT"
 assert_eq "$(wc -l <"$runner_log")" 0 "no podman run may happen once the engine is rejected"
+assert_eq "$(wc -c <"$credential_log")" 0 "remote rejection must precede credential transfer"
+
+begin "review-queue: explicit SSH selection is resolved and redacted"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_PODMAN_CONNECTIONS="$(printf 'ghost\tssh://alice:s3cr3t@ghost:22/run/user/1000/podman/podman.sock\tfalse')" \
+  CONTAINER_CONNECTION=ghost
+assert_nonzero_status "$STATUS" "an explicitly selected SSH engine must fail the launch"
+assert_eq "$(wc -l <"$runner_log")" 0 "explicit SSH rejection must prevent podman run"
+assert_eq "$(wc -c <"$credential_log")" 0 "explicit SSH rejection must precede credentials"
+assert_not_contains "s3cr3t" "$OUT"
+assert_contains "ghost" "$OUT"
+
+begin "review-queue: TCP engine selection fails closed"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_PODMAN_CONNECTIONS="$(printf 'tcp\ttcp://alice:s3cr3t@remote.example:1234/run/podman.sock\ttrue')"
+assert_nonzero_status "$STATUS" "a TCP engine must fail the launch"
+assert_eq "$(wc -l <"$runner_log")" 0 "TCP rejection must prevent podman run"
+assert_eq "$(wc -c <"$credential_log")" 0 "TCP rejection must precede credentials"
+assert_not_contains "s3cr3t" "$OUT"
+
+begin "review-queue: unresolved explicit connection fails closed"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_PODMAN_CONNECTIONS="$(printf 'ghost\tssh://ghost:22/run/user/1000/podman/podman.sock\tfalse')" \
+  CONTAINER_CONNECTION=missing
+assert_nonzero_status "$STATUS" "an unresolved explicit connection must fail the launch"
+assert_contains "could not resolve selected Podman connection 'missing'" "$OUT"
+assert_eq "$(wc -l <"$runner_log")" 0 "unresolved selection must prevent podman run"
+assert_eq "$(wc -c <"$credential_log")" 0 "unresolved selection must precede credentials"
+
+begin "review-queue: CONTAINER_HOST overrides a remote saved default"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_PODMAN_CONNECTIONS="$(printf 'ghost\tssh://ghost:22/run/user/1000/podman/podman.sock\ttrue')" \
+  CONTAINER_HOST=unix:///run/user/1000/podman/podman.sock
+assert_file_contains "--name review-queue" "$runner_log"
+assert_not_contains "podman's default connection is remote" "$OUT"
+
+begin "review-queue: local Unix socket and local mode remain allowed"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_PODMAN_CONNECTIONS="$(printf 'local\tunix:///run/user/1000/podman/podman.sock\ttrue')"
+assert_file_contains "--name review-queue" "$runner_log"
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token
+assert_file_contains "--name review-queue" "$runner_log"
+
+begin "review-queue: remote opt-in is strict and redacted"
+for opt_in in 0 invalid; do
+  reset_logs
+  run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+    FAKE_PODMAN_CONNECTIONS="$(printf 'ghost\tssh://alice:s3cr3t@ghost:22/run/user/1000/podman/podman.sock\ttrue')" \
+    REVIEW_QUEUE_ALLOW_REMOTE_STATE="$opt_in"
+  assert_nonzero_status "$STATUS" "remote opt-in ${opt_in} must fail closed"
+  assert_eq "$(wc -l <"$runner_log")" 0 "remote opt-in ${opt_in} must prevent podman run"
+  assert_eq "$(wc -c <"$credential_log")" 0 "remote opt-in ${opt_in} must precede credentials"
+  assert_not_contains "s3cr3t" "$OUT"
+done
+reset_logs
+run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_PODMAN_CONNECTIONS="$(printf 'ghost\tssh://alice:s3cr3t@ghost:22/run/user/1000/podman/podman.sock\ttrue')" \
+  REVIEW_QUEUE_ALLOW_REMOTE_STATE=1
+assert_file_contains "--name review-queue" "$runner_log"
+assert_not_contains "s3cr3t" "$OUT"
 
 begin "review-queue: REVIEW_QUEUE_ALLOW_REMOTE_STATE acknowledges a remote connection"
 reset_logs
@@ -666,7 +732,7 @@ run_recipe review-queue GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
   FAKE_PODMAN_CONNECTIONS="$(printf 'ghost\tssh://jorge@ghost:22/run/user/1000/podman/podman.sock\ttrue')" \
   REVIEW_QUEUE_ALLOW_REMOTE_STATE=1
 assert_file_contains "--name review-queue" "$runner_log"
-assert_contains "podman's default connection is remote (ssh://jorge@ghost:22/run/user/1000/podman/podman.sock); the dashboard state directory binds on that engine host" "$OUT"
+assert_contains "podman's selected engine is remote (ssh://ghost:22/run/user/1000/podman/podman.sock); the dashboard state directory binds on that engine host" "$OUT"
 
 begin "review-queue: a non-default or absent podman connection stays local"
 reset_logs
