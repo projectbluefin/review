@@ -190,6 +190,7 @@ MAX_CONCURRENT_LANDINGS = int(
 )
 HIVE_API_HELPER = os.path.join(os.path.dirname(__file__), "hive_api.py")
 MAX_REVIEW_BODY_CHARS = 4096
+MAX_ACTION_RECEIPTS = 64
 MAX_RE_REVIEW_FILES = 128
 MAX_RE_REVIEW_HUNKS = 512
 MAX_RE_REVIEW_RESPONSE_CHARS = 1_000_000
@@ -288,6 +289,7 @@ COMMANDS = (
     CommandSpec("open_browser", "o", "open_browser", "open"),
     CommandSpec("view_diff", "v", "view_diff", "diff"),
     CommandSpec("view_comments", "C", "view_comments", "comments"),
+    CommandSpec("ci_failure_logs", "i", "ci_failure_logs", "CI failure logs"),
     CommandSpec("comment", "c", "comment", "comment", mutating=True),
     CommandSpec("approve_or_land", "a", "merge", "approve+queue", mutating=True),
     CommandSpec("land_batch", "A", "land_batch", "land batch", mutating=True),
@@ -324,7 +326,7 @@ KEYS_READING = (
     " [b]r[/b] review [b]v[/b] diff [b]C[/b] comments [b]o[/b] open [b]h[/b] handoff"
     " [b]/[/b] steer [b]f[/b] filter [b]b[/b]/[b]B[/b] select"
     " [b]Space[/b] select+next [b]n[/b] next lacking my review"
-    " [b]w[/b] watch batches"
+    " [b]w[/b] watch batches [b]i[/b] CI logs"
     " [b]P[/b] review policy [b]H[/b] hive"
     " [b]R[/b] refresh [b]q[/b]/Esc back"
 )
@@ -547,6 +549,103 @@ class CompareEvidence:
     sensitive_surfaces_changed: bool = False
     bounded_risk_exceeded: bool = False
     capability_available: bool = True
+
+
+@dataclass(frozen=True)
+class ReviewActionReceipt:
+    """A bounded observation of one review result and one successful action."""
+
+    repository: str
+    number: int
+    reviewed_head: str
+    review_state: str
+    finding_count: int
+    action: str
+    identity: str
+    classification: str
+    evidence: tuple[str, ...] = ()
+    verified: bool = False
+
+
+def classify_review_action(
+    result: ReviewResult | None,
+    action: str,
+    *,
+    repository: str,
+    number: int,
+    head_sha: str,
+    actor: str,
+    action_success: bool = True,
+    action_head: str = "",
+    action_verified: bool = False,
+) -> ReviewActionReceipt:
+    """Classify only a correlated review and ordinary review verdict pair."""
+    review_state = result.state if result is not None else "unknown"
+    reviewed_head = ""
+    finding_count = 0
+    evidence: tuple[str, ...] = ()
+    if result is not None:
+        reviewed_head = str(result.provenance.get("head_sha") or "")
+        finding_count = sum(result.counts.values())
+        evidence = tuple(str(item)[:240] for item in result.raw_evidence[:4])
+    raw_action = str(action or "").lower()
+    normalized_action = {
+        "accept": "approve",
+        "reject": "request-changes",
+        "merge-completed": "merge",
+    }.get(raw_action, raw_action)
+    provenance = result.provenance if result is not None else {}
+    correlated = (
+        isinstance(provenance, dict)
+        and provenance.get("repository") == repository
+        and provenance.get("pull_request") == number
+    )
+    verified_action = action_verified or raw_action == "merge-completed"
+    classification = "unclassified"
+    if (
+        result is not None
+        and review_state in {"complete", "findings"}
+        and correlated
+        and FULL_SHA.fullmatch(reviewed_head)
+        and FULL_SHA.fullmatch(head_sha)
+        and reviewed_head == head_sha
+        and (not action_head or action_head == head_sha)
+        and action_success
+        and (
+            normalized_action in {"approve", "request-changes"}
+            or (normalized_action == "merge" and verified_action)
+        )
+    ):
+        has_findings = review_state == "findings" or finding_count > 0 or bool(result.findings)
+        expected_action = "request-changes" if has_findings else "approve"
+        classification = "agreement" if normalized_action == expected_action else "disagreement"
+    return ReviewActionReceipt(
+        repository,
+        number,
+        reviewed_head,
+        review_state,
+        finding_count,
+        normalized_action,
+        actor or "unknown",
+        classification,
+        evidence,
+        verified_action,
+    )
+
+
+def generation_is_current(
+    expected_generation: int,
+    expected_edit_revision: int,
+    generation: int,
+    edit_revision: int,
+    closed: bool,
+) -> bool:
+    """Guard a background draft before it writes into the editor."""
+    return (
+        not closed
+        and expected_generation == generation
+        and expected_edit_revision == edit_revision
+    )
 
 
 def compare_hunk_regions(repository: str, old_head: str, new_head: str) -> CompareEvidence:
@@ -905,6 +1004,114 @@ def authoritative_checks(live: dict) -> list[dict]:
         if key not in latest or rank > latest[key][0]:
             latest[key] = (rank, check)
     return [item[1] for item in sorted(latest.values(), key=lambda item: item[0])] + ungrouped
+
+
+CI_LOG_MAX_BYTES = 64 * 1024
+CI_LOG_MAX_LINES = 200
+_ANSI_OSC = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
+_ANSI_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_SECRET_FORMS = (
+    re.compile(r"\b(?:ghp|ghs|gho|github_pat)_[A-Za-z0-9_\-]{20,}\b"),
+    re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b"),
+    re.compile(r"(?i)\bbearer\s+[^\s]+"),
+    re.compile(r"(?i)\b(?:token|secret|password|authorization)\s*[:=]\s*[^\s]+"),
+)
+
+
+def _check_integer(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def ci_failure_evidence(live: dict) -> list[dict]:
+    """Normalize current-head failed checks for an evidence-first diagnosis."""
+    failures: list[dict] = []
+    head_sha = str(live.get("headRefOid") or "")
+    for check in authoritative_checks(live):
+        conclusion = str(check.get("conclusion") or check.get("state") or "").upper()
+        if conclusion not in {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"}:
+            continue
+        suite = check.get("checkSuite") if isinstance(check.get("checkSuite"), dict) else {}
+        workflow_run = suite.get("workflowRun") if isinstance(suite.get("workflowRun"), dict) else {}
+        annotations = check.get("annotations") or []
+        if isinstance(annotations, dict):
+            annotations = annotations.get("nodes") or []
+        normalized_annotations = []
+        for annotation in annotations[:8] if isinstance(annotations, list) else []:
+            if not isinstance(annotation, dict):
+                continue
+            normalized_annotations.append(
+                {
+                    key: str(annotation[key])[:240]
+                    for key in ("path", "start_line", "end_line", "message", "annotation_level")
+                    if key in annotation and annotation[key] is not None
+                }
+            )
+        run_id = next(
+            (
+                value
+                for value in (
+                    _check_integer(check.get("databaseId")),
+                    _check_integer(check.get("runId")),
+                    _check_integer(workflow_run.get("databaseId")),
+                )
+                if value is not None
+            ),
+            None,
+        )
+        attempt = next(
+            (
+                value
+                for value in (
+                    _check_integer(check.get("runAttempt")),
+                    _check_integer(workflow_run.get("runAttempt")),
+                )
+                if value is not None
+            ),
+            None,
+        )
+        failures.append(
+            {
+                "workflow": str(check.get("workflowName") or suite.get("workflowName") or "unknown"),
+                "job": str(check.get("name") or check.get("context") or "unknown"),
+                "step": str(check.get("stepName") or "unknown"),
+                "conclusion": conclusion,
+                "head_sha": head_sha if FULL_SHA.fullmatch(head_sha) else "",
+                "run_id": run_id,
+                "attempt": attempt,
+                "started_at": str(check.get("startedAt") or ""),
+                "completed_at": str(check.get("completedAt") or ""),
+                "url": str(check.get("detailsUrl") or check.get("url") or ""),
+                "job_id": _check_integer(check.get("jobId")),
+                "annotations": normalized_annotations,
+            }
+        )
+    return failures
+
+
+def sanitize_ci_log(
+    raw: str | bytes | None,
+    *,
+    max_lines: int = CI_LOG_MAX_LINES,
+    max_bytes: int = CI_LOG_MAX_BYTES,
+) -> tuple[str, list[str]]:
+    """Return bounded, redacted, terminal-control-free log evidence."""
+    if not raw:
+        return "missing", []
+    if max_lines < 1 or max_bytes < 1:
+        return "invalid-limit", []
+    text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+    for pattern in _SECRET_FORMS:
+        text = pattern.sub("[redacted]", text)
+    text = _ANSI_OSC.sub("", _ANSI_CSI.sub("", text))
+    text = "".join(character for character in text if character in "\n\t" or ord(character) >= 0x20)
+    bounded = text.encode("utf-8", "replace")[:max_bytes].decode("utf-8", "ignore")
+    return "available", bounded.splitlines()[:max_lines]
 
 
 def effective_check_state(snapshot: str, live: dict) -> str:
@@ -1435,8 +1642,10 @@ def batch_bar_style(state: str) -> str:
         return "bold $text-primary on $primary-muted"
     if state == "queued":
         return "bold $text-warning on $warning-muted"
-    if state == "exited 0":
+    if state == "complete":
         return "bold $text-success on $success-muted"
+    if state in {"waiting", "completed-with-blockers"}:
+        return "bold $text-warning on $warning-muted"
     return "bold $text-error on $error-muted"
 
 
@@ -1470,12 +1679,51 @@ class LandingScreen(Screen):
 
     BINDINGS = [
         *back_bindings("dismiss(None)"),
+        Binding("j", "next_batch", "next batch"),
+        Binding("k", "previous_batch", "previous batch"),
         Binding("x", "stop_agent", "stop the running agent"),
     ]
 
     def __init__(self, dashboard: "ReviewDashboard") -> None:
         super().__init__()
         self.dashboard = dashboard
+        self.selected_task_id = ""
+
+    def _tasks(self) -> list[landing.LandingTask]:
+        return [task for task in self.dashboard.landing_queue if not task.phase]
+
+    def _selected_task(self) -> landing.LandingTask | None:
+        tasks = self._tasks()
+        selected = next(
+            (task for task in tasks if task.task_id == self.selected_task_id),
+            None,
+        )
+        if selected is None and tasks:
+            selected = tasks[-1]
+            self.selected_task_id = selected.task_id
+        return selected
+
+    def select_task(self, task_id: str) -> None:
+        if any(task.task_id == task_id for task in self._tasks()):
+            self.selected_task_id = task_id
+            self.poll()
+
+    def _move_task(self, step: int) -> None:
+        tasks = self._tasks()
+        if not tasks:
+            return
+        current = next(
+            (index for index, task in enumerate(tasks) if task.task_id == self.selected_task_id),
+            len(tasks) - 1,
+        )
+        self.selected_task_id = tasks[(current + step) % len(tasks)].task_id
+        self.poll()
+
+    def action_next_batch(self) -> None:
+        self._move_task(1)
+
+    def action_previous_batch(self) -> None:
+        self._move_task(-1)
 
     def compose(self) -> ComposeResult:
         yield Static("batch queue", id="landing-status")
@@ -1488,6 +1736,7 @@ class LandingScreen(Screen):
         self.query_one("#landing-rows", Static).border_title = "BATCHES"
         self.query_one("#landing-hive", Static).border_title = "HIVE"
         self.query_one("#landing-log", RichLog).border_title = "AGENT LOG"
+        self._selected_task()
         self.poll()
         self.set_interval(2.0, self.poll)
 
@@ -1495,29 +1744,27 @@ class LandingScreen(Screen):
         rows = self.query_one("#landing-rows", Static)
         width = rows.content_region.width
         lines: list[str] = []
+        selected_task = self._selected_task()
         for task in self.dashboard.landing_queue:
             if task.phase:
                 # Final review-and-fix rounds (#378) belong to the batch that
                 # produced them, not beside it: the final-review line below
                 # carries their phase, round, and model.
                 continue
-            if task.returncode is None:
-                state = (
-                    "running"
-                    if self.dashboard._landing_task_active(task)
-                    else "queued"
-                )
-            else:
-                state = f"exited {task.returncode}"
-            header = f" batch {task.task_id} — {state}"
-            if self.dashboard._landing_task_active(task):
+            active = self.dashboard._landing_task_active(task)
+            outcome = landing.batch_outcome(task, active=active)
+            marker = "▶" if task is selected_task else " "
+            header = f"{marker} batch {task.task_id} — {outcome.label}"
+            if active:
                 # A wait that names its target is still invisible if the
                 # row cannot say how long the agent has been silent: the
                 # report file's mtime is the heartbeat (#291).
                 header += f" · {landing.report_age(task.status_path)}"
             # ljust(0) is a no-op, so the first pre-layout poll renders a
             # text-wide bar and the next tick paints it to the panel's edge.
-            lines.append(f"[{batch_bar_style(state)}]{header.ljust(width)}[/]")
+            if outcome.reason and outcome.state not in {"running", "queued"}:
+                header += f" · {escape(outcome.reason)}"
+            lines.append(f"[{batch_bar_style(outcome.state)}]{header.ljust(width)}[/]")
             events = landing.parse_status(task.status_path)
             done = events.get("", {})
             for stop in task.stops:
@@ -1592,33 +1839,66 @@ class LandingScreen(Screen):
         self.query_one("#landing-hive", Static).update(
             f" Hive: {escape(self.dashboard.hive_state or 'asking…')}"
         )
-        task = self.dashboard.landing_queue[-1]
-        try:
-            with open(task.log_path, encoding="utf-8") as handle:
-                tail = handle.readlines()[-200:]
-        except OSError:
-            tail = []
         log = self.query_one("#landing-log", RichLog)
+        try:
+            prior_offset = log.scroll_offset.y
+            following_tail = prior_offset >= log.max_scroll_y
+        except (AttributeError, TypeError):
+            prior_offset = 0
+            following_tail = True
+        tail = (
+            landing.read_log_tail(selected_task.log_path)
+            if selected_task is not None
+            else []
+        )
         log.clear()
         for line in tail:
             log.write(line.rstrip("\n"))
+        try:
+            if following_tail:
+                log.scroll_end(animate=False)
+            else:
+                log.scroll_to(y=prior_offset, animate=False)
+        except (AttributeError, TypeError):
+            pass
         running = sum(
             1
             for t in self.dashboard.landing_queue
             if self.dashboard._landing_task_active(t)
         )
+        progress = (
+            landing.progress_snapshot(
+                selected_task,
+                landing.parse_status(selected_task.status_path),
+            )
+            if selected_task is not None
+            else None
+        )
+        progress_text = ""
+        if progress is not None:
+            model = f" · model {escape(progress.model)}" if progress.model else ""
+            round_text = f" · round {escape(progress.round)}" if progress.round else ""
+            progress_text = (
+                f" · stage {escape(progress.stage)}{model}{round_text}"
+                f" · {progress.completed}/{progress.total} terminal"
+                f" · {progress.waiting} waiting"
+                f" · {progress.blocked} blocked"
+                f" · {progress.failed} failed"
+                f" · elapsed {progress.elapsed}"
+                f" · evidence {progress.evidence_age} old"
+            )
         self.query_one("#landing-status", Static).update(
             f" batch queue: {len(self.dashboard.landing_queue)} batches, "
-            f"{running} running · [x] stop · [esc] back"
+            f"{running} running · target {selected_task.task_id if selected_task else 'none'} "
+            f"{progress_text} · [j/k] select · [x] stop · [esc] back"
         )
 
     def action_stop_agent(self) -> None:
-        task = next(
-            (t for t in self.dashboard.landing_queue if t.running), None
-        )
-        if task is None or task.process is None:
-            self.app.notify("no agent is running.", severity="warning")
+        task = self._selected_task()
+        if task is None or task.process is None or not self.dashboard._landing_task_active(task):
+            self.app.notify("the selected batch is not running.", severity="warning")
             return
+        task.stop_requested = True
         try:
             os.killpg(os.getpgid(task.process.pid), signal.SIGTERM)
         except (ProcessLookupError, PermissionError, AttributeError) as error:
@@ -1868,12 +2148,16 @@ class ReviewBody(ModalScreen[str | None]):
         self.draft_provenance: dict = {}
         self.body_file: str | None = None
         self.previewed_body: str | None = None
+        self.generation = 0
+        self.edit_revision = 0
+        self.closed = False
 
     def compose(self) -> ComposeResult:
         optional = " (empty is allowed for an approval)" if self.verdict == "approve" else ""
         with Vertical(id="confirm-box"):
             yield Label(f"{self.verdict} — say why{optional}:")
             yield TextArea(id="review-body-editor")
+            yield Static("draft: idle", id="review-body-status")
             yield Static(
                 "[ctrl-g] generate · [ctrl-e] edit · [ctrl-p] preview · "
                 "[ctrl-shift-k] clear · [ctrl-s] submit",
@@ -1888,12 +2172,19 @@ class ReviewBody(ModalScreen[str | None]):
                 yield Button("Submit", id="review-body-submit", variant="primary")
 
     def on_mount(self) -> None:
+        self.closed = False
         self.query_one(TextArea).focus()
+
+    def on_unmount(self) -> None:
+        self.closed = True
+        self.generation += 1
 
     def action_edit(self) -> None:
         self.query_one(TextArea).focus()
 
     def action_cancel(self) -> None:
+        self.closed = True
+        self.generation += 1
         self.cleanup()
         self.dismiss(None)
 
@@ -1914,6 +2205,7 @@ class ReviewBody(ModalScreen[str | None]):
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if event.text_area.id == "review-body-editor":
+            self.edit_revision += 1
             self._invalidate_preview()
 
     def action_generate(self) -> None:
@@ -1928,6 +2220,35 @@ class ReviewBody(ModalScreen[str | None]):
                 str(self.stop_record.live["baseRefOid"]), str(self.stop_record.live["headRefOid"]),
                 actor="maintainer", tenant="review", generated_at="dashboard",
             )
+        except (KeyError, TypeError, ValueError) as error:
+            self.notify(f"draft unavailable: {error}", severity="warning")
+            return
+        self.generation += 1
+        generation = self.generation
+        edit_revision = self.edit_revision
+        self.query_one("#review-body-status", Static).update(
+            "draft: generating in background; editor remains available"
+        )
+        self.generate_draft(
+            generation,
+            edit_revision,
+            request,
+            result,
+            live_review_context(self.stop_record.live),
+        )
+
+    @work(thread=True, exclusive=True, group="draft")
+    def generate_draft(
+        self,
+        generation: int,
+        edit_revision: int,
+        request: ReviewRequest,
+        result: ReviewResult,
+        live_context: dict,
+    ) -> None:
+        draft = None
+        error = ""
+        try:
             registry = HarnessRegistry()
             registry.register(GooseHarness())
             registry.register(CodexHarness(availability=CodexHarness.probe()))
@@ -1935,16 +2256,53 @@ class ReviewBody(ModalScreen[str | None]):
             if not adapter.capabilities.body_drafting:
                 raise RuntimeError(f"{ACTIVE_BACKEND} unavailable: UNSUPPORTED_CAPABILITY")
             draft = adapter.draft(
-                DraftRequest(request, self.verdict, result, live_review_context(self.stop_record.live))
+                DraftRequest(request, self.verdict, result, live_context)
             )
-        except (KeyError, TypeError, ValueError, RuntimeError, OSError) as error:
-            self.notify(f"draft unavailable: {error}", severity="warning")
+        except (KeyError, TypeError, ValueError, RuntimeError, OSError) as exc:
+            error = str(exc)
+        if get_current_worker().is_cancelled:
             return
-        if draft.state is not DraftState.COMPLETE or not draft.markdown:
-            self.notify("draft unavailable: evidence did not produce review prose", severity="warning")
+        self.app.call_from_thread(
+            self.apply_generated_draft,
+            generation,
+            edit_revision,
+            draft,
+            error,
+        )
+
+    def apply_generated_draft(
+        self,
+        generation: int,
+        edit_revision: int,
+        draft,
+        error: str,
+    ) -> None:
+        if not generation_is_current(
+            generation,
+            edit_revision,
+            self.generation,
+            self.edit_revision,
+            self.closed,
+        ):
+            return
+        if error:
+            self.notify(f"draft unavailable: {error}", severity="warning")
+            self.query_one("#review-body-status", Static).update(
+                f"draft: unavailable — {escape(error)}"
+            )
+            return
+        if draft is None or draft.state is not DraftState.COMPLETE or not draft.markdown:
+            self.notify(
+                "draft unavailable: evidence did not produce review prose",
+                severity="warning",
+            )
+            self.query_one("#review-body-status", Static).update(
+                "draft: unavailable — evidence did not produce review prose"
+            )
             return
         self.draft_provenance = dict(getattr(draft, "provenance", {}))
         self.query_one(TextArea).text = draft.markdown
+        self.query_one("#review-body-status", Static).update("draft: generated; edit before preview")
 
     def _command(self, body_file: str) -> list[str]:
         return ["gh", "pr", "review", str(self.stop_record.number), "--repo",
@@ -2017,6 +2375,124 @@ class ReviewBody(ModalScreen[str | None]):
                 pass
             self.body_file = None
         self.previewed_body = None
+
+
+class CIFailureScreen(ModalScreen[None]):
+    """Inspect one exact-head CI failure and optionally fetch bounded logs."""
+
+    BINDINGS = [
+        Binding("i", "load_logs", "load bounded logs"),
+        *back_bindings("dismiss(None)"),
+    ]
+
+    def __init__(self, stop: Stop, evidence: dict) -> None:
+        super().__init__()
+        self.stop_record = stop
+        self.evidence = evidence
+        self.generation = 0
+        self.loading = False
+
+    def compose(self) -> ComposeResult:
+        evidence = self.evidence
+        annotations = evidence.get("annotations") or []
+        lines = [
+            f"CI FAILURE TRIAGE · {escape(self.stop_record.key)}",
+            f"workflow  {escape(str(evidence.get('workflow') or 'unknown'))}",
+            f"job       {escape(str(evidence.get('job') or 'unknown'))}",
+            f"step      {escape(str(evidence.get('step') or 'unknown'))}",
+            f"conclusion {escape(str(evidence.get('conclusion') or 'unknown'))}",
+            f"head      {escape(str(evidence.get('head_sha') or 'unknown'))}",
+            f"run       {escape(str(evidence.get('run_id') or 'unknown'))}",
+            f"attempt   {escape(str(evidence.get('attempt') or 'unknown'))}",
+            f"started   {escape(str(evidence.get('started_at') or 'unknown'))}",
+            f"completed {escape(str(evidence.get('completed_at') or 'unknown'))}",
+            f"evidence  {link(str(evidence.get('url')), str(evidence.get('url')))}"
+            if evidence.get("url")
+            else "evidence  unknown",
+        ]
+        if annotations:
+            lines.append("annotations")
+            for annotation in annotations:
+                path = annotation.get("path", "unknown")
+                location = annotation.get("start_line", "?")
+                message = annotation.get("message", "")
+                lines.append(
+                    f"  {escape(str(path))}:{escape(str(location))} "
+                    f"{escape(str(message))}"
+                )
+        else:
+            lines.append("annotations unknown or unavailable")
+        with Vertical(id="ci-failure-box"):
+            yield Static("\n".join(lines), id="ci-failure-evidence")
+            yield Button("Load bounded logs", id="ci-load-logs")
+            yield Static("logs: not loaded · [i] load · [esc] back", id="ci-log-state")
+            yield RichLog(highlight=False, markup=False, wrap=True, id="ci-log")
+            yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#ci-load-logs", Button).focus()
+
+    def on_unmount(self) -> None:
+        self.generation += 1
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "ci-load-logs":
+            self.action_load_logs()
+
+    def action_load_logs(self) -> None:
+        if self.loading:
+            return
+        run_id = self.evidence.get("run_id")
+        if not isinstance(run_id, int) or run_id < 1:
+            self.render_logs("unavailable: workflow run id is unknown", [])
+            return
+        self.loading = True
+        self.generation += 1
+        generation = self.generation
+        self.query_one("#ci-log-state", Static).update("logs: loading bounded evidence…")
+        self.load_logs(generation, run_id)
+
+    @work(thread=True, exclusive=True)
+    def load_logs(self, generation: int, run_id: int) -> None:
+        result = gh(
+            "run",
+            "view",
+            str(run_id),
+            "--repo",
+            self.stop_record.repository,
+            "--log-failed",
+            timeout=30,
+        )
+        if result.returncode == 0:
+            state, lines = sanitize_ci_log(result.stdout)
+            self.app.call_from_thread(self.render_logs, f"logs: {state}", lines, generation)
+            return
+        detail = (result.stderr or result.stdout or "").lower()
+        if "403" in detail or "permission" in detail or "forbidden" in detail:
+            state = "permission denied"
+        elif "404" in detail or "not found" in detail or "expired" in detail:
+            state = "expired or unavailable"
+        else:
+            state = "transport failed"
+        self.app.call_from_thread(self.render_logs, f"logs: {state}", [], generation)
+
+    def render_logs(
+        self,
+        state: str,
+        lines: list[str],
+        generation: int | None = None,
+    ) -> None:
+        if generation is not None and generation != self.generation:
+            return
+        self.loading = False
+        try:
+            self.query_one("#ci-log-state", Static).update(state)
+            log = self.query_one("#ci-log", RichLog)
+        except NoMatches:
+            return
+        log.clear()
+        for line in lines:
+            log.write(line)
 
 
 class DiffScreen(ModalScreen[None]):
@@ -2381,6 +2857,7 @@ class HelpScreen(ModalScreen[None]):
                     yield Static("[bold cyan]f[/] / [bold cyan]F[/]       Auto-fix & land / steer fix", classes="help-row")
                     yield Static("[bold cyan]/[/]         Steer review with prompt", classes="help-row")
                     yield Static("[bold cyan]v[/]         View full diff", classes="help-row")
+                    yield Static("[bold cyan]i[/]         Inspect bounded CI failure logs", classes="help-row")
                     yield Static("[bold cyan]o[/]         Open in browser", classes="help-row")
                     yield Static("[bold cyan]y[/]         Copy review context", classes="help-row")
                     yield Static("[bold cyan]c[/]         Comment on PR", classes="help-row")
@@ -2453,6 +2930,7 @@ class ReviewScreen(Screen):
         Binding("r", "toggle_raw_transcript", "raw transcript"),
         Binding("c", "view_comments", "comments"),
         Binding("v", "view_diff", "diff"),
+        Binding("i", "ci_failure_logs", "CI failure logs"),
     ]
 
     def __init__(
@@ -2992,6 +3470,9 @@ class ReviewScreen(Screen):
     def action_view_comments(self) -> None:
         self.app.push_screen(CommentsScreen(self.stop_record))
 
+    def action_ci_failure_logs(self) -> None:
+        self.app.open_ci_failure_logs(self.stop_record)
+
     def action_view_diff(self) -> None:
         self.app.push_screen(DiffScreen(self.stop_record))
 
@@ -3141,6 +3622,13 @@ class ReviewDashboard(App):
     .help-section-title { margin-top: 1; margin-bottom: 0; color: magenta; text-style: bold; }
     .help-row { height: 1; }
     #help-footer { text-align: center; margin-top: 1; color: $text-muted; }
+    #ci-failure-box {
+        border: heavy $text-error; background: $surface;
+        width: 90%; height: 90%; padding: 1 2; margin: 1 2;
+    }
+    #ci-failure-evidence { height: auto; max-height: 45%; overflow-y: auto; }
+    #ci-log-state { height: 1; color: $text-warning; }
+    #ci-log { border: solid $secondary; height: 1fr; }
     """
 
     BINDINGS = bindings_for("dashboard")
@@ -3252,6 +3740,8 @@ class ReviewDashboard(App):
         self._current_batch_plan: action_plan.BatchActionPlan | None = None
         self._batch_generation_token: int = 0
         self._batch_receipt_ledger = DashboardBatchReceiptLedger()
+        self.action_comparisons: dict[str, ReviewActionReceipt] = {}
+        self.last_action_comparison: ReviewActionReceipt | None = None
         self.fixer_advanced_heads: set[tuple[str, int, str]] = set()
         self.active_review_identities: dict[str, RunIdentity] = {}
         self.review_started_at: dict[str, float] = {}
@@ -5709,26 +6199,33 @@ class ReviewDashboard(App):
             else ""
         )
         ci_triage_block = ""
-        if bad > 0:
+        failures = ci_failure_evidence(live)
+        if failures:
             lines_ci = ["\n[b red]CI FAILURE TRIAGE[/b red]"]
-            for check in checks:
-                conc = check.get("conclusion") or check.get("state") or "PENDING"
-                if conc in ("FAILURE", "ERROR", "TIMED_OUT"):
-                    wf = check.get("workflowName") or ""
-                    job_name = check.get("name") or check.get("context") or "check"
-                    step_name = check.get("stepName") or ""
-                    step_info = f" › {escape(step_name)}" if step_name else ""
-                    url = check.get("detailsUrl") or check.get("url") or ""
-                    started = str(check.get("startedAt") or "")[:19]
-                    completed = str(check.get("completedAt") or "")[:19]
-                    time_info = f" ({started} -> {completed})" if started and completed else ""
-                    head_sha = str(live.get("headRefOid") or "")[:12]
-                    sha_info = f" @ {head_sha}" if head_sha else ""
+            for failure in failures:
+                attempt = f" attempt {failure['attempt']}" if failure.get("attempt") else " attempt unknown"
+                run = f" run {failure['run_id']}" if failure.get("run_id") else " run unknown"
+                step = escape(str(failure.get("step") or "unknown"))
+                lines_ci.append(
+                    f"  [red]✗ {escape(str(failure.get('conclusion') or 'unknown'))}[/red] "
+                    f"{escape(str(failure.get('workflow') or 'unknown'))} / "
+                    f"[b]{escape(str(failure.get('job') or 'unknown'))}[/b] › {step}"
+                    f" @ {escape(str(failure.get('head_sha') or 'unknown')[:12])}"
+                    f"{run}{attempt}"
+                )
+                if failure.get("started_at") or failure.get("completed_at"):
                     lines_ci.append(
-                        f"  [red]✗ {conc}[/red] {escape(wf + ' / ' if wf else '')}[b]{escape(job_name)}[/b]{step_info}{sha_info}{time_info}"
+                        f"    time: {escape(str(failure.get('started_at') or 'unknown'))[:19]}"
+                        f" -> {escape(str(failure.get('completed_at') or 'unknown'))[:19]}"
                     )
-                    if url:
-                        lines_ci.append(f"    evidence: {link(url, url)}")
+                annotations = failure.get("annotations") or []
+                lines_ci.append(
+                    f"    annotations: {len(annotations)}"
+                    + (" · [i] inspect logs" if failure.get("run_id") else "")
+                )
+                if failure.get("url"):
+                    url = str(failure["url"])
+                    lines_ci.append(f"    evidence: {link(url, url)}")
             ci_triage_block = "\n" + "\n".join(lines_ci)
 
         self.query_one("#details", Static).update(
@@ -5747,7 +6244,7 @@ class ReviewDashboard(App):
             f"{ci_triage_block}\n"
             f"{reviews_block}\n"
             f"linked   {issues}\n"
-            f"labels   {labels}{mechanical_block}"
+            f"labels   {labels}{mechanical_block}{self._comparison_block(stop)}"
             + (
                 "\n\n[b]LAST MUTATION FAILURE[/b]\n"
                 f"command  {escape(stop.failure_command)}\n"
@@ -5885,6 +6382,77 @@ class ReviewDashboard(App):
 
     # ── the mutation gate ─────────────────────────────────────────────────
 
+    @staticmethod
+    def _action_category(commands: list[list[str]] | list[str]) -> str:
+        if commands and isinstance(commands[0], str):
+            commands = [commands]  # type: ignore[list-item]
+        for command in reversed(commands):  # type: ignore[union-attr]
+            if "--request-changes" in command:
+                return "request-changes"
+            if "--approve" in command:
+                return "approve"
+            if len(command) >= 3 and command[0:3] == ["gh", "pr", "merge"]:
+                return "merge"
+            if len(command) >= 3 and command[0:3] == ["gh", "pr", "edit"]:
+                return "queue" if "--add-label" in command else "edit"
+            if len(command) >= 3 and command[0:3] in (
+                ["gh", "pr", "comment"],
+                ["gh", "issue", "comment"],
+            ):
+                return "comment"
+            if len(command) >= 3 and command[0:3] == ["gh", "pr", "update-branch"]:
+                return "branch-update"
+        return "unsupported"
+
+    def record_action_comparison(
+        self,
+        stop: Stop,
+        commands: list[list[str]] | list[str],
+        *,
+        action_success: bool = True,
+        action_verified: bool = False,
+    ) -> ReviewActionReceipt:
+        action = self._action_category(commands)
+        receipt = classify_review_action(
+            stop.review_result,
+            action,
+            repository=stop.repository,
+            number=stop.number,
+            head_sha=stop.head_identity,
+            actor=self.self_login or "maintainer",
+            action_success=action_success,
+            action_head=stop.head_identity,
+            action_verified=action_verified,
+        )
+        key = f"{receipt.repository}#{receipt.number}@{receipt.reviewed_head or stop.head_identity}"
+        self.action_comparisons[key] = receipt
+        while len(self.action_comparisons) > MAX_ACTION_RECEIPTS:
+            self.action_comparisons.pop(next(iter(self.action_comparisons)))
+        self.last_action_comparison = receipt
+        return receipt
+
+    def action_comparison_for(self, stop: Stop) -> ReviewActionReceipt | None:
+        for receipt in reversed(list(self.action_comparisons.values())):
+            if receipt.repository == stop.repository and receipt.number == stop.number:
+                return receipt
+        return None
+
+    def _comparison_block(self, stop: Stop) -> str:
+        receipt = self.action_comparison_for(stop)
+        if receipt is None:
+            return ""
+        evidence = ""
+        if receipt.evidence:
+            evidence = f" · evidence {len(receipt.evidence)} lines"
+        verified = " · verified completion" if receipt.verified else ""
+        return (
+            "\n\n[b]REVIEW / ACTION RECEIPT[/b]\n"
+            f"review {escape(receipt.review_state)} · findings {receipt.finding_count} · "
+            f"action {escape(receipt.action)} · {escape(receipt.classification)}"
+            f" · @{escape(receipt.identity)}{verified}{evidence}\n"
+            "disagreement describes this evidence/action pair; it does not judge the maintainer."
+        )
+
     def mutate(self, stop: Stop, *args: str, then=None) -> None:
         """Run one gh mutation behind the typed-number confirmation."""
         self.mutate_all(stop, [["gh", *args]], then=then)
@@ -5977,6 +6545,7 @@ class ReviewDashboard(App):
         stop.failure_checks = context["ci"]
         stop.failure_branch = f"{context['mergeable']}/{context['merge_state']}"
         stop.selected = True
+        self.record_action_comparison(stop, command, action_success=False)
         self.refresh_rows()
         self.notify(f"{shlex.join(command[:4])}…: {escape(message[:200])}", severity="error")
         self.show_evidence(stop)
@@ -5990,6 +6559,7 @@ class ReviewDashboard(App):
     ) -> None:
         """Apply one finished sequence on the UI thread."""
         self.pulls_cache.pop(stop.repository, None)
+        self.record_action_comparison(stop, commands)
         self.notify(f"done: {' '.join(commands[-1][:4])}…")
         if then:
             then()
@@ -6625,6 +7195,20 @@ class ReviewDashboard(App):
         if stop:
             self.push_screen(CommentsScreen(stop))
 
+    def open_ci_failure_logs(self, stop: Stop) -> None:
+        if stop.is_issue:
+            self.notify("CI failure logs apply to pull requests only", severity="warning")
+            return
+        failures = ci_failure_evidence(stop.live)
+        if not failures:
+            self.notify("no current-head CI failure evidence is available", severity="warning")
+            return
+        self.push_screen(CIFailureScreen(stop, failures[0]))
+
+    def action_ci_failure_logs(self) -> None:
+        if self.current:
+            self.open_ci_failure_logs(self.current)
+
     def action_comment(self) -> None:
         stop = self.current
         if not stop:
@@ -7098,7 +7682,10 @@ class ReviewDashboard(App):
                 return
             for task in tasks:
                 self.enqueue_landing(task)
-            self.push_screen(LandingScreen(self))
+            self.notify(
+                f"dispatched {len(tasks)} landing batch"
+                f"{'es' if len(tasks) != 1 else ''}; review queue remains open"
+            )
 
         self.push_screen(BatchPlanScreen(tasks if should_partition else tasks[0]), finish)
 
@@ -7268,6 +7855,7 @@ class ReviewDashboard(App):
                             task.command,
                             stdout=log,
                             stderr=subprocess.STDOUT,
+                            cwd=task.cwd or None,
                             start_new_session=True,
                             # A final-review round runs with the model its phase
                             # chose, passed explicitly (#378): the launch-time
@@ -7325,6 +7913,11 @@ class ReviewDashboard(App):
             if state == "merged":
                 stop.selected = False
                 stop.failure = ""
+                self.record_action_comparison(
+                    stop,
+                    ["gh", "pr", "merge", str(stop.number), "--repo", stop.repository],
+                    action_verified=True,
+                )
             elif state in ("blocked", "failed", "awaiting-stable"):
                 stop.selected = False
                 stop.failure = (

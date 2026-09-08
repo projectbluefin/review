@@ -1,12 +1,43 @@
 # tests/slay_state_contract.py
 """Contract tests for slay ($) state machine and invariants (#409, #410, #414)."""
 
+import atexit
 import glob
+import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 import sys
 from unittest import mock
+
+_ORIGINAL_ENVIRONMENT = {
+    key: os.environ.get(key)
+    for key in ("HOME", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME")
+}
+_TEST_HOST_ROOT = Path(tempfile.mkdtemp(prefix="slay-state-host-"))
+_TEST_ROOT = _TEST_HOST_ROOT / "test-root"
+_TEST_ROOT.mkdir()
+os.environ.update(
+    {
+        "HOME": str(_TEST_ROOT / "home"),
+        "XDG_STATE_HOME": str(_TEST_ROOT / "state"),
+        "XDG_CONFIG_HOME": str(_TEST_ROOT / "config"),
+        "XDG_CACHE_HOME": str(_TEST_ROOT / "cache"),
+    }
+)
+
+
+def _restore_environment() -> None:
+    for key, value in _ORIGINAL_ENVIRONMENT.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    shutil.rmtree(_TEST_HOST_ROOT, ignore_errors=True)
+
+
+atexit.register(_restore_environment)
 
 site_pkgs = glob.glob(str(Path(__file__).parents[1] / ".cache" / "tui-venv" / "lib" / "python*" / "site-packages"))
 if site_pkgs:
@@ -43,7 +74,7 @@ def _identity(number: int, head: str | None = None) -> RunIdentity:
 
 class SlayStateMachineContractTests(unittest.TestCase):
     def _store_dir(self):
-        scratch = Path(__file__).parents[1] / ".cache" / "slay-state-contract"
+        scratch = _TEST_ROOT / "run-state-tests"
         scratch.mkdir(parents=True, exist_ok=True)
         return tempfile.TemporaryDirectory(dir=scratch)
 
@@ -406,6 +437,414 @@ class SlayStateMachineContractTests(unittest.TestCase):
                 app.restore_landing_marks([restored])
 
             self.assertEqual(restored.failure, f"failed: {'x' * 240}")
+
+    def test_dispatch_slay_landing_stays_inside_private_state_roots(self):
+        """#424: the real slay dispatch must not use maintainer state."""
+        sentinel = _TEST_HOST_ROOT / "sentinel.txt"
+        sentinel.write_text("untouched\n", encoding="utf-8")
+        app = self._setup_app(_TEST_ROOT / "run-state-dispatch")
+        app.gh_client.read = mock.Mock(
+            return_value=mock.Mock(returncode=0, stdout="true\n")
+        )
+        stop = tui.Stop(
+            repository="projectbluefin/review",
+            number=424,
+            action="review",
+            title="chore(deps): test isolation",
+            live={
+                "baseRefOid": _sha("a"),
+                "headRefOid": _sha("1"),
+                "reviews": [
+                    {"author": {"login": "human"}, "state": "APPROVED"}
+                ],
+            },
+        )
+        stop.head_sha = _sha("1")
+        identity = _identity(424, _sha("1"))
+        app.run_store.create(identity)
+        app.run_store.transition(identity, RunState.REVIEWING)
+        app.run_store.transition(identity, RunState.REVIEW_CLEAN)
+        app.fetch_live_pr = lambda *_args, **_kwargs: dict(stop.live)
+
+        app._dispatch_slay_landing(stop, identity=identity)
+
+        self.assertTrue(app.landing_queue)
+        task = app.landing_queue[-1]
+        self.assertTrue(
+            Path(tui.TRACE_PATH).is_relative_to(_TEST_ROOT),
+            f"captured trace path escaped test root: {tui.TRACE_PATH}",
+        )
+        for path in (task.prompt_path, task.status_path, task.log_path):
+            self.assertTrue(
+                Path(path).is_relative_to(_TEST_ROOT),
+                f"landing artifact escaped test root: {path}",
+            )
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "untouched\n")
+
+    def test_landing_presentation_outcome_requires_terminal_report_evidence(self):
+        """#394: process success cannot make an incomplete batch green."""
+        stop = tui.Stop(
+            repository="projectbluefin/review",
+            number=394,
+            action="review",
+            title="chore(deps): outcome contract",
+        )
+        with tempfile.TemporaryDirectory(dir=_TEST_ROOT) as root:
+            status_path = Path(root) / "outcome.jsonl"
+            task = tui.landing.LandingTask(
+                task_id="outcome",
+                stops=[stop],
+                login="tester",
+                status_path=str(status_path),
+                returncode=0,
+            )
+
+            status_path.write_text('{"expect":["projectbluefin/review#394"]}\n')
+            self.assertEqual(
+                tui.landing.batch_outcome(task).state,
+                "incomplete",
+            )
+
+            status_path.write_text(
+                '{"pr":"projectbluefin/review#394","state":"merged"}\n'
+                '{"state":"done"}\n'
+            )
+            self.assertEqual(tui.landing.batch_outcome(task).state, "complete")
+
+            status_path.write_text(
+                '{"pr":"projectbluefin/review#394","state":"blocked"}\n'
+                '{"state":"done"}\n'
+            )
+            self.assertEqual(
+                tui.landing.batch_outcome(task).state,
+                "completed-with-blockers",
+            )
+
+    def test_landing_presentation_keeps_active_terminal_states_distinct(self):
+        """#394: running, waiting, queued, stopped, and failed stay readable."""
+        stop = tui.Stop(
+            repository="projectbluefin/review",
+            number=395,
+            action="review",
+            title="chore(deps): outcome states",
+        )
+        with tempfile.TemporaryDirectory(dir=_TEST_ROOT) as root:
+            status_path = Path(root) / "states.jsonl"
+            task = tui.landing.LandingTask(
+                task_id="states",
+                stops=[stop],
+                login="tester",
+                status_path=str(status_path),
+            )
+            self.assertEqual(tui.landing.batch_outcome(task).state, "queued")
+            task.process = object()
+            status_path.write_text(
+                '{"pr":"projectbluefin/review#395","state":"fixing"}\n'
+            )
+            self.assertEqual(tui.landing.batch_outcome(task).state, "running")
+            status_path.write_text(
+                '{"pr":"projectbluefin/review#395","state":"waiting-ci"}\n'
+            )
+            self.assertEqual(tui.landing.batch_outcome(task).state, "waiting")
+            task.process = None
+            task.returncode = -15
+            task.stop_requested = True
+            self.assertEqual(tui.landing.batch_outcome(task).state, "stopped")
+            task.stop_requested = False
+            task.returncode = 1
+            self.assertEqual(tui.landing.batch_outcome(task).state, "failed")
+
+    def test_malformed_progress_timestamps_remain_unknown(self):
+        """#394/#425: malformed report timing cannot crash or fake freshness."""
+        stop = tui.Stop(
+            repository="projectbluefin/review",
+            number=425,
+            action="review",
+            title="chore(deps): malformed progress",
+        )
+        with tempfile.TemporaryDirectory(dir=_TEST_ROOT) as root:
+            status_path = Path(root) / "malformed-progress.jsonl"
+            status_path.write_text(
+                '{"pr":"projectbluefin/review#425","state":"fixing","ts":"newest"}\n'
+            )
+            task = tui.landing.LandingTask(
+                task_id="malformed-progress",
+                stops=[stop],
+                login="tester",
+                status_path=str(status_path),
+                started=1.0,
+                process=object(),
+            )
+            progress = tui.landing.progress_snapshot(task)
+            self.assertEqual(progress.evidence_age, "unknown")
+
+    def test_ci_failure_evidence_keeps_exact_run_attempt_step_and_annotations(self):
+        """#186: CI diagnosis is tied to the current head and real run fields."""
+        live = {
+            "headRefOid": _sha("6"),
+            "statusCheckRollup": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "unit tests",
+                    "workflowName": "CI",
+                    "conclusion": "FAILURE",
+                    "databaseId": 186,
+                    "checkSuite": {"workflowRun": {"runAttempt": 2}},
+                    "stepName": "test dashboard",
+                    "annotations": [
+                        {"path": "tests/dashboard.py", "start_line": 12, "message": "failed"}
+                    ],
+                    "startedAt": "2026-09-08T00:00:00Z",
+                    "completedAt": "2026-09-08T00:01:00Z",
+                    "detailsUrl": "https://github.example/run/186",
+                }
+            ],
+        }
+        evidence = tui.ci_failure_evidence(live)
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0]["run_id"], 186)
+        self.assertEqual(evidence[0]["attempt"], 2)
+        self.assertEqual(evidence[0]["head_sha"], _sha("6"))
+        self.assertEqual(evidence[0]["step"], "test dashboard")
+        self.assertEqual(evidence[0]["annotations"][0]["path"], "tests/dashboard.py")
+
+    def test_ci_log_sanitization_bounds_secrets_and_terminal_controls(self):
+        """#186: on-demand logs are bounded, untrusted, redacted text."""
+        raw = "secret ghp_" + "a" * 40 + "\x1b]8;;https://evil.example\x07click\x1b]8;;\x07\n" + ("x" * 100)
+        state, lines = tui.sanitize_ci_log(raw, max_lines=2, max_bytes=80)
+        self.assertEqual(state, "available")
+        self.assertLessEqual(len("\n".join(lines).encode()), 80)
+        self.assertNotIn("ghp_" + "a" * 40, "\n".join(lines))
+        self.assertNotIn("\x1b", "\n".join(lines))
+
+    def test_review_action_comparison_is_bounded_and_evidence_scoped(self):
+        """#154: only exact-head review/action pairs receive a coarse receipt."""
+        result = tui.ReviewResult(
+            1,
+            "findings",
+            counts={"critical": 0, "high": 1, "medium": 0, "low": 0},
+            findings=[{"severity": "high", "file": "a.py", "line": 1, "title": "risk"}],
+            provenance={
+                "backend": "goose",
+                "model": "gpt-5.6-sol",
+                "repository": "projectbluefin/review",
+                "pull_request": 154,
+                "head_sha": _sha("7"),
+            },
+        )
+        receipt = tui.classify_review_action(
+            result,
+            "request-changes",
+            repository="projectbluefin/review",
+            number=154,
+            head_sha=_sha("7"),
+            actor="maintainer",
+        )
+        self.assertEqual(receipt.classification, "agreement")
+        self.assertEqual(receipt.finding_count, 1)
+        self.assertEqual(receipt.identity, "maintainer")
+        self.assertEqual(
+            tui.classify_review_action(
+                result,
+                "approve",
+                repository="projectbluefin/review",
+                number=154,
+                head_sha=_sha("7"),
+                actor="maintainer",
+            ).classification,
+            "disagreement",
+        )
+        self.assertEqual(
+            tui.classify_review_action(
+                result,
+                "merge",
+                repository="projectbluefin/review",
+                number=154,
+                head_sha=_sha("7"),
+                actor="maintainer",
+            ).classification,
+            "unclassified",
+        )
+
+    def test_generation_tokens_reject_late_editor_results(self):
+        """#196: cancellation, replacement, and edits invalidate a draft."""
+        self.assertTrue(tui.generation_is_current(4, 2, 4, 2, False))
+        self.assertFalse(tui.generation_is_current(4, 2, 5, 2, False))
+        self.assertFalse(tui.generation_is_current(4, 2, 4, 3, False))
+        self.assertFalse(tui.generation_is_current(4, 2, 4, 2, True))
+        self.assertEqual(
+            tui.classify_review_action(
+                result,
+                "request-changes",
+                repository="projectbluefin/other",
+                number=154,
+                head_sha=_sha("7"),
+                actor="maintainer",
+            ).classification,
+            "unclassified",
+        )
+        self.assertEqual(
+            tui.classify_review_action(
+                result,
+                "request-changes",
+                repository="projectbluefin/review",
+                number=155,
+                head_sha=_sha("7"),
+                actor="maintainer",
+            ).classification,
+            "unclassified",
+        )
+        missing_identity = tui.ReviewResult(
+            result.version,
+            result.state,
+            result.counts,
+            result.findings,
+            provenance={"backend": "goose", "model": "gpt-5.6-sol", "head_sha": _sha("7")},
+        )
+        self.assertEqual(
+            tui.classify_review_action(
+                missing_identity,
+                "request-changes",
+                repository="projectbluefin/review",
+                number=154,
+                head_sha=_sha("7"),
+                actor="maintainer",
+            ).classification,
+            "unclassified",
+        )
+        self.assertEqual(
+            tui.classify_review_action(
+                result,
+                "reject",
+                repository="projectbluefin/review",
+                number=154,
+                head_sha=_sha("7"),
+                actor="maintainer",
+            ).classification,
+            "agreement",
+        )
+        self.assertEqual(
+            tui.classify_review_action(
+                result,
+                "merge",
+                repository="projectbluefin/review",
+                number=154,
+                head_sha=_sha("7"),
+                actor="maintainer",
+                action_verified=True,
+            ).classification,
+            "disagreement",
+        )
+        self.assertEqual(
+            tui.classify_review_action(
+                result,
+                "request-changes",
+                repository="projectbluefin/review",
+                number=154,
+                head_sha=_sha("8"),
+                actor="maintainer",
+            ).classification,
+            "unclassified",
+        )
+
+    def test_landing_task_uses_argv_cwd_and_delimits_untrusted_prompt_data(self):
+        """#383: hostile titles and paths must remain data in generated work."""
+        with tempfile.TemporaryDirectory(dir=_TEST_ROOT) as root:
+            stop = tui.Stop(
+                repository="projectbluefin/review",
+                number=383,
+                action="review",
+                title='title "quoted"\n$HOME ${{ secrets.TOKEN }}',
+            )
+            with mock.patch.dict(
+                os.environ,
+                {"BLUEFIN_REVIEW_LANDING_COMMAND": "runner --prompt @PROMPT"},
+                clear=False,
+            ):
+                task = tui.landing.new_fix_task(
+                    stop,
+                    [{"title": 'finding "quoted"\n$(touch pwned)', "file": "a b.py"}],
+                    "tester",
+                    root=root,
+                )
+
+            self.assertEqual(task.command, ["runner", "--prompt", task.prompt_path])
+            self.assertEqual(task.cwd, os.getcwd())
+            prompt = Path(task.prompt_path).read_text(encoding="utf-8")
+            self.assertIn("untrusted data", prompt.lower())
+            self.assertIn('$(touch pwned)', prompt)
+            self.assertIn("${{ secrets.TOKEN }}", prompt)
+            self.assertNotIn("sh -c", prompt)
+
+    def test_watch_target_requires_exact_head_and_terminal_reruns_only(self):
+        """#382: active runs resume by identity and cannot be rerun."""
+        target = tui.landing.WatchTarget.from_dict(
+            {
+                "repository": "projectbluefin/review",
+                "pull_request": 382,
+                "head_sha": _sha("3"),
+                "run_id": 123,
+                "attempt": 2,
+                "status": "in_progress",
+                "observed_at": 100,
+                "deadline": 400,
+            }
+        )
+        self.assertTrue(
+            target.matches(
+                repository="projectbluefin/review",
+                pull_request=382,
+                head_sha=_sha("3"),
+                run_id=123,
+                attempt=2,
+            )
+        )
+        self.assertFalse(target.matches(head_sha=_sha("4")))
+        self.assertFalse(target.can_rerun)
+        self.assertTrue(target.expired(now=401))
+
+        completed = tui.landing.WatchTarget.from_dict(
+            {**target.to_dict(), "status": "completed"}
+        )
+        self.assertTrue(completed.can_rerun)
+
+    def test_watch_report_persists_target_without_replacing_landing_state(self):
+        """#382: the reporter retains the exact run being watched."""
+        target = tui.landing.WatchTarget(
+            "projectbluefin/review",
+            382,
+            _sha("5"),
+            321,
+            1,
+            "in_progress",
+            100.0,
+            400.0,
+        )
+        with tempfile.TemporaryDirectory(dir=_TEST_ROOT) as root:
+            status_path = Path(root) / "watch.jsonl"
+            status_path.write_text(
+                '{"expect":["projectbluefin/review#382"],"ts":1}\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                tui.landing.report_watch(
+                    str(status_path), target, "CI is still running"
+                ),
+                0,
+            )
+            event = tui.landing.parse_status(str(status_path))["projectbluefin/review#382"]
+            self.assertEqual(tui.landing.watch_target(event), target)
+            self.assertEqual(event["state"], "waiting-ci")
+
+    def test_log_tail_bounds_file_reading_before_decoding(self):
+        """#196: the landing view must not read an entire unbounded log."""
+        with tempfile.TemporaryDirectory(dir=_TEST_ROOT) as root:
+            path = Path(root) / "large.log"
+            path.write_bytes((b"old output\n" * 20_000) + b"tail marker\n")
+            lines = tui.landing.read_log_tail(str(path), max_lines=3, max_bytes=128)
+            self.assertEqual(lines[-1], "tail marker")
+            self.assertLessEqual(len(lines), 3)
+            self.assertTrue(all(len(line) < 128 for line in lines))
 
     def test_late_reconciliation_callback_cannot_overwrite_fresh_source(self):
         """A cancelled worker cannot stale a source settled by its replacement."""
