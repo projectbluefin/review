@@ -1806,6 +1806,7 @@ begin "review-container: the default name is unchanged when the override is unse
 reset_logs
 run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test
 assert_file_contains "--replace --name review-container " "$runner_log"
+assert_file_contains "--env REVIEW_CONTAINER_NAME=review-container" "$runner_log"
 assert_contains "podman exec -it review-container tmux attach" "$OUT"
 
 begin "review-container: REVIEW_CONTAINER_NAME runs a second, differently-named instance"
@@ -1814,6 +1815,7 @@ run_recipe review-container GH_READY=1 GOOSE_MODEL=gpt-test \
   REVIEW_CONTAINER_NAME=review-container-2
 assert_eq "$(wc -l <"$runner_log")" 1 "expected exactly one podman invocation"
 assert_file_contains "--replace --name review-container-2 " "$runner_log"
+assert_file_contains "--env REVIEW_CONTAINER_NAME=review-container-2" "$runner_log"
 assert_file_contains "--label review.owner=${boot_id}:" "$runner_log"
 assert_file_not_contains "--detach" "$runner_log"
 # Every hint has to name the container the user actually started, or a second

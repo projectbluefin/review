@@ -1372,6 +1372,7 @@ review-container profile="" effort="":
       # live container's access to it.
       --volume "${HIVE_CONTRIBUTOR_ENV}:/home/dev/.config/hive/contributor.env:ro,z"
       --env "AGENT_BACKEND=${BACKEND}"
+      --env "REVIEW_CONTAINER_NAME=${CONTAINER_NAME}"
       # Podman does not pass COLORTERM through on its own; the entrypoint
       # needs it to pick the direct-color attach fallback for a host TERM
       # the image's narrow terminfo set does not know (e.g. xterm-ghostty).
