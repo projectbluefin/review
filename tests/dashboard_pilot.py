@@ -7698,8 +7698,12 @@ async def main() -> int:
         await pilot.press("enter")
         await pilot.pause()
         check(
-            isinstance(app.screen, tui.LandingScreen),
-            "confirming partitioned batch must push LandingScreen",
+            isinstance(app.screen, tui.ReviewDashboard),
+            "confirming partitioned batch must return to the review queue",
+        )
+        check(
+            len(app.landing_queue) == 2,
+            "confirming partitioned batch must enqueue both landing tasks",
         )
     os.environ["BLUEFIN_REVIEW_PARTITION_BATCH"] = "0"
     gh_log.write_text("")

@@ -134,6 +134,37 @@ class ResponsiveTuiContractTests(unittest.TestCase):
 
             asyncio.run(exercise())
 
+    def test_draft_applies_when_preexisting_editor_text_is_unchanged(self):
+        class FastAdapter:
+            capabilities = SimpleNamespace(body_drafting=True)
+
+            def draft(self, _request):
+                return SimpleNamespace(
+                    state=tui.DraftState.COMPLETE,
+                    markdown="generated body",
+                    provenance={"source": "pilot"},
+                )
+
+        class Registry:
+            def register(self, _harness):
+                return None
+
+            def require_ready(self, _backend):
+                return FastAdapter()
+
+        screen = tui.ReviewBody(review_stop(), "comment")
+        with mock.patch.object(tui, "HarnessRegistry", Registry):
+            async def exercise():
+                async with ScreenHost(screen).run_test(size=(80, 24)) as pilot:
+                    editor = screen.query_one(tui.TextArea)
+                    editor.text = "preexisting body"
+                    screen.action_generate()
+                    await screen.app.workers.wait_for_complete()
+                    await pilot.pause()
+                    self.assertEqual(editor.text, "generated body")
+
+            asyncio.run(exercise())
+
     def test_landing_target_and_log_following_stay_consistent_across_batches(self):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)

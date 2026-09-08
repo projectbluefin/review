@@ -2462,6 +2462,7 @@ class ReviewBody(ModalScreen[str | None]):
         self.edit_revision = 0
         self.closed = False
         self.draft_target: tuple[str, int, str, str] | None = None
+        self.generation_source_text: str | None = None
 
     def compose(self) -> ComposeResult:
         optional = " (empty is allowed for an approval)" if self.verdict == "approve" else ""
@@ -2490,6 +2491,7 @@ class ReviewBody(ModalScreen[str | None]):
         self.closed = True
         self.generation += 1
         self.draft_target = None
+        self.generation_source_text = None
 
     def action_edit(self) -> None:
         self.query_one(TextArea).focus()
@@ -2498,6 +2500,7 @@ class ReviewBody(ModalScreen[str | None]):
         self.closed = True
         self.generation += 1
         self.draft_target = None
+        self.generation_source_text = None
         self.cleanup()
         self.dismiss(None)
 
@@ -2538,20 +2541,52 @@ class ReviewBody(ModalScreen[str | None]):
             return
         self.generation += 1
         generation = self.generation
-        edit_revision = self.edit_revision
         target = draft_target(self.stop_record)
+        source_text = self.query_one(TextArea).text
         self.draft_target = target
+        self.generation_source_text = source_text
         self.query_one(TextArea).focus()
         self.query_one("#review-body-status", Static).update(
             "draft: generating in background; editor remains available"
         )
+        self.app.call_after_refresh(
+            lambda: self._start_generation(
+                generation,
+                request,
+                result,
+                live_review_context(self.stop_record.live),
+                target,
+                source_text,
+            )
+        )
+
+    def _start_generation(
+        self,
+        generation: int,
+        request: ReviewRequest,
+        result: ReviewResult,
+        live_context: dict,
+        target: tuple[str, int, str, str],
+        source_text: str,
+    ) -> None:
+        if not generation_is_current(
+            generation,
+            self.edit_revision,
+            self.generation,
+            self.edit_revision,
+            self.closed,
+            target,
+            draft_target(self.stop_record),
+        ):
+            return
         self.generate_draft(
             generation,
-            edit_revision,
+            self.edit_revision,
             request,
             result,
-            live_review_context(self.stop_record.live),
+            live_context,
             target,
+            source_text,
         )
 
     @work(thread=True, exclusive=True, group="draft")
@@ -2563,6 +2598,7 @@ class ReviewBody(ModalScreen[str | None]):
         result: ReviewResult,
         live_context: dict,
         target: tuple[str, int, str, str],
+        source_text: str,
     ) -> None:
         draft = None
         error = ""
@@ -2587,6 +2623,7 @@ class ReviewBody(ModalScreen[str | None]):
             draft,
             error,
             target,
+            source_text,
         )
 
     def apply_generated_draft(
@@ -2596,6 +2633,7 @@ class ReviewBody(ModalScreen[str | None]):
         draft,
         error: str,
         target: tuple[str, int, str, str] | None = None,
+        source_text: str | None = None,
     ) -> None:
         if not generation_is_current(
             generation,
@@ -2606,6 +2644,8 @@ class ReviewBody(ModalScreen[str | None]):
             target,
             draft_target(self.stop_record) if target is not None else None,
         ):
+            return
+        if source_text is not None and self.query_one(TextArea).text != source_text:
             return
         if error:
             self.notify(f"draft unavailable: {error}", severity="warning")
