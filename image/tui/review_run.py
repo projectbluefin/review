@@ -19,14 +19,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from hashlib import sha256
 
-try:
-    from harness.registry import Harness, HarnessRegistry
-    from tui.review_result import ReviewResult
-    from tui.review_evidence_manifest import ReviewRequest
-except ImportError:
-    from image.harness.registry import Harness, HarnessRegistry  # type: ignore[no-redef]
-    from image.tui.review_result import ReviewResult  # type: ignore[no-redef]
-    from image.tui.review_evidence_manifest import ReviewRequest  # type: ignore[no-redef]
+from harness.registry import Harness, HarnessRegistry
+from tui.review_result import ReviewResult
+from tui.review_evidence_manifest import ReviewRequest
 
 
 class ReviewRunState(str, Enum):

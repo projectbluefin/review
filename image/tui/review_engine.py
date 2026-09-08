@@ -226,12 +226,8 @@ class BrokerExecutor:
     def _client(self) -> Any:
         if self.client is not None:
             return self.client
-        try:
-            from tui import review_exec_client
-            return review_exec_client
-        except ImportError:
-            import review_exec_client
-            return review_exec_client
+        from tui import review_exec_client
+        return review_exec_client
 
     def run(
         self,

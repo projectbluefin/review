@@ -17,10 +17,7 @@ from typing import Any, Iterator, Mapping
 
 from tui.review_receipt import ReceiptIdentity as RunIdentity
 
-try:
-    from tui.model_profiles import is_high_assurance
-except ImportError:
-    from model_profiles import is_high_assurance  # type: ignore[no-redef]
+from tui.model_profiles import is_high_assurance
 
 RUN_STATE_VERSION = 1
 DEFAULT_MAX_RECORDS = 500

@@ -8,9 +8,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 
+ROOT = Path(__file__).parents[1]
 site_pkgs = glob.glob(
     str(
-        Path(__file__).parents[1]
+        ROOT
         / ".cache"
         / "tui-venv"
         / "lib"
@@ -20,10 +21,10 @@ site_pkgs = glob.glob(
 )
 if site_pkgs:
     sys.path.insert(0, site_pkgs[0])
-sys.path.insert(0, str(Path(__file__).parents[1] / "image" / "tui"))
+sys.path.insert(0, str(ROOT / "image"))
 
-import bluefin_review_tui as tui
-from observability import _OtlpMetricExporter, ReviewObservability
+import tui.bluefin_review_tui as tui
+from tui.observability import _OtlpMetricExporter, ReviewObservability
 
 
 class FakeExporter:

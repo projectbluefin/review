@@ -59,10 +59,7 @@ def _required_sha(live: Mapping[str, Any], field: str) -> str:
 
 
 def _verification(live: Mapping[str, Any]) -> list[dict[str, Any]]:
-    try:
-        from tui.bluefin_review_tui import live_review_verification
-    except ImportError:
-        from bluefin_review_tui import live_review_verification
+    from tui.bluefin_review_tui import live_review_verification
 
     return live_review_verification(dict(live))
 

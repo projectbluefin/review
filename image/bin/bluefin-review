@@ -88,7 +88,7 @@ prepare_isolated_worktree() {
 run_registered_review() {
   local range="$1" scope="$2" prompt="$3" owner="$4" repository="$5" number="$6" base_sha="$7" head_sha="$8"
   local root="${BLUEFIN_REVIEW_HARNESS_ROOT:-/opt/bluefin}"
-  PYTHONPATH="${root}:${root}/tui${PYTHONPATH:+:${PYTHONPATH}}" \
+  PYTHONPATH="${root}${PYTHONPATH:+:${PYTHONPATH}}" \
     exec python3 - "$range" "$scope" "$prompt" "$owner" "$repository" "$number" "$base_sha" "$head_sha" <<'PY'
 import sys
 from harness.goose import GooseHarness
@@ -670,7 +670,7 @@ case "${1-}" in
   receipt)
     shift
     root="${BLUEFIN_REVIEW_HARNESS_ROOT:-/opt/bluefin}"
-    PYTHONPATH="${root}:${root}/tui${PYTHONPATH:+:${PYTHONPATH}}" \
+    PYTHONPATH="${root}${PYTHONPATH:+:${PYTHONPATH}}" \
       exec python3 -m tui.review_receipt "$@"
     ;;
   pr)

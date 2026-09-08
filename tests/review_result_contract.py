@@ -3,9 +3,9 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parents[1] / "image" / "tui"))
+sys.path.insert(0, str(Path(__file__).parents[1] / "image"))
 
-from review_result import MAX_RAW_CHARS, ReviewResult, adapt_current_engine, parse_review_result
+from tui.review_result import MAX_RAW_CHARS, ReviewResult, adapt_current_engine, parse_review_result
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
