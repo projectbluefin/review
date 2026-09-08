@@ -635,6 +635,7 @@ def classify_review_action(
         "approve-review": "approve",
         "reject": "request-changes",
         "rejected": "request-changes",
+        "request changes": "request-changes",
         "changes-requested": "request-changes",
         "request-change": "request-changes",
         "merge-completed": "merge",
@@ -659,10 +660,8 @@ def classify_review_action(
             or (FULL_SHA.fullmatch(action_head) and action_head == head_sha)
         )
         and action_success
-        and (
-            normalized_action in {"approve", "request-changes"}
-            or (normalized_action == "merge" and verified_action)
-        )
+        and (normalized_action in {"approve", "request-changes"}
+             or (normalized_action == "merge" and verified_action))
     ):
         has_findings = review_state == "findings" or finding_count > 0 or bool(result.findings)
         if normalized_action == "merge" and verified_action:
