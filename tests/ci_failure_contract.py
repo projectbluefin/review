@@ -125,6 +125,48 @@ class CIFailureEvidenceContractTests(unittest.TestCase):
         self.assertNotIn("ghp_", rendered)
         self.assertNotIn("\x1b", rendered)
 
+    def test_failure_action_fetches_current_head_evidence_on_demand(self) -> None:
+        class Dashboard(tui.ReviewDashboard):
+            def load_queue(self, *args, **kwargs):
+                return None
+
+            def load_hive(self, *args, **kwargs):
+                return None
+
+            def discover_harness(self, *args, **kwargs):
+                return None
+
+        stop = tui.Stop(
+            "acme/widgets", 42, "fix-ci", "failing check", check_state="failure",
+            head_sha=HEAD,
+            live={"headRefOid": HEAD},
+        )
+        live = {
+            "repository": "acme/widgets",
+            "number": 42,
+            "headRefOid": HEAD,
+            "statusCheckRollup": [{
+                "name": "linux",
+                "conclusion": "FAILURE",
+                "runId": 9001,
+                "headSha": HEAD,
+            }],
+        }
+
+        async def exercise():
+            app = Dashboard()
+            app.fetch_live_pr = lambda repository, number, force=False: live
+            async with app.run_test(size=(80, 24)) as pilot:
+                app.stops = [stop]
+                app.populate(app.stops)
+                app.open_ci_failure_logs(stop)
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                self.assertIsInstance(app.screen, tui.CIFailureScreen)
+                self.assertEqual(stop.live.get("headRefOid"), HEAD)
+
+        asyncio.run(exercise())
+
         self.assertEqual(tui.sanitize_ci_log(None)[0], "missing")
         self.assertEqual(tui.sanitize_ci_log("",)[0], "empty")
         self.assertEqual(tui.ci_log_failure_state("401 authentication failed"), "authentication failed")

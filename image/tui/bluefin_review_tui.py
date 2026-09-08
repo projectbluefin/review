@@ -7666,6 +7666,55 @@ class ReviewDashboard(App):
         failures = ci_failure_evidence(
             stop.live, repository=stop.repository, number=stop.number
         )
+        if failures:
+            self.push_screen(CIFailureScreen(stop, failures[0]))
+            return
+        expected_head = stop.head_identity
+        self.notify("loading current-head CI failure evidence…")
+        self.load_ci_failure_evidence(stop, expected_head)
+
+    @work(thread=True, exclusive=True, group="ci")
+    def load_ci_failure_evidence(self, stop: Stop, expected_head: str) -> None:
+        try:
+            live = self.fetch_live_pr(stop.repository, stop.number, force=True)
+            failures = ci_failure_evidence(
+                live, repository=stop.repository, number=stop.number
+            )
+            error = ""
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+            live = {}
+            failures = []
+            error = bounded_detail(str(exc))
+        if get_current_worker().is_cancelled:
+            return
+        self.call_from_thread(
+            self.show_ci_failure_evidence,
+            stop,
+            expected_head,
+            live,
+            failures,
+            error,
+        )
+
+    def show_ci_failure_evidence(
+        self,
+        stop: Stop,
+        expected_head: str,
+        live: dict,
+        failures: list[dict],
+        error: str,
+    ) -> None:
+        if self.current is not stop or stop.head_identity != expected_head:
+            return
+        live_head = str(live.get("headRefOid") or "")
+        if live_head and live_head != expected_head:
+            self.notify("CI evidence is stale; the pull request head changed", severity="warning")
+            return
+        if live:
+            stop.live = {**stop.live, **live}
+        if error:
+            self.notify(f"CI evidence unavailable: {error}", severity="warning")
+            return
         if not failures:
             self.notify("no current-head CI failure evidence is available", severity="warning")
             return
