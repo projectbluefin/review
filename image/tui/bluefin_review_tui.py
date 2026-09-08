@@ -191,6 +191,7 @@ MAX_CONCURRENT_LANDINGS = int(
 HIVE_API_HELPER = os.path.join(os.path.dirname(__file__), "hive_api.py")
 MAX_REVIEW_BODY_CHARS = 4096
 MAX_ACTION_RECEIPTS = 64
+MAX_ACTION_FINDINGS = 64
 MAX_RE_REVIEW_FILES = 128
 MAX_RE_REVIEW_HUNKS = 512
 MAX_RE_REVIEW_RESPONSE_CHARS = 1_000_000
@@ -586,12 +587,19 @@ def classify_review_action(
     evidence: tuple[str, ...] = ()
     if result is not None:
         reviewed_head = str(result.provenance.get("head_sha") or "")
-        finding_count = sum(result.counts.values())
+        finding_count = min(sum(result.counts.values()), MAX_ACTION_FINDINGS)
         evidence = tuple(str(item)[:240] for item in result.raw_evidence[:4])
-    raw_action = str(action or "").lower()
+    raw_action = str(action or "").strip().lower().replace("_", "-")
+    raw_action = re.sub(r"\s+", "-", raw_action)
     normalized_action = {
         "accept": "approve",
+        "accepted": "approve",
+        "approved": "approve",
+        "approve-review": "approve",
         "reject": "request-changes",
+        "rejected": "request-changes",
+        "changes-requested": "request-changes",
+        "request-change": "request-changes",
         "merge-completed": "merge",
     }.get(raw_action, raw_action)
     provenance = result.provenance if result is not None else {}
@@ -609,7 +617,10 @@ def classify_review_action(
         and FULL_SHA.fullmatch(reviewed_head)
         and FULL_SHA.fullmatch(head_sha)
         and reviewed_head == head_sha
-        and (not action_head or action_head == head_sha)
+        and (
+            not action_head
+            or (FULL_SHA.fullmatch(action_head) and action_head == head_sha)
+        )
         and action_success
         and (
             normalized_action in {"approve", "request-changes"}
@@ -617,8 +628,11 @@ def classify_review_action(
         )
     ):
         has_findings = review_state == "findings" or finding_count > 0 or bool(result.findings)
-        expected_action = "request-changes" if has_findings else "approve"
-        classification = "agreement" if normalized_action == expected_action else "disagreement"
+        if normalized_action == "merge" and verified_action:
+            classification = "disagreement" if has_findings else "agreement"
+        else:
+            expected_action = "request-changes" if has_findings else "approve"
+            classification = "agreement" if normalized_action == expected_action else "disagreement"
     return ReviewActionReceipt(
         repository,
         number,
@@ -6452,7 +6466,11 @@ class ReviewDashboard(App):
 
     def action_comparison_for(self, stop: Stop) -> ReviewActionReceipt | None:
         for receipt in reversed(list(self.action_comparisons.values())):
-            if receipt.repository == stop.repository and receipt.number == stop.number:
+            if (
+                receipt.repository == stop.repository
+                and receipt.number == stop.number
+                and receipt.reviewed_head == stop.head_identity
+            ):
                 return receipt
         return None
 
@@ -6466,6 +6484,8 @@ class ReviewDashboard(App):
         verified = " · verified completion" if receipt.verified else ""
         return (
             "\n\n[b]REVIEW / ACTION RECEIPT[/b]\n"
+            f"{escape(receipt.repository)}#{receipt.number} · head "
+            f"{escape(receipt.reviewed_head[:12])} · "
             f"review {escape(receipt.review_state)} · findings {receipt.finding_count} · "
             f"action {escape(receipt.action)} · {escape(receipt.classification)}"
             f" · @{escape(receipt.identity)}{verified}{evidence}\n"
