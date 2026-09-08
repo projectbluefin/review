@@ -326,6 +326,8 @@ fi
 "${venv}/bin/python" "$repo_root/tests/semantic_view_contract.py"
 "${venv}/bin/python" "$repo_root/tests/slay_state_contract.py"
 "${venv}/bin/python" "$repo_root/tests/soak_contract.py"
+"${venv}/bin/python" "$repo_root/tests/observability_contract.py"
+"${venv}/bin/python" "$repo_root/tests/review_session_runtime_contract.py"
 "${venv}/bin/python" "$repo_root/tests/dashboard_pilot.py"
 
 printf 'dashboard contract OK\n'

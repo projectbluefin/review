@@ -158,7 +158,7 @@ labels. Never add a local workaround for an accepted upstream gap. See
 ## Repository layout
 
 - `justfile` is the only shipped launcher artifact. Its
-  five public recipes and private helpers intentionally live together.
+  six public recipes and private helpers intentionally live together.
 - `image/` builds the FSDK-derived contributor image and its layered runtime
   configuration.
 - `package.json` and `package-lock.json` at the root pin only the contributor

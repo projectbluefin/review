@@ -24,7 +24,7 @@ from tui.model_profiles import (
 
 class ModelProfilesContractTests(unittest.TestCase):
     def test_triple_constants(self):
-        self.assertEqual(GEMINI_TRIPLE, ("goose", "gemini-3.8-flash", "high"))
+        self.assertEqual(GEMINI_TRIPLE, ("goose", "gemini-3.8-flash", "max"))
         self.assertEqual(SOL_TRIPLE, ("goose", "gpt-5.6-sol", "medium"))
         self.assertEqual(OPUS_TRIPLE, ("goose", "claude-opus-5", "high"))
         self.assertEqual(KIMI_TRIPLE, ("goose", "kimi-k3", "high"))

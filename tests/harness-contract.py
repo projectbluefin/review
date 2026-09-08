@@ -83,12 +83,13 @@ class HarnessContract(unittest.TestCase):
             with self.subTest(state=state), self.assertRaises(RuntimeError):
                 adapter.invoke(self.binding, prompt="p")
 
-    def test_codex_defaults_and_provenance_capability(self):
-        adapter = CodexHarness()
-        self.assertEqual(adapter.model, "gemini-3.8-flash")
-        self.assertEqual(adapter.effort, "high")
-        self.assertTrue(adapter.capabilities.exact_binding)
-        self.assertTrue(adapter.capabilities.provenance)
+    def test_default_harnesses_use_the_gemini_max_profile(self):
+        for adapter in (GooseHarness(), CodexHarness()):
+            with self.subTest(adapter=adapter.name):
+                self.assertEqual(adapter.model, "gemini-3.8-flash")
+                self.assertEqual(adapter.effort, "max")
+                self.assertTrue(adapter.capabilities.exact_binding)
+                self.assertTrue(adapter.capabilities.provenance)
 
     def test_goose_registry_owns_invocation_and_result_conversion(self):
         adapter = GooseHarness(availability=Availability.READY)
@@ -278,7 +279,7 @@ class HarnessContract(unittest.TestCase):
         self.assertEqual(result.state, "complete")
         self.assertEqual(result.provenance["backend"], "codex")
         self.assertEqual(result.provenance["model"], "gemini-3.8-flash")
-        self.assertEqual(result.provenance["reasoning_effort"], "high")
+        self.assertEqual(result.provenance["reasoning_effort"], "max")
         self.assertEqual(result.provenance["repository"], "project/review")
 
     def test_codex_accepts_blank_jsonl_framing_lines(self):

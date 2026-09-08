@@ -992,6 +992,7 @@ FINAL_ROUND_LIMIT = 5
 # `owner/repo#N`, so this can never collide with a pull request, and the
 # batch's own `done` event keeps the "" key it always had.
 FINAL_KEY = "final"
+FINAL_OUTCOME_NOTE_LIMIT = 320
 
 def final_command(prompt_path: str, triple: tuple, backend: str = "") -> list[str]:
     """The argv for one round. Goose reads the prompt from a file exactly as
@@ -1036,6 +1037,21 @@ def final_phase(status_path: str) -> dict:
     """The batch's current final-review phase, or {} before one starts."""
     rounds = final_rounds(status_path)
     return rounds[-1] if rounds else {}
+
+
+def final_outcome_rows(task: "LandingTask") -> str:
+    """Render bounded terminal evidence for a recovery review prompt."""
+    events = parse_status(task.status_path)
+    rows = []
+    for stop in task.stops:
+        event = events.get(stop.key, {})
+        state = str(event.get("state", ""))
+        if state not in TERMINAL_PR_STATES:
+            continue
+        note = str(event.get("note", "no reason given")).strip()
+        note = note[:FINAL_OUTCOME_NOTE_LIMIT] or "no reason given"
+        rows.append(f"- {stop.key} — {state}: {json.dumps(note)}")
+    return "\n".join(rows)
 
 
 def report_final(
@@ -1112,6 +1128,11 @@ def final_prompt(
     reporter = f"{shlex.quote(sys.executable)} {shlex.quote(os.path.abspath(__file__))}"
     status = shlex.quote(task.status_path)
     rows = "\n".join(f"- {stop.key} — {stop.title}" for stop in task.stops)
+    outcomes = final_outcome_rows(task)
+    recovery = any(
+        event.get("state") in ("blocked", "failed")
+        for event in parse_status(task.status_path).values()
+    )
     _, model, _effort = triple
     reporting = (
         f"{reporter} report --status {status} final --round {round_number} "
@@ -1180,9 +1201,21 @@ Report the round with the head you started from and the head you left:
 
 Use phase `fixing`. Then stop — a fresh reviewer reads your work, not you.
 """
+    outcome_context = (
+        f"""This batch completed with terminal landing outcomes. Your review is
+one consolidated recovery pass: determine whether an in-scope repair is
+needed, but never retry landing, approve, or merge.
+
+Terminal landing outcomes needing maintainer recovery:
+{outcomes or "(no terminal outcome evidence recorded)"}
+"""
+        if recovery
+        else "This batch has landed; your job is to decide whether it is actually good.\n"
+    )
     return f"""You are the Bluefin final batch reviewer, round {round_number} of
-{FINAL_ROUND_LIMIT}, running as {model}. This batch has landed; your job is
-to decide whether it is actually good.
+{FINAL_ROUND_LIMIT}, running as {model}.
+
+{outcome_context}
 
 {rows}
 

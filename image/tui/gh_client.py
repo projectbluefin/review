@@ -270,14 +270,18 @@ def _strip_included_headers(result: subprocess.CompletedProcess) -> subprocess.C
     kept: list[str] = []
     i = 0
     while i < len(lines):
-        if lines[i].startswith("HTTP/"):
+        line = lines[i]
+        if line.startswith(("[HTTP/", ",HTTP/")):
+            kept.append(line[0])
+            line = line[1:]
+        if line.startswith("HTTP/"):
             i += 1
             while i < len(lines) and lines[i].strip():
                 i += 1
             if i < len(lines):
                 i += 1
             continue
-        kept.append(lines[i])
+        kept.append(line)
         i += 1
     return subprocess.CompletedProcess(result.args, result.returncode, "".join(kept), result.stderr)
 

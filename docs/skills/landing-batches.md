@@ -1,7 +1,7 @@
 ---
 name: landing-batches
-version: "1.0"
-last_updated: 2026-09-06
+version: "1.1"
+last_updated: 2026-09-08
 id: landing-batches
 one_line_purpose: Manage multi-PR landing batches and automated fix-and-land agents.
 entry_point: docs/skills/landing-batches.md
@@ -101,6 +101,21 @@ each other's branch state. Reviews are not lane-bound; they are admitted by the
 process-wide scheduler in
 [`review-scheduler.md`](review-scheduler.md).
 
+## Terminal Recovery
+
+A completed landing never silently arms a retry. Merged rows leave the
+selection. Failed, blocked, unfinished, missing-outcome, and
+`awaiting-stable` rows retain a bounded visible reason but are deselected; a
+maintainer explicitly selects and reconfirms any later retry.
+
+After every confirmed batch reaches terminal PR outcomes, the existing
+final-review lane starts exactly one consolidated recovery review. Its prompt
+names only that confirmed batch and includes its bounded, JSON-quoted terminal
+states and reasons. The reviewer and any fresh fixer may repair only those
+already authorized branches; neither retries landing, approves, merges,
+completes Hive work, or expands the batch. Human retry and merge remain
+separate explicit actions.
+
 ## Common Rationalizations
 
 | Rationalization | Reality |
@@ -111,6 +126,7 @@ process-wide scheduler in
 | "Flash said clean, so escalation is unnecessary." | A false negative reports clean. The verdict of the weakest model cannot be what decides to trust it. |
 | "Sorting unreviewed PRs to the top ensures human review." | Sorting is prioritisation. Enforcement is a landing gate reading live reviewer evidence. |
 | "Track in-flight PRs in a set." | Every early return leaks a key. Use one durable run record per pull request with an explicit terminal state. |
+| "Keep a failed row selected so the next slay can retry it." | That replays a failed mutation without confirmation. Keep its reason visible and require an explicit new selection. |
 
 ## Red Flags
 

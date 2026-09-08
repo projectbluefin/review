@@ -100,7 +100,7 @@ def discover_all() -> list[HarnessOption]:
     goose = GooseHarness()
     return [
         HarnessOption(goose, Discovery(
-            "goose", "ready", "ready", "ready", "gemini-3.8-flash", "high", goose.availability,
+            "goose", "ready", "ready", "ready", "gemini-3.8-flash", "max", goose.availability,
         )),
         HarnessOption(CodexHarness(), discover()),
     ]
@@ -110,7 +110,7 @@ def choose_option(repository: str, preferences: dict[str, Preference],
                   options: list[HarnessOption], configured: Preference | None = None) -> HarnessOption | None:
     by_id = {option.harness.branding.harness_id: option for option in options}
     candidates = [preferences.get(repository), preferences.get("*"), configured,
-                  Preference("codex", "gemini-3.8-flash", "high")]
+                  Preference("codex", "gemini-3.8-flash", "max")]
     for candidate in candidates[:2]:
         option = by_id.get(candidate.harness_id) if candidate else None
         if option:
