@@ -15,7 +15,7 @@ pin="$(sed -n 's/^ARG HIVE_COMMIT=\([0-9a-f]\{40\}\)$/\1/p' image/Containerfile)
 
 hive_source() {
   curl --fail --location --silent --show-error \
-    "https://raw.githubusercontent.com/kubestellar/hive/${pin}/$1"
+    "https://raw.githubusercontent.com/hivecommons/hive/${pin}/$1"
 }
 
 agent="$(hive_source bin/contributor-agent.sh)"

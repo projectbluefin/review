@@ -1,7 +1,7 @@
 ---
 name: cluster-workers
-version: "1.0"
-last_updated: 2026-09-06
+version: "1.1"
+last_updated: 2026-09-07
 id: cluster-workers
 one_line_purpose: Scale out review contributor workers across Kubernetes clusters.
 entry_point: docs/skills/cluster-workers.md
@@ -55,6 +55,17 @@ just review-doctor                  # check cluster deployment health
    image pulls take longer, a warning is printed and the launcher continues.
 6. **Teardown:** Cluster workers continue running after the interactive
    dashboard exits. Stop them explicitly with `just review-stop cluster`.
+
+## Dashboard Session Boundary
+
+Cluster contributor scale-out and a Kubernetes dashboard session are separate
+operations. `REVIEW_RUNTIME=k8s just review-queue` starts one restricted,
+foreground dashboard Pod using the dedicated `review-queue-state` claim; it
+does not create, scale, or stop `review-contributor`. Apply
+`deploy/review-queue-state.yaml` before selecting that dashboard runtime.
+The session Pod and its credential Secret are removed when the terminal exits.
+See [`launcher.md`](launcher.md) for the runtime selection and credential
+boundary.
 
 ## Common Rationalizations
 

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-07",
+  "generated_at": "2026-09-08",
   "schema_version": "1.0",
   "skills": [
     {
@@ -17,8 +17,8 @@
         "turbo"
       ],
       "description": "Manages cluster contributor workers in bluefin-system, secret synchronization, and turbo-review orchestration. Use when scaling workers or operating review-contributor on Kubernetes.",
-      "version": "1.0",
-      "last_updated": "2026-09-06",
+      "version": "1.1",
+      "last_updated": "2026-09-07",
       "doc_type": "procedure"
     },
     {
@@ -210,8 +210,8 @@
         "automerge"
       ],
       "description": "Manages batch landings, multi-repo lane partitioning, fix-and-land agents, and landing status persistence. Use when modifying batch execution or landing.py.",
-      "version": "1.0",
-      "last_updated": "2026-09-06",
+      "version": "1.1",
+      "last_updated": "2026-09-08",
       "doc_type": "procedure"
     },
     {
@@ -225,11 +225,12 @@
         "just",
         "launcher",
         "podman",
-        "container"
+        "container",
+        "kubernetes"
       ],
       "description": "Maintains the five review recipes and their credential boundaries. Use when editing justfile.",
-      "version": "3.5",
-      "last_updated": "2026-09-06",
+      "version": "3.8",
+      "last_updated": "2026-09-08",
       "doc_type": "runbook"
     },
     {
@@ -304,8 +305,8 @@
         "maintainer"
       ],
       "description": "Maintains image/tui/bluefin_review_tui.py: the mutation gate, the queue view, and its Textual patterns. Use when editing the dashboard or its pilot tests.",
-      "version": "2.6",
-      "last_updated": "2026-09-07",
+      "version": "2.7",
+      "last_updated": "2026-09-08",
       "doc_type": "runbook"
     },
     {
@@ -336,15 +337,35 @@
       "status": "active",
       "tags": [
         "monitoring",
-        "container",
         "review",
         "landings",
-        "queue"
+        "queue",
+        "kubernetes",
+        "countme"
       ],
       "description": "Use when observing, diagnosing, or monitoring running review-queue or review-container instances, landing batches, or agent process health.",
+      "version": "1.5",
+      "last_updated": "2026-09-08",
+      "doc_type": "procedure"
+    },
+    {
+      "id": "review-scheduler",
+      "name": "review-scheduler",
+      "one_line_purpose": "Admit review work process-wide, batch transport, and never batch judgement.",
+      "entry_point": "docs/skills/review-scheduler.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "scheduler",
+        "capacity",
+        "throughput",
+        "rate-limit",
+        "worktree"
+      ],
+      "description": "Owns process-wide review admission, capacity measurement, subprocess deadlines, dependency circuit breakers, and repository transport reuse. Use when changing review_engine.py, capacity.py, or anything that dispatches reviews.",
       "version": "1.0",
       "last_updated": "2026-09-07",
-      "doc_type": "procedure"
+      "doc_type": "runbook"
     },
     {
       "id": "skill-improvement",
@@ -367,7 +388,7 @@
     {
       "id": "upstream-hive",
       "name": "upstream-hive",
-      "one_line_purpose": "File and follow up on kubestellar/hive issues as an exemplary downstream.",
+      "one_line_purpose": "File and follow up on hivecommons/hive issues as an exemplary downstream.",
       "entry_point": "docs/skills/upstream-hive.md",
       "category": "ci-ops",
       "status": "active",
@@ -378,7 +399,7 @@
         "evidence",
         "contribution"
       ],
-      "description": "Defines how this repository reports evidence to kubestellar/hive and follows up on filed issues. Use before opening, commenting on, or responding to an upstream Hive issue or pull request.",
+      "description": "Defines how this repository reports evidence to hivecommons/hive and follows up on filed issues. Use before opening, commenting on, or responding to an upstream Hive issue or pull request.",
       "version": "1.3",
       "last_updated": "2026-08-07",
       "doc_type": "policy"

@@ -18,10 +18,7 @@ from re_review import (  # noqa: E402
     Region,
     classify_head_delta,
 )
-from review_evidence_manifest import (  # noqa: E402
-    ReviewEvidenceManifest,
-    ReviewRequest,
-)
+from review_evidence_manifest import ReviewRequest  # noqa: E402
 
 
 H0 = "0" * 40
@@ -29,14 +26,14 @@ H1 = "1" * 40
 BASE = "2" * 40
 
 
-def manifest(*, base_sha: str = BASE, head_sha: str = H1) -> ReviewEvidenceManifest:
-    return ReviewEvidenceManifest(
-        ReviewRequest("octo", "sample", 17, base_sha, head_sha, "actor", "tenant", generated_at="now")
+def request(*, base_sha: str = BASE, head_sha: str = H1) -> ReviewRequest:
+    return ReviewRequest(
+        "octo", "sample", 17, base_sha, head_sha, "actor", "tenant", generated_at="now"
     )
 
 
 class ReReviewContractTests(unittest.TestCase):
-    def test_current_h1_manifest_must_bind_both_exact_heads(self) -> None:
+    def test_current_h1_request_must_bind_both_exact_heads(self) -> None:
         for kwargs in (
             {"head_sha": "3" * 40},
             {"base_sha": "4" * 40},
@@ -49,7 +46,7 @@ class ReReviewContractTests(unittest.TestCase):
                             current_head_sha=H1,
                             reviewed_merge_base_sha=BASE,
                             current_merge_base_sha=BASE,
-                            current_h1_manifest=manifest(**kwargs),
+                            current_h1_request=request(**kwargs),
                         )
                     )
 
@@ -61,14 +58,14 @@ class ReReviewContractTests(unittest.TestCase):
                 reviewed_merge_base_sha=BASE,
                 current_merge_base_sha=BASE,
                 prior_findings=(PriorFinding("old", FindingEvidence("old.py", 7, 7)),),
-                current_h1_manifest=manifest(),
+                current_h1_request=request(),
             )
         )
 
         self.assertEqual(result.findings[0].disposition, FindingDisposition.INVALIDATED_UNMAPPABLE)
 
     def test_delta_binds_exact_heads_and_classifies_explicit_evidence(self) -> None:
-        current = manifest()
+        current = request()
         result = classify_head_delta(
             DeltaInput(
                 reviewed_head_sha=H0,
@@ -88,12 +85,12 @@ class ReReviewContractTests(unittest.TestCase):
                     FindingEvidence("same.py", 8, 8, stale=True),
                 ),
                 newly_supported=(H1Evidence("new-proof", "new.py", 3),),
-                current_h1_manifest=current,
+                current_h1_request=current,
             )
         )
 
         self.assertEqual((result.reviewed_head_sha, result.current_head_sha), (H0, H1))
-        self.assertEqual(result.current_h1_manifest, current)
+        self.assertEqual(result.current_h1_request, current)
         self.assertEqual(
             {item.finding_id: item.disposition for item in result.findings},
             {
@@ -120,11 +117,11 @@ class ReReviewContractTests(unittest.TestCase):
                     current_head_sha=H1,
                     reviewed_merge_base_sha=BASE,
                     current_merge_base_sha=BASE,
-                    current_h1_manifest=manifest(),
+                    current_h1_request=request(),
                 )
                 values.update(changes)
                 if "current_merge_base_sha" in changes:
-                    values["current_h1_manifest"] = manifest(
+                    values["current_h1_request"] = request(
                         base_sha=changes["current_merge_base_sha"]
                     )
                 result = classify_head_delta(DeltaInput(**values))
@@ -138,7 +135,7 @@ class ReReviewContractTests(unittest.TestCase):
                 current_head_sha=H1,
                 reviewed_merge_base_sha=BASE,
                 current_merge_base_sha=BASE,
-                current_h1_manifest=manifest(),
+                current_h1_request=request(),
                 prior_authority={
                     "approval": "APPROVED",
                     "clean_verdict": True,

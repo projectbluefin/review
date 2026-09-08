@@ -2,6 +2,6 @@
   "name": "review-relay-runtime",
   "private": true,
   "dependencies": {
-    "ws": "8.21.1"
+    "ws": "8.21.3"
   }
 }

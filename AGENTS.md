@@ -149,7 +149,7 @@ Verify a utility's absence by executing it at the pinned digest before
 concluding the base lacks it. See
 [`docs/skills/image-build.md`](docs/skills/image-build.md).
 
-Reporting downstream evidence upstream to `kubestellar/hive` is expected work,
+Reporting downstream evidence upstream to `hivecommons/hive` is expected work,
 and filed issues are followed up rather than abandoned. Report observations,
 reproductions, and options; upstream owns the design decision and the triage
 labels. Never add a local workaround for an accepted upstream gap. See
@@ -250,7 +250,7 @@ container; CI invokes it explicitly.
 ## References
 
 - Hive protocol, contributor runtime, and upstream issue reporting:
-  `kubestellar/hive` (default branch `v4`, v2 is retired; no contributing guide or issue
+  `hivecommons/hive` (default branch `v4`, v2 is retired; no contributing guide or issue
   templates, DCO sign-off required on pull requests).
 - Organization skills and factory rules: `projectbluefin/common`.
 - External API details: Context7 documentation. Context7 reaches agents both

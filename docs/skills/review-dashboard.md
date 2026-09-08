@@ -1,7 +1,7 @@
 ---
 name: review-dashboard
-version: "2.6"
-last_updated: 2026-09-07
+version: "2.7"
+last_updated: 2026-09-08
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
 entry_point: docs/skills/review-dashboard.md
@@ -29,6 +29,11 @@ The dashboard distinguishes ready, empty, missing, inaccessible, malformed,
 and failed sources; `R` rereads whichever source is active. The flag form
 `--repo` narrows the org-wide queue to one repository.
 
+The dashboard retains its last good live GitHub queue and read-only Hive view. Receipt-verified
+clean reviews, successful mutations or batch queues, and terminal landing completion request
+reconciliation. Requests coalesce with one bounded follow-up; there is no polling or Hive
+assignment/completion mutation. `R` is the explicit-read control; failed reads retain visibly aged data.
+
 ## When to Use
 
 Load this before editing `image/tui/bluefin_review_tui.py`,
@@ -44,12 +49,11 @@ Do not use this for the launcher ([`launcher.md`](launcher.md)), the container i
 
 `image/tui/semantic_view.py` defines the pure semantic contract for the dashboard.
 `ActionID` separates verdict selection, review submission, PR mutations, and navigation.
-`command_registry()` projects live bindings (`j/k`, `g/G`, `Ctrl-d/Ctrl-u`, `h/l`, Enter,
+`COMMANDS` projects live bindings (`j/k`, `g/G`, `Ctrl-d/Ctrl-u`, `h/l`, Enter,
 Escape, `q`, `Ctrl-C`, `/`, `r`, `y`, `Ctrl-p`, `:`, `?`, `Tab`/`I`).
 
 `QueueRow` and `DecisionCard` bind head SHA, CI rollup, mergeability, and findings.
-The right-hand panes scroll evidence (`h`/`l`), `e` opens decisions, `r` toggles raw
-transcripts, and `[u]` updates clean branches.
+Right-hand panes scroll evidence (`h`/`l`), `e` opens decisions, and `[u]` updates clean branches.
 
 ## Core Process
 
@@ -80,9 +84,13 @@ transcripts, and `[u]` updates clean branches.
 7. **Completed reviews cross the `ReviewResult` contract.** Transcripts without
    valid JSONL findings and terminal events are `unparsable`, never clean. Keep
    decision cards concise and bounded raw evidence on `e`.
-8. **Keep the acting surface explicit.** The shipped keys cover review,
-   merge, branch updates, rejection, handoff, docs, and dupe
-   cleanup; label and priority mutation are not part of the dashboard.
+8. **Keep the acting surface and activity explicit.** The shipped keys cover
+   review, merge, branch updates, rejection, handoff, docs, and dupe cleanup;
+   label and priority mutation are excluded. Above the queue, `AGENT ACTIVITY`
+   shows active parent reviews, Check workers, landing agents, queued work,
+   bounded repository-qualified rows, and freshness. Hive rows are read-only,
+   unavailable when malformed, and never inferred from a name, prompt, title,
+   or task identifier.
 
 ## Textual Patterns
 
@@ -92,11 +100,9 @@ Verified against Context7 `/textualize/textual`:
 - **Theme Variables:** Use theme pairs like `[$text-success on $success-muted]` for status bars.
 - **Thread Safety:** Never touch the DOM or call `query_one()` from worker threads. Dispatch updates through `self.call_from_thread(self.method, data)`.
 
-**Diffs get Pygments through Rich**: `Syntax(text, "diff", theme="ansi_dark")`.
-`ansi_dark` resolves to the terminal's own palette instead of assuming a
-background colour. `DiffScreen` keeps GitHub's complete response in bounded
-pages; `[` and `]` navigate them, while loading, success, and fetch error are
-distinct states. `[o]` is only an optional browser escape hatch.
+**Diffs get Pygments through Rich**: `Syntax(text, "diff", theme="ansi_dark")`. `ansi_dark` resolves to the terminal's own palette instead of assuming a background colour. `DiffScreen` keeps GitHub's complete response in bounded pages; `[` and `]` navigate them, while loading, success, and fetch error are distinct states. `[o]` is only an optional browser escape hatch.
+
+**Conversations get Textual's `Markdown` widget**. `CommentsScreen` renders an issue or pull request's opening post, comments, and reviews as one document ordered by timestamp across both kinds. A review with no body is dropped unless its state is `APPROVED` or `CHANGES_REQUESTED`, where the state *is* the verdict. `[C]` opens it from the queue, for issues too unlike the diff; `[c]` opens it from the review screen. A late refresh is discarded unless it matches the generation that asked for it.
 
 ## Design Rules
 
@@ -135,6 +141,9 @@ distinct states. `[o]` is only an optional browser escape hatch.
   and applies `lgtm`. On a selection, `A` dispatches one landing agent for the
   batch; without a selection `A` no-ops. `w` opens the batch queue. `m` squashes
   now (gated on `push` permission). `L` leaves a review and merges nothing.
+  `$` ("slay") executes the full review weapon pipeline: reviews unreviewed PRs,
+  dispatches automated fix-and-land if findings are detected, and enqueues batch
+  landing if clean.
 - **Issues view and triage:** `Tab` or `I` toggles between the PR and issues
   queues. Highlighting an issue renders its metadata and description in details,
   and recent comments in context. Triage actions: `c` comments via `CommentBody`,
@@ -150,11 +159,9 @@ distinct states. `[o]` is only an optional browser escape hatch.
 
 ## Batch Review and Landing
 
-Batch landings partition across independent repository lanes and execute via background agents. Evidenced review findings enable `[f] fix & land in background`. See [`landing-batches.md`](landing-batches.md) for full batch orchestration, concurrency lanes, state persistence, and reporting.
-The review lane keeps separate `review-batches/` JSONL state. Resolve every exact cache hit before applying local capacity, and trust a receipt only when its full run and check-scope identity matches.
-Review the explicit `base...head` range from a clean isolated worktree. Synchronize cancellation with submission, broker fallback, and cache publication; a cancelled run cannot publish or delete another session's receipt, and cleanup I/O failures remain visible.
-Headroom establishes one batch baseline, captures each route and telemetry snapshot under one lock, routes every non-cached dispatch, and samples aggregate telemetry after the batch.
-On the dashboard, `B` selects or clears every visible row, `Space` toggles the highlighted row and advances, `n` marks an unseen exact head skipped and moves to the next unseen row, and `r` reviews the selection as a batch while retaining its selection on snapshot failure. Queue rows show running and verdict badges. `Enter` on a reviewed row reloads GitHub evidence before rendering cached analysis; CI, mergeability, reviews, and overlap are never restored from the cache.
+Batch landings partition across independent repository lanes and execute via background agents. Evidenced review findings enable `[f] fix & land in background`. See [`landing-batches.md`](landing-batches.md) for the `[$]` state machine, landing gate, concurrency lanes, and state persistence, and [`review-scheduler.md`](review-scheduler.md) for admission, capacity, and transport reuse.
+The review lane keeps separate `review-batches/` JSONL state. Resolve every exact cache hit before applying capacity, and trust a receipt only when its full run and check-scope identity matches. Review the explicit `base...head` range from a clean isolated worktree. Synchronize cancellation with submission and cache publication; a cancelled run cannot publish or delete another session's receipt. Local lanes and the Hive fleet are two separate concurrency displays and are never conflated; see [`review-monitoring.md`](review-monitoring.md).
+On the dashboard, `B` selects or clears every visible row, `Space` toggles the highlighted row and advances, `n` jumps to the next pull request lacking the maintainer's own GitHub review, and `r` reviews the selection as a batch while retaining its selection on snapshot failure. Queue rows show running and verdict badges. `Enter` on a reviewed row reloads GitHub evidence before rendering cached analysis; CI, mergeability, reviews, and overlap are never restored from the cache.
 
 ## Common Rationalizations
 
@@ -175,6 +182,8 @@ On the dashboard, `B` selects or clears every visible row, `Space` toggles the h
 - A new mutating verb passed to the read-only `gh()` helper.
 - A default view that filters the queue without saying so.
 - A feature added with only a `tests/dashboard-contract.sh` grep behind it.
+- Remote-sourced state rendered without its age.
+- A core-loop path that gates on `hive_api_base()` being set.
 
 ## Exact-Head Re-Review
 
@@ -194,6 +203,5 @@ pre-commit run --all-files
 - [ ] Every new mutation runs through `mutate_all()` and shows its commands.
 - [ ] Multi-command actions are one gate, ordered so the first failure is harmless.
 - [ ] Failures mark the row and keep the stop selected.
-- [ ] All GitHub- and agent-sourced text passes through `escape()`.
-- [ ] No DOM access inside a thread worker.
+- [ ] All GitHub- and agent-sourced text passes through `escape()`. No thread DOM access.
 - [ ] The pilot presses the key and asserts the result.

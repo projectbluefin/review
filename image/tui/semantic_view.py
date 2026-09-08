@@ -15,116 +15,6 @@ _SHA = re.compile(r"^[0-9a-f]{40}$")
 _HEAD_EVIDENCE = _SHA
 
 
-class ActionID(str, Enum):
-    START_REVIEW = "start-review"
-    STEER_REVIEW = "steer-review"
-    STOP_REVIEW = "stop-review"
-    CHOOSE_REVIEW_VERDICT = "choose-review-verdict"
-    APPROVE_REVIEW = "approve-review"
-    REQUEST_CHANGES = "request-changes"
-    COMMENT_REVIEW = "comment-review"
-    SUBMIT_REVIEW = "submit-review"
-    APPROVE_AND_QUEUE = "approve-and-queue"
-    MERGE_NOW = "merge-now"
-    UPDATE_BRANCH = "update-branch"
-    CLOSE_PULL_REQUEST = "close-pull-request"
-    ADD_PULL_REQUEST_COMMENT = "add-pull-request-comment"
-    RESOLVE_DUPLICATES = "resolve-duplicates"
-    VIEW_DIFF = "view-diff"
-    TOGGLE_EVIDENCE = "toggle-evidence"
-    TOGGLE_VIEW = "toggle-view"
-    BATCH_SELECT = "batch-select"
-    FILTER_QUEUE = "filter-queue"
-    REFRESH = "refresh"
-    COPY_REVIEW_CONTEXT = "copy-review-context"
-    OPEN_BROWSER = "open-browser"
-    ASK_HIVE = "ask-hive"
-    SHOW_DOCS_UPDATE_TASK = "show-docs-update-task"
-    NAVIGATE_UP = "navigate-up"
-    NAVIGATE_DOWN = "navigate-down"
-    NAVIGATE_FIRST = "navigate-first"
-    NAVIGATE_LAST = "navigate-last"
-    NAVIGATE_PAGE_UP = "navigate-page-up"
-    NAVIGATE_PAGE_DOWN = "navigate-page-down"
-    PANE_NEXT = "pane-next"
-    PANE_PREVIOUS = "pane-previous"
-    BACK = "back"
-    HELP = "help"
-    OPEN_COMMAND_PALETTE = "open-command-palette"
-    SWITCH_HARNESS = "switch-harness"
-    PREPARE_HARNESS = "prepare-harness"
-    SIGN_IN_HARNESS = "sign-in-harness"
-    INSTALL_HARNESS = "install-harness"
-    RETRY_HARNESS_DETECTION = "retry-harness-detection"
-    HARNESS_DIAGNOSTICS = "harness-diagnostics"
-    GENERATE_BODY = "generate-body"
-    EDIT_BODY = "edit-body"
-    PREVIEW_BODY = "preview-body"
-    CLOSE_LAYER = "close-layer"
-    QUIT = "quit"
-
-
-@dataclass(frozen=True)
-class ActionSpec:
-    label: str
-    mutating: bool = False
-    confirmation_required: bool = False
-    ordinary_journey: bool = True
-    suspended_in_editor: bool = False
-
-
-_ACTION_SPECS = (
-    (ActionID.START_REVIEW, ActionSpec("Start review")),
-    (ActionID.STEER_REVIEW, ActionSpec("Steer review")),
-    (ActionID.STOP_REVIEW, ActionSpec("Stop review")),
-    (ActionID.CHOOSE_REVIEW_VERDICT, ActionSpec("Choose review verdict")),
-    (ActionID.APPROVE_REVIEW, ActionSpec("Approve review")),
-    (ActionID.REQUEST_CHANGES, ActionSpec("Request changes")),
-    (ActionID.COMMENT_REVIEW, ActionSpec("Comment on review")),
-    (ActionID.SUBMIT_REVIEW, ActionSpec("Submit review", True, True)),
-    (ActionID.APPROVE_AND_QUEUE, ActionSpec("Approve and queue", True, True)),
-    (ActionID.MERGE_NOW, ActionSpec("Merge now", True, True)),
-    (ActionID.UPDATE_BRANCH, ActionSpec("Update branch", True, True)),
-    (ActionID.CLOSE_PULL_REQUEST, ActionSpec("Close pull request", True, True)),
-    (ActionID.ADD_PULL_REQUEST_COMMENT, ActionSpec("Add pull request comment", True, True)),
-    (ActionID.RESOLVE_DUPLICATES, ActionSpec("Resolve duplicates", True, True)),
-    (ActionID.VIEW_DIFF, ActionSpec("View diff")),
-    (ActionID.TOGGLE_EVIDENCE, ActionSpec("Toggle evidence")),
-    (ActionID.TOGGLE_VIEW, ActionSpec("Toggle view (PRs / Issues)", mutating=False)),
-    (ActionID.BATCH_SELECT, ActionSpec("Batch select")),
-    (ActionID.FILTER_QUEUE, ActionSpec("Filter queue")),
-    (ActionID.REFRESH, ActionSpec("Refresh")),
-    (ActionID.COPY_REVIEW_CONTEXT, ActionSpec("Copy review context")),
-    (ActionID.OPEN_BROWSER, ActionSpec("Open in browser", ordinary_journey=False)),
-    (ActionID.ASK_HIVE, ActionSpec("Ask Hive")),
-    (ActionID.SHOW_DOCS_UPDATE_TASK, ActionSpec("Show docs update task")),
-    (ActionID.NAVIGATE_UP, ActionSpec("Navigate up", suspended_in_editor=True)),
-    (ActionID.NAVIGATE_DOWN, ActionSpec("Navigate down", suspended_in_editor=True)),
-    (ActionID.NAVIGATE_FIRST, ActionSpec("Navigate first", suspended_in_editor=True)),
-    (ActionID.NAVIGATE_LAST, ActionSpec("Navigate last", suspended_in_editor=True)),
-    (ActionID.NAVIGATE_PAGE_UP, ActionSpec("Navigate page up", suspended_in_editor=True)),
-    (ActionID.NAVIGATE_PAGE_DOWN, ActionSpec("Navigate page down", suspended_in_editor=True)),
-    (ActionID.PANE_NEXT, ActionSpec("Focus next pane", suspended_in_editor=True)),
-    (ActionID.PANE_PREVIOUS, ActionSpec("Focus previous pane", suspended_in_editor=True)),
-    (ActionID.BACK, ActionSpec("Back")),
-    (ActionID.HELP, ActionSpec("Help")),
-    (ActionID.OPEN_COMMAND_PALETTE, ActionSpec("Open command palette")),
-    (ActionID.SWITCH_HARNESS, ActionSpec("Switch harness")),
-    (ActionID.PREPARE_HARNESS, ActionSpec("Prepare harness")),
-    (ActionID.SIGN_IN_HARNESS, ActionSpec("Sign in to harness", confirmation_required=True)),
-    (ActionID.INSTALL_HARNESS, ActionSpec("Install harness", confirmation_required=True)),
-    (ActionID.RETRY_HARNESS_DETECTION, ActionSpec("Retry harness detection")),
-    (ActionID.HARNESS_DIAGNOSTICS, ActionSpec("Harness diagnostics")),
-    (ActionID.GENERATE_BODY, ActionSpec("Generate review body")),
-    (ActionID.EDIT_BODY, ActionSpec("Edit review body")),
-    (ActionID.PREVIEW_BODY, ActionSpec("Preview review body")),
-    (ActionID.CLOSE_LAYER, ActionSpec("Close")),
-    (ActionID.QUIT, ActionSpec("Quit")),
-)
-
-ACTIONS: Mapping[ActionID, ActionSpec] = MappingProxyType(dict(_ACTION_SPECS))
-
-
 class DecisionState(str, Enum):
     READY = "ready"
     RUNNING = "running"
@@ -149,37 +39,6 @@ _STALE_FRESHNESS = SemanticStatus("stale", "STALE")
 _UNKNOWN_MERGEABILITY = SemanticStatus("unknown", "MERGEABILITY UNKNOWN")
 _UNKNOWN_CI = SemanticStatus("unknown", "CI UNKNOWN")
 _UNKNOWN_REVIEW = SemanticStatus("unknown", "REVIEW UNKNOWN")
-
-
-@dataclass(frozen=True)
-class ReviewStateView:
-    state: DecisionState
-    label: str
-
-
-@dataclass(frozen=True)
-class QueueRow:
-    repository: str
-    number: int
-    title: str
-    author: str
-    exact_head: str | None
-    mergeability: SemanticStatus
-    ci: SemanticStatus
-    review: SemanticStatus
-    primary_action: ActionID | None
-    tldr: str = ""
-    reviewed_head: str | None = None
-    freshness: SemanticStatus = _UNKNOWN_FRESHNESS
-    available_actions: tuple[ActionID, ...] = ()
-
-    @property
-    def identity(self) -> str:
-        return f"{self.repository}#{self.number}"
-
-    @property
-    def current_head(self) -> str | None:
-        return self.exact_head
 
 
 @dataclass(frozen=True)
@@ -233,7 +92,6 @@ class DecisionCard:
     ci: SemanticStatus = _UNKNOWN_CI
     mergeability: SemanticStatus = _UNKNOWN_MERGEABILITY
     review: SemanticStatus = _UNKNOWN_REVIEW
-    available_actions: tuple[ActionID, ...] = ()
     duplicate_count: int = 0
     shared_file_count: int = 0
     merge_state: str = "?"
@@ -265,15 +123,6 @@ _REVIEW = {
     "changes_requested": SemanticStatus("changes_requested", "CHANGES REQUESTED"),
     "review_required": SemanticStatus("review_required", "REVIEW REQUIRED"),
 }
-_PRIMARY_ACTION = {
-    "review": ActionID.START_REVIEW,
-    "approve": ActionID.CHOOSE_REVIEW_VERDICT,
-    "request-changes": ActionID.REQUEST_CHANGES,
-    "comment": ActionID.COMMENT_REVIEW,
-    "queue": ActionID.APPROVE_AND_QUEUE,
-    "merge": ActionID.MERGE_NOW,
-    "update": ActionID.UPDATE_BRANCH,
-}
 _DECISION_STATES = {
     "complete": DecisionState.CLEAN,
     "findings": DecisionState.FINDINGS,
@@ -281,8 +130,6 @@ _DECISION_STATES = {
     "failed": DecisionState.FAILED,
     "unparsable": DecisionState.UNPARSABLE,
 }
-
-_STATE_LABELS = {state: state.value.upper() for state in DecisionState}
 
 
 def _exact_head(value: Any) -> str | None:
@@ -313,20 +160,6 @@ def _status(
     statuses: Mapping[str, SemanticStatus], value: Any, unknown: SemanticStatus
 ) -> SemanticStatus:
     return statuses.get(_key(value), unknown)
-
-
-def _available_actions(value: Any) -> tuple[ActionID, ...]:
-    if not isinstance(value, (list, tuple)):
-        return ()
-    actions: list[ActionID] = []
-    for raw in value:
-        try:
-            action = raw if isinstance(raw, ActionID) else ActionID(raw)
-        except (TypeError, ValueError):
-            continue
-        if action not in actions:
-            actions.append(action)
-    return tuple(actions)
 
 
 def _heads_agree(first: str, second: str) -> bool:
@@ -372,62 +205,6 @@ def _bind_head(
 
 def _bound_head(result: ReviewResult, exact_head: Any) -> str | None:
     return _bind_head(result, exact_head)[0]
-
-
-def build_review_state(value: str | DecisionState) -> ReviewStateView:
-    if isinstance(value, DecisionState):
-        state = value
-    elif isinstance(value, str):
-        try:
-            state = DecisionState(value.lower())
-        except ValueError:
-            state = DecisionState.UNPARSABLE
-    else:
-        state = DecisionState.UNPARSABLE
-    return ReviewStateView(state, _STATE_LABELS[state])
-
-
-def build_queue_row(snapshot: Mapping[str, Any]) -> QueueRow:
-    """Build immutable queue meaning from an existing queue snapshot."""
-
-    repository = snapshot.get("repository")
-    number = snapshot.get("number")
-    title = snapshot.get("title")
-    author = snapshot.get("author")
-    if (
-        not isinstance(repository, str)
-        or not repository
-        or not isinstance(number, int)
-        or isinstance(number, bool)
-        or number < 1
-        or not isinstance(title, str)
-        or not isinstance(author, str)
-    ):
-        raise ValueError("queue identity fields are invalid")
-    current_head = _exact_head(snapshot.get("head_sha"))
-    reviewed_head = _reviewed_head(
-        snapshot.get("reviewed_head_sha") or snapshot.get("reviewed_head")
-    )
-    mergeability = _status(_MERGEABILITY, snapshot.get("mergeable_state"), _UNKNOWN_MERGEABILITY)
-    ci = _status(_CI, snapshot.get("check_state"), _UNKNOWN_CI)
-    review = _status(_REVIEW, snapshot.get("review_state"), _UNKNOWN_REVIEW)
-    return QueueRow(
-        repository,
-        number,
-        title,
-        author,
-        current_head,
-        mergeability,
-        ci,
-        review,
-        _PRIMARY_ACTION.get(snapshot.get("recommended_action")),
-        tldr=_text(snapshot.get("tldr") or snapshot.get("summary")),
-        reviewed_head=reviewed_head,
-        freshness=_head_freshness(
-            reviewed_head, current_head, snapshot.get("freshness")
-        ),
-        available_actions=_available_actions(snapshot.get("available_actions")),
-    )
 
 
 def build_decision_card(result: ReviewResult, *, exact_head: str) -> DecisionCard:
@@ -529,7 +306,6 @@ def build_decision_card(result: ReviewResult, *, exact_head: str) -> DecisionCar
         ci=ci,
         mergeability=mergeability,
         review=review,
-        available_actions=_available_actions(live.get("available_actions")),
         duplicate_count=len(duplicates),
         shared_file_count=len(shared_files),
         merge_state=_text(live.get("merge_state") or live.get("mergeStateStatus")) or "?",
@@ -537,19 +313,12 @@ def build_decision_card(result: ReviewResult, *, exact_head: str) -> DecisionCar
 
 
 __all__ = [
-    "ACTIONS",
-    "ActionID",
-    "ActionSpec",
     "DecisionCard",
     "DecisionSummary",
     "DecisionState",
     "FindingView",
     "ProvenanceView",
-    "QueueRow",
-    "ReviewStateView",
     "SemanticStatus",
     "VerificationView",
     "build_decision_card",
-    "build_queue_row",
-    "build_review_state",
 ]

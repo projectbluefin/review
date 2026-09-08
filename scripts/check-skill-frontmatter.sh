@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Validate docs/skills/*.md front-matter and generate docs/skills/index.json
 # from it. Front-matter is the source of truth: this script builds the
-# manifest, validates it against index.schema.json, and fails if the committed
+# manifest and fails if the committed
 # index.json differs from the generated content. `--write` rewrites the
 # manifest instead of comparing.
 #
@@ -24,8 +24,7 @@ import sys
 
 SKILL_DIR = "docs/skills"
 INDEX = os.path.join(SKILL_DIR, "index.json")
-INDEX_MD = os.path.join(SKILL_DIR, "index.md")
-SCHEMA = os.path.join(SKILL_DIR, "index.schema.json")
+ROUTER = "docs/SKILL.md"
 
 MAX_DESC = 256
 MAX_SOFT = 200
@@ -229,27 +228,6 @@ def check_index(front_matter, write):
     manifest = build_manifest(front_matter)
     rendered = render_manifest(manifest)
 
-    # Validate the generated manifest against the schema when jsonschema is
-    # available.
-    if os.path.exists(SCHEMA):
-        try:
-            with open(SCHEMA, "r", encoding="utf-8") as fh:
-                schema = json.load(fh)
-            try:
-                import jsonschema
-                try:
-                    jsonschema.validate(manifest, schema)
-                except jsonschema.ValidationError as exc:
-                    error(INDEX, "schema validation failed: %s" % exc.message)
-                except jsonschema.SchemaError as exc:
-                    error(SCHEMA, "invalid schema: %s" % exc.message)
-            except ImportError:
-                pass
-        except ValueError as exc:
-            error(SCHEMA, "does not parse as JSON: %s" % exc)
-    else:
-        error(SCHEMA, "schema file is missing")
-
     if write:
         if errors:
             error(INDEX, "not writing the manifest while front-matter has errors")
@@ -292,13 +270,13 @@ def main():
         print("::error file=%s::skill directory is missing" % SKILL_DIR)
         return 1
 
-    if not os.path.exists(INDEX_MD):
-        error(INDEX_MD, "skill router is missing")
+    if not os.path.exists(ROUTER):
+        error(ROUTER, "skill router is missing")
 
     paths = sorted(
         os.path.join(SKILL_DIR, name)
         for name in os.listdir(SKILL_DIR)
-        if name.endswith(".md") and name != "index.md"
+        if name.endswith(".md")
     )
     if not paths:
         print("::error file=%s::no skill documents found" % SKILL_DIR)

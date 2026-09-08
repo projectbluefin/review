@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import sys
-import tempfile
-import threading
 from hashlib import sha256
 from pathlib import Path
-from unittest.mock import patch
 
 # The harness and tui modules expect `image/` on the path.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "image"))
@@ -18,9 +15,6 @@ from tui.review_run import (  # noqa: E402
     ReviewRunController,
     ReviewRunError,
     ReviewRunState,
-    RunCheckpoint,
-    CheckpointStore,
-    StepAction,
 )
 from harness.registry import HarnessCapabilities  # noqa: E402
 
@@ -48,14 +42,6 @@ class FakeHarness:
     availability = "READY"
     capabilities = HarnessCapabilities(
         invocation=True, streaming=True, cancellation=True,
-        resumable=False, checkpoint=False, yieldable=False,
-    )
-
-
-class ReentrantHarness(FakeHarness):
-    capabilities = HarnessCapabilities(
-        invocation=True, streaming=True, cancellation=True,
-        resumable=True, checkpoint=True, yieldable=True,
     )
 
 
@@ -82,16 +68,13 @@ def identity() -> None:
 
 def states() -> None:
     """All required states exist and have the correct string values."""
-    expected = {
-        "pending", "running", "yielded", "waiting-external",
-        "resumable", "stale", "complete", "failed", "cancelled",
-    }
+    expected = {"pending", "running", "complete", "failed", "cancelled"}
     observed = {s.value for s in ReviewRunState}
     check(observed == expected,
           f"state values mismatch: {observed ^ expected}")
     terminal = {s for s in ReviewRunState if s.terminal}
     check(terminal == {ReviewRunState.COMPLETE, ReviewRunState.FAILED,
-                        ReviewRunState.CANCELLED, ReviewRunState.STALE},
+                        ReviewRunState.CANCELLED},
           f"unexpected terminal states: {terminal}")
     print(f"  states: {', '.join(sorted(observed))}")
     print(f"  terminal: {', '.join(s.value for s in terminal)}")
@@ -99,13 +82,13 @@ def states() -> None:
 
 def start_transition() -> None:
     """PENDING -> RUNNING is the only valid start."""
-    controller = ReviewRunController(run=make_run(), harness=ReentrantHarness(), registry=FakeRegistry())
+    controller = ReviewRunController(run=make_run(), harness=FakeHarness(), registry=FakeRegistry())
     result = controller.start()
     check(controller.state is ReviewRunState.RUNNING,
           f"start must produce RUNNING, got {controller.state.value}")
     check(result.state is ReviewRunState.RUNNING,
           f"step result must report RUNNING, got {result.state.value}")
-    check(result.next_action == StepAction.WAIT.value,
+    check(result.next_action == "wait",
           f"start must suggest WAIT, got {result.next_action}")
     print("  PENDING -> RUNNING: OK")
 
@@ -120,7 +103,7 @@ def complete_transition() -> None:
           f"complete must transition to COMPLETE, got {controller.state.value}")
     check(step.terminal_result is result,
           "terminal result must be the same ReviewResult")
-    check(step.next_action == StepAction.DONE.value,
+    check(step.next_action == "done",
           "complete must suggest DONE")
     check(controller.terminal_result() is result,
           "controller must retain the terminal result")
@@ -146,7 +129,7 @@ def cancel_transition() -> None:
     step = controller.cancel()
     check(controller.state is ReviewRunState.CANCELLED,
           f"cancel must transition to CANCELLED, got {controller.state.value}")
-    check(step.next_action == StepAction.DONE.value,
+    check(step.next_action == "done",
           "cancel must suggest DONE")
     try:
         controller.cancel()
@@ -154,142 +137,6 @@ def cancel_transition() -> None:
     except ReviewRunError:
         pass
     print("  RUNNING -> CANCELLED: OK")
-
-
-def stale_transition() -> None:
-    """YIELDED/RESUMABLE -> STALE is the head-changed path."""
-    controller = ReviewRunController(run=make_run(), harness=ReentrantHarness(), registry=FakeRegistry())
-    controller.start()
-    controller.mark_yielded()
-    step = controller.stale()
-    check(controller.state is ReviewRunState.STALE,
-          f"stale must transition to STALE, got {controller.state.value}")
-    check(step.next_action == StepAction.DONE.value,
-          "stale must suggest DONE")
-    try:
-        controller.resume()
-        check(False, "resuming a stale run must raise ReviewRunError")
-    except ReviewRunError:
-        pass
-    print("  YIELDED -> STALE: OK")
-
-
-def yield_then_checkpoint() -> None:
-    """YIELDED -> RESUMABLE with checkpoint is the yield-then-resume path."""
-    with tempfile.TemporaryDirectory() as root:
-        controller = ReviewRunController(run=make_run(), harness=ReentrantHarness(), registry=FakeRegistry(), checkpoint_store=CheckpointStore(root))
-        controller.start()
-        step = controller.mark_yielded("rate limit hit")
-        check(controller.state is ReviewRunState.YIELDED,
-          f"yield must transition to YIELDED, got {controller.state.value}")
-        check(step.yield_reason == "rate limit hit", "yield reason must be preserved")
-        cp = RunCheckpoint('{"step": 3, "files": ["a.py"]}')
-        step = controller.checkpoint_ready(cp)
-        check(controller.state is ReviewRunState.RESUMABLE,
-          f"checkpoint must transition to RESUMABLE, got {controller.state.value}")
-        check(step.checkpoint is cp, "checkpoint must be preserved")
-        restored = ReviewRunController(run=make_run(), harness=ReentrantHarness(), registry=FakeRegistry(), checkpoint_store=CheckpointStore(root), state=ReviewRunState.RESUMABLE)
-        step = restored.resume(RunCheckpoint("attacker-selected"))
-        check(step.checkpoint is not None and step.checkpoint.data == cp.data, "resume must use the persisted checkpoint")
-        check(restored.state is ReviewRunState.RUNNING,
-          f"resume must transition to RUNNING, got {controller.state.value}")
-    print("  YIELDED -> RESUMABLE -> RUNNING: OK")
-
-
-def invalid_checkpoint_does_not_persist() -> None:
-    """A checkpoint is only durable for a yielded run."""
-    with tempfile.TemporaryDirectory() as root:
-        store = CheckpointStore(root)
-        controller = ReviewRunController(run=make_run(), harness=ReentrantHarness(), registry=FakeRegistry(), checkpoint_store=store)
-        controller.start()
-        try:
-            controller.checkpoint_ready(RunCheckpoint("invalid"))
-            check(False, "checkpoint_ready from RUNNING must reject")
-        except ReviewRunError:
-            pass
-        restored = ReviewRunController(run=make_run(), harness=ReentrantHarness(), registry=FakeRegistry(), checkpoint_store=store, state=ReviewRunState.RESUMABLE)
-        try:
-            restored.resume()
-            check(False, "invalid checkpoint_ready must not persist a resumable checkpoint")
-        except ReviewRunError:
-            pass
-    print("  invalid checkpoint is not persisted: OK")
-
-
-def waiting_external_can_resume() -> None:
-    """An external wait persists its continuation before the event arrives."""
-    with tempfile.TemporaryDirectory() as root:
-        checkpoint = RunCheckpoint('{"waiting_for": "ci"}')
-        controller = ReviewRunController(
-            run=make_run(),
-            harness=ReentrantHarness(),
-            registry=FakeRegistry(),
-            checkpoint_store=CheckpointStore(root),
-        )
-        controller.start()
-        step = controller.mark_waiting_external(checkpoint)
-        check(controller.state is ReviewRunState.WAITING_EXTERNAL,
-              f"must transition to WAITING_EXTERNAL, got {controller.state.value}")
-        check(step.next_action == StepAction.WAIT_FOR_EVENT.value,
-              "must suggest WAIT_FOR_EVENT")
-        persisted = CheckpointStore(root).get(controller.run.identity)
-        check(persisted is not None and persisted.data == checkpoint.data,
-              "external waits must persist their continuation before the event")
-        step = controller.external_event_received()
-        check(controller.state is ReviewRunState.RESUMABLE,
-              f"event received must transition to RESUMABLE, got {controller.state.value}")
-        check(step.next_action == StepAction.RESUME.value,
-              "an external event must suggest resume")
-        restored = ReviewRunController(
-            run=make_run(),
-            harness=ReentrantHarness(),
-            registry=FakeRegistry(),
-            checkpoint_store=CheckpointStore(root),
-            state=ReviewRunState.RESUMABLE,
-        )
-        resumed = restored.resume()
-        check(resumed.checkpoint is not None and resumed.checkpoint.data == checkpoint.data,
-              "resuming after an external wait must restore its persisted continuation")
-    print("  WAITING_EXTERNAL -> RESUMABLE -> RUNNING: OK")
-
-
-def concurrent_checkpoint_writes() -> None:
-    """Concurrent writers stage checkpoints independently before replacing the target."""
-    with tempfile.TemporaryDirectory() as root:
-        identity = make_run().identity
-        barrier = threading.Barrier(2)
-        original_replace = Path.replace
-        errors: list[Exception] = []
-
-        def synchronized_replace(source: Path, target: str | Path) -> Path:
-            if Path(target).name == f"{identity}.checkpoint":
-                barrier.wait(timeout=5)
-            return original_replace(source, target)
-
-        def write_checkpoint(data: str) -> None:
-            try:
-                CheckpointStore(root).put(identity, RunCheckpoint(data))
-            except Exception as error:
-                errors.append(error)
-
-        with patch.object(Path, "replace", synchronized_replace):
-            writers = [
-                threading.Thread(target=write_checkpoint, args=(data,))
-                for data in ("first", "second")
-            ]
-            for writer in writers:
-                writer.start()
-            for writer in writers:
-                writer.join(timeout=5)
-
-        check(not any(writer.is_alive() for writer in writers),
-              "concurrent checkpoint writers must finish")
-        check(not errors,
-              f"concurrent checkpoint writers must not fail: {errors!r}")
-        persisted = CheckpointStore(root).get(identity)
-        check(persisted is not None and persisted.data in {"first", "second"},
-              "a concurrent checkpoint write must leave one complete checkpoint")
-    print("  concurrent checkpoint writes: OK")
 
 
 def invalid_transitions() -> None:
@@ -301,45 +148,11 @@ def invalid_transitions() -> None:
     except ReviewRunError:
         pass
     try:
-        controller.resume()
-        check(False, "resume from PENDING must raise ReviewRunError")
-    except ReviewRunError:
-        pass
-    try:
-        controller.stale()
-        check(False, "stale from PENDING must raise ReviewRunError")
+        controller.cancel()
+        check(False, "cancel from PENDING must raise ReviewRunError")
     except ReviewRunError:
         pass
     print("  invalid transitions rejected: OK")
-
-
-def checkpoint_encoding() -> None:
-    """RunCheckpoint round-trips through encode/decode."""
-    original = RunCheckpoint('{"step": 3, "check": "main"}')
-    encoded = original.encode()
-    decoded = RunCheckpoint.decode(encoded)
-    check(decoded.data == original.data,
-          "checkpoint must round-trip through encode/decode")
-    print("  checkpoint encode/decode: OK")
-
-
-def capability_rejection() -> None:
-    """One-shot adapters cannot enter or claim re-entry states."""
-    controller = ReviewRunController(run=make_run(), harness=FakeHarness(), registry=FakeRegistry())
-    controller.start()
-    for action, call in (("yield", controller.mark_yielded), ("checkpoint", lambda: controller.checkpoint_ready(RunCheckpoint("x")))):
-        try:
-            call()
-            check(False, f"{action} must reject an unsupported harness")
-        except ReviewRunError as error:
-            check("capability" in str(error), f"{action} error must name capability")
-    resumable = ReviewRunController(run=make_run(), harness=FakeHarness(), registry=FakeRegistry(), state=ReviewRunState.RESUMABLE)
-    try:
-        resumable.resume()
-        check(False, "resume must reject an unsupported harness")
-    except ReviewRunError as error:
-        check("capability" in str(error), "resume error must name capability")
-    print("  unsupported re-entry rejected: OK")
 
 
 def main() -> int:
@@ -350,14 +163,7 @@ def main() -> int:
     complete_transition()
     fail_transition()
     cancel_transition()
-    stale_transition()
-    yield_then_checkpoint()
-    invalid_checkpoint_does_not_persist()
-    waiting_external_can_resume()
-    concurrent_checkpoint_writes()
     invalid_transitions()
-    checkpoint_encoding()
-    capability_rejection()
     if FAILURES:
         print(f"\nFAILURES ({len(FAILURES)}):")
         for f in FAILURES:

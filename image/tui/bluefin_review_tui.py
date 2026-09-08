@@ -16,6 +16,8 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import logging
+import logging.handlers
 import os
 import re
 import shlex
@@ -45,12 +47,19 @@ from textual.widgets import (
     Label,
     ListItem,
     ListView,
+    Markdown,
     RichLog,
     Button,
     Static,
     Select,
     TextArea,
 )
+try:
+    from textual.worker import get_current_worker
+except ModuleNotFoundError:  # minimal non-Textual import contracts
+    def get_current_worker():
+        return type("_NoWorker", (), {"is_cancelled": False})()
+
 _TUI_DIR = os.path.dirname(__file__)
 if _TUI_DIR not in sys.path:
     sys.path.insert(0, _TUI_DIR)
@@ -60,13 +69,14 @@ import action_plan
 import landing
 import lab_client
 import hive_api
+from observability import ReviewObservability
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from harness.codex import CodexHarness
 from harness.goose import GooseHarness
 from harness.autopilot import (HarnessOption, Preference, can_remember,
                                choose_option, discover_all, load_preferences,
                                remember_success)
-from review_evidence_manifest import ReviewRequest, ReviewEvidenceManifest
+from review_evidence_manifest import ReviewRequest
 from re_review import (DeltaInput, FindingEvidence, H1Evidence, PriorFinding,
                        Region, classify_head_delta)
 from harness.registry import Availability, DraftRequest, DraftState, HarnessRegistry
@@ -74,6 +84,54 @@ from tui.headroom import HeadroomSession
 from tui.review_cache import ReviewCache
 from tui.review_receipt import ReviewReceipt
 from tui.review_run import ReviewRun
+from tui.run_state import (
+    FULL_SHA,
+    IllegalRunTransition,
+    RunIdentity,
+    RunRecord,
+    RunState,
+    RunStateStore,
+    TerminalOutcome,
+)
+try:
+    from tui.gh_client import (
+        BreakerRegistry,
+        BreakerState,
+        Dependency,
+        GhClient,
+        default_client,
+        get_breaker,
+        gh as gh_client_read,
+        run_mutation as gh_client_run_mutation,
+    )
+except ImportError:
+    from gh_client import (  # type: ignore[no-redef]
+        BreakerRegistry,
+        BreakerState,
+        Dependency,
+        GhClient,
+        default_client,
+        get_breaker,
+        gh as gh_client_read,
+        run_mutation as gh_client_run_mutation,
+    )
+
+try:
+    from tui.model_profiles import (
+        HIGH_ASSURANCE_MODELS,
+        classify_batch,
+        escalation_triple,
+        is_high_assurance,
+        is_low_risk,
+    )
+except ImportError:
+    from model_profiles import (  # type: ignore[no-redef]
+        HIGH_ASSURANCE_MODELS,
+        classify_batch,
+        escalation_triple,
+        is_high_assurance,
+        is_low_risk,
+    )
 
 if TYPE_CHECKING:
     from tui.review_engine import ReviewBatch, ReviewEvent
@@ -100,6 +158,7 @@ query($endCursor: String) {
         headRefOid
         mergeable
         commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+        reviews(first: 50) { nodes { author { login } state authorAssociation } }
       }
     }
   }
@@ -132,6 +191,21 @@ TRACE_PATH = os.path.join(
     "bluefin-review",
     "trace.jsonl",
 )
+TRACE_MAX_BYTES = int(os.environ.get("BLUEFIN_REVIEW_TRACE_MAX_BYTES", 8 * 1024 * 1024))
+TRACE_BACKUP_COUNT = int(os.environ.get("BLUEFIN_REVIEW_TRACE_BACKUPS", "3"))
+_TRACE_LOGGER: logging.Logger | None = None
+_TRACE_LOGGER_LOCK = threading.Lock()
+# Bounds for in-memory collections that would otherwise grow for the
+# lifetime of an unattended run. Each is a display or scheduling cache;
+# the durable record of a run is RunStateStore, which bounds itself.
+MAX_REVIEW_BATCHES = int(os.environ.get("BLUEFIN_REVIEW_MAX_BATCHES", "50"))
+MAX_TRIAGE_ENTRIES = int(os.environ.get("BLUEFIN_REVIEW_MAX_TRIAGE", "2000"))
+MAX_MERGE_RIGHTS_ENTRIES = int(os.environ.get("BLUEFIN_REVIEW_MAX_MERGE_RIGHTS", "500"))
+MAX_LANDING_QUEUE = int(os.environ.get("BLUEFIN_REVIEW_MAX_LANDING_QUEUE", "200"))
+MAX_REVIEW_OUTPUT_LINES = int(os.environ.get("BLUEFIN_REVIEW_MAX_OUTPUT_LINES", "200000"))
+MAX_ACTIVITY_ROWS = 8
+MAX_ACTIVITY_WORK_KEYS = 2
+MAX_ACTIVITY_TEXT = 96
 MUTATION_TIMEOUT = 60
 HIVE_TIMEOUT = 15
 MAX_CONCURRENT_LANDINGS = int(
@@ -139,9 +213,6 @@ MAX_CONCURRENT_LANDINGS = int(
 )
 HIVE_API_HELPER = os.path.join(os.path.dirname(__file__), "hive_api.py")
 MAX_REVIEW_BODY_CHARS = 4096
-# The label Hive's governor sweep scans for. It is not defined in most
-# repositories; Hive's queue endpoint owns creating and applying it.
-QUEUE_LABEL = "lgtm"
 MAX_RE_REVIEW_FILES = 128
 MAX_RE_REVIEW_HUNKS = 512
 MAX_RE_REVIEW_RESPONSE_CHARS = 1_000_000
@@ -235,10 +306,11 @@ COMMANDS = (
     CommandSpec("toggle_advance", "space", "toggle_advance", "toggle and advance"),
     CommandSpec("toggle_view", "tab", "toggle_view", "toggle PRs/issues"),
     CommandSpec("toggle_view_alias", "I", "toggle_view", "toggle PRs/issues"),
-    CommandSpec("next_unreviewed", "n", "next_unreviewed", "next unreviewed row"),
+    CommandSpec("next_unreviewed", "n", "next_unreviewed", "next PR lacking my review"),
     CommandSpec("docs", "d", "docs", "update docs"),
     CommandSpec("open_browser", "o", "open_browser", "open"),
     CommandSpec("view_diff", "v", "view_diff", "diff"),
+    CommandSpec("view_comments", "C", "view_comments", "comments"),
     CommandSpec("comment", "c", "comment", "comment", mutating=True),
     CommandSpec("approve_or_land", "a", "merge", "approve+queue", mutating=True),
     CommandSpec("land_batch", "A", "land_batch", "land batch", mutating=True),
@@ -252,11 +324,8 @@ COMMANDS = (
     CommandSpec("filter", "f", "filter", "filter"),
     CommandSpec("hive", "H", "hive", "ask hive"),
     CommandSpec("refresh", "R", "refresh", "refresh"),
+    CommandSpec("slay_pr", "$", "slay_pr", "slay (review+fix+land)"),
 )
-
-
-def command_registry() -> tuple[CommandSpec, ...]:
-    return COMMANDS
 
 
 def bindings_for(_owner) -> list[Binding]:
@@ -275,15 +344,15 @@ def back_bindings(dismiss_action: str) -> list[Binding]:
 # typed-number gate.
 KEYS_READING = (
     " [b]Tab[/b] issues/PRs"
-    " [b]r[/b] review [b]v[/b] diff [b]o[/b] open [b]h[/b] handoff"
+    " [b]r[/b] review [b]v[/b] diff [b]C[/b] comments [b]o[/b] open [b]h[/b] handoff"
     " [b]/[/b] steer [b]f[/b] filter [b]b[/b]/[b]B[/b] select"
-    " [b]Space[/b] select+next [b]n[/b] next unseen"
+    " [b]Space[/b] select+next [b]n[/b] next lacking my review"
     " [b]w[/b] watch batches"
     " [b]P[/b] review policy [b]H[/b] hive"
     " [b]R[/b] refresh [b]q[/b]/Esc back"
 )
 KEYS_ACTING = (
-    " [b]L[/b] leave review [b]a[/b] approve+queue [b]A[/b] land batch [b]m[/b] merge"
+    " [b]L[/b] leave review [b]a[/b] approve+queue [b]A[/b] land batch [b]m[/b] merge [b]$[/b] slay"
     " [b]u[/b] update clean branch [b]U[/b] select mechanical [b]x[/b] reject [b]M[/b] dupes"
 )
 
@@ -449,15 +518,17 @@ def link(text: str, url: str) -> str:
 
 
 def gh(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["gh", *args], capture_output=True, text=True, timeout=timeout
-    )
+    # Bare subprocess.run calls replaced by throttled gh_client.read
+    return gh_client_read(*args, timeout=timeout)
 
 
-def _run_mutation(command: list[str], timeout: int = MUTATION_TIMEOUT) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        command, capture_output=True, text=True, timeout=timeout
-    )
+def _run_mutation(
+    command: list[str] | Sequence[str],
+    timeout: int = MUTATION_TIMEOUT,
+    idempotent: bool = False,
+) -> subprocess.CompletedProcess:
+    # Bare subprocess.run(command) replaced by gh_client.run_mutation with deadlines
+    return gh_client_run_mutation(command, timeout=timeout, idempotent=idempotent)
 
 
 def fetch_live_review(repository: str, number: int) -> dict:
@@ -625,6 +696,20 @@ def bounded_detail(detail: str) -> str:
     return " ".join(detail.split())[:240]
 
 
+def activity_age(timestamp: float | None) -> str:
+    """A compact age for a cached dashboard snapshot."""
+    if timestamp is None:
+        return ""
+    seconds = max(0, int(time.monotonic() - timestamp))
+    if seconds < 60:
+        return "<1m ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
 def hive_token() -> str:
     """The hub bearer token: GH_TOKEN when exported, else the host's own gh
     login. The dashboard runs where the maintainer is already authed with
@@ -654,12 +739,48 @@ def hive_get(path: str) -> hive_api.Result:
     return hive_api.request(f"{base}{path}", token, timeout=HIVE_TIMEOUT)
 
 
+def _bound_map(mapping: dict, limit: int) -> None:
+    """Drop the oldest entries so a per-run cache cannot grow forever.
+
+    Insertion order is eviction order. These maps are display and
+    scheduling caches; the authoritative record is the run store, so an
+    evicted entry is recomputed rather than lost.
+    """
+    while len(mapping) > limit:
+        mapping.pop(next(iter(mapping)))
+
+
+def _trace_logger() -> logging.Logger:
+    """One process-wide, size-capped rotating sink for diagnostics."""
+    global _TRACE_LOGGER
+    with _TRACE_LOGGER_LOCK:
+        if _TRACE_LOGGER is None:
+            os.makedirs(os.path.dirname(TRACE_PATH), exist_ok=True)
+            handler = logging.handlers.RotatingFileHandler(
+                TRACE_PATH,
+                maxBytes=TRACE_MAX_BYTES,
+                backupCount=TRACE_BACKUP_COUNT,
+                encoding="utf-8",
+            )
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            logger = logging.getLogger("bluefin_review.trace")
+            logger.setLevel(logging.INFO)
+            logger.propagate = False
+            logger.handlers.clear()
+            logger.addHandler(handler)
+            _TRACE_LOGGER = logger
+        return _TRACE_LOGGER
+
+
 def trace(record: dict) -> None:
-    """Append a JSON trace of a maintainer action for the feedback loop."""
-    os.makedirs(os.path.dirname(TRACE_PATH), exist_ok=True)
+    """Append a JSON trace of a maintainer action for the feedback loop.
+
+    Diagnostics are capped and rotated. Run state lives in the durable
+    run store, never here, so losing an old trace segment costs no
+    decision the appliance still has to make.
+    """
     record = {"ts": datetime.now(timezone.utc).isoformat(), **record}
-    with open(TRACE_PATH, "a", encoding="utf-8") as sink:
-        sink.write(json.dumps(record, separators=(",", ":")) + "\n")
+    _trace_logger().info(json.dumps(record, separators=(",", ":")))
 
 
 def dependency_subject(title: str) -> str | None:
@@ -861,7 +982,10 @@ def org_queue_item(node: dict) -> dict:
     number = node.get("number")
     if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
         raise ValueError("a pull request has an invalid number")
-    repository = (node.get("repository") or {}).get("nameWithOwner")
+    repository_node = node.get("repository")
+    if repository_node is not None and not isinstance(repository_node, dict):
+        raise ValueError(f"pull request {number} has an invalid repository")
+    repository = (repository_node or {}).get("nameWithOwner")
     if not isinstance(repository, str) or not re.fullmatch(r"[^/\s]+/[^/\s]+", repository):
         raise ValueError(f"pull request {number} has an invalid repository")
     if not isinstance(node.get("title"), str):
@@ -895,6 +1019,12 @@ def org_queue_item(node: dict) -> dict:
         check_state = {"SUCCESS": "success", "FAILURE": "failure", "ERROR": "failure"}.get(rollup, "unknown")
     mergeable_state = {"MERGEABLE": "clean", "CONFLICTING": "dirty"}.get(node.get("mergeable"), "unknown")
     review_state = "approved" if node.get("reviewDecision") == "APPROVED" else "review_required"
+    reviews_raw = node.get("reviews") or {}
+    reviews_nodes = (
+        reviews_raw.get("nodes", [])
+        if isinstance(reviews_raw, dict)
+        else (reviews_raw if isinstance(reviews_raw, list) else [])
+    )
     return {
         "repository": repository,
         "number": number,
@@ -907,6 +1037,7 @@ def org_queue_item(node: dict) -> dict:
         "check_state": check_state,
         "base_sha": str(node.get("baseRefOid") or ""),
         "head_sha": str(node.get("headRefOid") or ""),
+        "reviews": reviews_nodes,
         "recommended_action": classify_action(check_state, mergeable_state, review_state),
     }
 
@@ -2035,6 +2166,152 @@ class DiffScreen(ModalScreen[None]):
             self.render_page()
 
 
+def fetch_github_thread(repository: str, number: int) -> tuple[dict | None, str]:
+    """Fetch GitHub issue or pull request details with comments and reviews."""
+    result = gh(
+        "pr", "view", str(number), "--repo", repository,
+        "--json", "title,body,author,createdAt,comments,reviews",
+    )
+    if result.returncode != 0:
+        result = gh(
+            "issue", "view", str(number), "--repo", repository,
+            "--json", "title,body,author,createdAt,comments",
+        )
+    if result.returncode != 0:
+        return None, result.stderr.strip() or f"exit {result.returncode}"
+    try:
+        data = json.loads(result.stdout)
+        if not isinstance(data, dict):
+            return None, "unexpected JSON payload from GitHub"
+        return data, ""
+    except json.JSONDecodeError as error:
+        return None, f"invalid JSON: {error}"
+
+
+def _thread_login(value: object) -> str:
+    return value.get("login", "unknown") if isinstance(value, dict) else "unknown"
+
+
+def _thread_timestamp(value: object) -> str:
+    return str(value or "").replace("T", " ").replace("Z", " UTC")
+
+
+def format_github_thread(data: dict, stop_key: str) -> str:
+    """Format a GitHub issue/PR opening post, comments and reviews as Markdown."""
+    lines: list[str] = []
+    title = str(data.get("title") or "")
+    body = str(data.get("body") or "").strip()
+
+    lines.append(f"# {stop_key}: {title}\n")
+    lines.append(
+        f"**@{_thread_login(data.get('author'))}** opened on "
+        f"{_thread_timestamp(data.get('createdAt'))}:\n"
+    )
+    lines.append(body if body else "*No description provided.*")
+
+    events: list[tuple[str, str, str, str, str]] = []
+    for comment in data.get("comments") or []:
+        if not isinstance(comment, dict):
+            continue
+        events.append((
+            str(comment.get("createdAt") or ""),
+            "comment",
+            _thread_login(comment.get("author")),
+            "",
+            str(comment.get("body") or "").strip(),
+        ))
+
+    for review in data.get("reviews") or []:
+        if not isinstance(review, dict):
+            continue
+        state = str(review.get("state") or "REVIEW")
+        review_body = str(review.get("body") or "").strip()
+        # An empty comment carries no information, but an empty approval or
+        # change request is itself the verdict and must still be shown.
+        if not review_body and state not in ("APPROVED", "CHANGES_REQUESTED"):
+            continue
+        events.append((
+            str(review.get("submittedAt") or review.get("createdAt") or ""),
+            "review",
+            _thread_login(review.get("author")),
+            state,
+            review_body,
+        ))
+
+    events.sort(key=lambda item: item[0])
+
+    if not events:
+        lines.append("\n\n---\n\n*No comments or reviews yet.*")
+    for timestamp, kind, author, state, event_body in events:
+        lines.append("\n\n---\n")
+        stamp = _thread_timestamp(timestamp)
+        if kind == "review":
+            lines.append(f"### **@{author}** ({state}) on {stamp}:\n")
+        else:
+            lines.append(f"### **@{author}** commented on {stamp}:\n")
+        lines.append(event_body if event_body else f"*{state}*")
+
+    return "\n".join(lines)
+
+
+class CommentsScreen(ModalScreen[None]):
+    """Issue or pull request comments and conversation rendered in Markdown."""
+
+    BINDINGS = back_bindings("dismiss") + [
+        Binding("r", "refresh_comments", "refresh"),
+        Binding("o", "open_browser", "open in browser"),
+    ]
+
+    def __init__(self, stop: Stop) -> None:
+        super().__init__()
+        self.stop_record = stop
+        self.request_generation = 0
+
+    def compose(self) -> ComposeResult:
+        stop = self.stop_record
+        yield Static(
+            f" {link(stop.key, pr_url(stop.repository, stop.number))} — "
+            f"{escape(stop.title[:70])}  (comments)  {escape('[escape]')} closes",
+            id="comments-header",
+        )
+        with ScrollableContainer(id="comments-scroll"):
+            yield Markdown("loading comments…", id="comments-body")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.action_refresh_comments()
+
+    def action_refresh_comments(self) -> None:
+        # A refresh that lands after a later one must not overwrite it, so
+        # every response is bound to the generation that asked for it.
+        self.request_generation += 1
+        self.fetch_comments(self.request_generation)
+
+    def action_open_browser(self) -> None:
+        stop = self.stop_record
+        gh("pr", "view", str(stop.number), "--repo", stop.repository, "--web")
+
+    @work(thread=True)
+    def fetch_comments(self, generation: int) -> None:
+        stop = self.stop_record
+        data, error = fetch_github_thread(stop.repository, stop.number)
+        if data is not None:
+            formatted = format_github_thread(data, stop.key)
+            self.app.call_from_thread(self.render_comments_result, generation, formatted)
+        else:
+            self.app.call_from_thread(self.render_comments_error, generation, error)
+
+    def render_comments_result(self, generation: int, text: str) -> None:
+        if generation == self.request_generation:
+            self.query_one("#comments-body", Markdown).update(text)
+
+    def render_comments_error(self, generation: int, message: str) -> None:
+        if generation == self.request_generation:
+            self.query_one("#comments-body", Markdown).update(
+                f"**ERROR loading comments:** {message}"
+            )
+
+
 class HarnessTakeoff(ModalScreen[str | None]):
     """One explicit maintainer choice before a selected harness starts."""
 
@@ -2136,7 +2413,8 @@ class HelpScreen(ModalScreen[None]):
                     yield Static("[bold cyan]b[/]         Toggle PR batch select", classes="help-row")
                     yield Static("[bold cyan]B[/]         Select / clear visible rows", classes="help-row")
                     yield Static("[bold cyan]space[/]     Toggle row and advance", classes="help-row")
-                    yield Static("[bold cyan]n[/]         Skip to next unseen row", classes="help-row")
+                    yield Static("[bold cyan]n[/]         Skip to next PR lacking my review", classes="help-row")
+                    yield Static("[bold magenta]$[/]         Slay PR (review+fix+land)", classes="help-row")
                     yield Static("[bold cyan]A[/]         Land selected batch", classes="help-row")
                     yield Static("[bold cyan]w[/]         Watch running agents", classes="help-row")
                     yield Static("[bold cyan]P[/]         Final review policy", classes="help-row")
@@ -2196,6 +2474,8 @@ class ReviewScreen(Screen):
         Binding("u", "update_branch", "update clean branch"),
         Binding("e", "toggle_evidence", "evidence"),
         Binding("r", "toggle_raw_transcript", "raw transcript"),
+        Binding("c", "view_comments", "comments"),
+        Binding("v", "view_diff", "diff"),
     ]
 
     def __init__(
@@ -2222,6 +2502,7 @@ class ReviewScreen(Screen):
         self.stop_requested = False
         self.started = time.monotonic()
         self.output: list[str] = []
+        self.output_overflowed = False
         # The card is a point-in-time record of the evidence the maintainer
         # saw when the review started. The dashboard's background workers
         # keep rewriting stop.live/stop.overlap while the review runs, so
@@ -2355,11 +2636,22 @@ class ReviewScreen(Screen):
         )
 
     def append(self, line: str) -> None:
-        self.output.append(line)
+        if len(self.output) < MAX_REVIEW_OUTPUT_LINES:
+            self.output.append(line)
+        else:
+            self.output_overflowed = True
         self.query_one("#review-log", RichLog).write(line)
 
     def finish(self, code: int | None, error: str) -> None:
         self.finished = True
+        # A transcript we stopped capturing cannot be parsed into a verdict
+        # anyone may act on, so overflow fails closed down the error path
+        # rather than yielding findings extracted from a partial capture.
+        if self.output_overflowed and not error:
+            error = (
+                f"review output exceeded {MAX_REVIEW_OUTPUT_LINES} lines; "
+                "the transcript is incomplete and its verdict is not trustworthy"
+            )
         stop = self.stop_record
         elapsed = int(time.monotonic() - self.started)
         live_context = live_review_context(self.live_snapshot, title=stop.title)
@@ -2538,8 +2830,8 @@ class ReviewScreen(Screen):
         lines.append(
             "actions   "
             f"{escape('[f]')} fix & land  {escape('[F]')} steer fix  "
-            f"{escape('[L]')} review  {escape('[a]')} approve+queue  "
-            f"{escape('[m]')} merge  {escape('[u]')} update  "
+            f"{escape('[L]')} review  {escape('[c]')} comments  {escape('[v]')} diff  "
+            f"{escape('[a]')} approve+queue  {escape('[m]')} merge  {escape('[u]')} update  "
             f"{escape('[e]')} evidence"
         )
         self.query_one("#review-card", Static).update("\n".join(lines))
@@ -2635,7 +2927,7 @@ class ReviewScreen(Screen):
         try:
             request = ReviewRequest(*self.stop_record.repository.split("/", 1), self.stop_record.number, base, current, "maintainer", "review", generated_at="dashboard")
             delta = classify_head_delta(DeltaInput(
-                reviewed, current, historical_base, base, ReviewEvidenceManifest(request),
+                reviewed, current, historical_base, base, request,
                 self.compare_evidence.regions, prior_findings, evidence, new,
                 self.compare_evidence.mapping_uncertain or prior_malformed or current_malformed,
                 self.compare_evidence.sensitive_surfaces_changed,
@@ -2648,7 +2940,7 @@ class ReviewScreen(Screen):
         lines = [
             "", "RE-REVIEW  exact-head delta",
             f"reviewed {escape(reviewed)}  current {escape(current)}",
-            f"H1 manifest  base {escape(base)}  head {escape(delta.current_h1_manifest.request.head_sha)}  result {escape(result.state)}",
+            f"H1 manifest  base {escape(base)}  head {escape(delta.current_h1_request.head_sha)}  result {escape(result.state)}",
         ]
         lines.append(
             "dispositions  " + ", ".join(
@@ -2719,6 +3011,12 @@ class ReviewScreen(Screen):
 
     def action_toggle_raw_transcript(self) -> None:
         self.query_one("#review-log", RichLog).toggle_class("hidden")
+
+    def action_view_comments(self) -> None:
+        self.app.push_screen(CommentsScreen(self.stop_record))
+
+    def action_view_diff(self) -> None:
+        self.app.push_screen(DiffScreen(self.stop_record))
 
     def return_to_queue(self, action) -> None:
         if not self.finished:
@@ -2818,6 +3116,10 @@ class ReviewDashboard(App):
     TITLE = "BLUEFIN REVIEW DASHBOARD"
     CSS = """
     #status-bar { height: 1; background: $panel; color: cyan; }
+    #activity {
+        border: heavy $primary; height: auto; padding: 0 1;
+        color: $text;
+    }
     #queue-pane { width: 45%; border: solid $secondary; }
     #right-pane { width: 55%; }
     #details-pane { height: 60%; border: solid $secondary; padding: 0 1; }
@@ -2837,6 +3139,9 @@ class ReviewDashboard(App):
     #review-evidence.hidden, #review-log.hidden { display: none; }
     #diff-scroll { border: solid $secondary; background: $surface; }
     #diff-body { padding: 0 1; width: auto; }
+    #comments-header { height: 1; background: $panel; color: cyan; text-style: bold; }
+    #comments-scroll { border: solid $secondary; background: $surface; }
+    #comments-body { padding: 0 1; width: auto; }
     ListItem.selected { background: $primary-muted; }
     ListItem.selected Label { color: magenta; text-style: bold; }
     #review-status { height: auto; padding: 0 1; background: $panel; }
@@ -2863,9 +3168,18 @@ class ReviewDashboard(App):
 
     BINDINGS = bindings_for("dashboard")
 
-    def __init__(self, filters: QueueFilters | None = None) -> None:
+    def __init__(
+        self,
+        filters: QueueFilters | None = None,
+        *,
+        run_store: RunStateStore | None = None,
+        gh_client: GhClient | None = None,
+    ) -> None:
         super().__init__()
         self.filters = filters or QueueFilters()
+        self.run_store = run_store or RunStateStore()
+        self.gh_client = gh_client or default_client
+        self.observability = ReviewObservability.from_environment()
         self.view_mode = "prs"
         self.issues_items = []
         self.stops: list[Stop] = []
@@ -2885,6 +3199,16 @@ class ReviewDashboard(App):
         self.hive_workers: list[dict] = []
         self.hive_unavailable = False
         self.hive_workers_stale = False
+        self.queue_snapshot_at: float | None = None
+        self.hive_snapshot_at: float | None = None
+        self.reconciliation_updated_at: float | None = None
+        self._reconciliation_request = 0
+        self._reconciliation_waiting: set[str] = set()
+        self._reconciliation_success: dict[str, bool] = {}
+        self._reconciliation_source_attempts = {"queue": 0, "hive": 0}
+        self._reconciliation_pending = False
+        self.reconciliation_state = "not refreshed"
+        self._queue_load_lock = threading.Lock()
         # Keys to re-select after a refresh: a refresh that silently empties
         # the batch you spent a minute building is worse than no refresh.
         self.reselect: set[str] = set()
@@ -2951,12 +3275,117 @@ class ReviewDashboard(App):
         self._current_batch_plan: action_plan.BatchActionPlan | None = None
         self._batch_generation_token: int = 0
         self._batch_receipt_ledger = DashboardBatchReceiptLedger()
+        self.fixer_advanced_heads: set[tuple[str, int, str]] = set()
+        self.active_review_identities: dict[str, RunIdentity] = {}
+        self.review_started_at: dict[str, float] = {}
+
+    def record_fixer_head(self, repository: str, number: int, head_sha: str) -> None:
+        """Explicitly record that a head was produced and pushed by our fixer."""
+        if FULL_SHA.fullmatch(head_sha):
+            self.fixer_advanced_heads.add((repository, number, head_sha))
+
+    def is_fixer_head(self, repository: str, number: int, head_sha: str) -> bool:
+        """Deliberately and explicitly distinguish our fixer's pushed head from a foreign head change."""
+        return (repository, number, head_sha) in self.fixer_advanced_heads
+
+    def escalation_profile(self, stop: Stop) -> tuple[str, str, str]:
+        """The (backend, model, effort) triple for an escalated, high-assurance review."""
+        policy = self.final_policy or "automatic"
+        classification = classify_batch([stop])
+        return escalation_triple(policy, classification)
+
+    def run_identity(
+        self,
+        stop: Stop,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        head_sha: str | None = None,
+    ) -> RunIdentity:
+        base_sha = str(stop.live.get("baseRefOid") or "")
+        if not FULL_SHA.fullmatch(base_sha):
+            base_sha = "a" * 40
+        if head_sha is None:
+            head_sha = stop.head_identity
+        if not FULL_SHA.fullmatch(head_sha):
+            head_sha = "b" * 40
+        if model is None or effort is None:
+            default_model, default_effort = self.review_profile(stop.repository)
+            if model is None:
+                model = default_model
+            if effort is None:
+                effort = default_effort
+        return RunIdentity(
+            repository=stop.repository,
+            pull_request=stop.number,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            backend=ACTIVE_BACKEND,
+            model=model,
+            effort=effort,
+            check_scope_version=self.review_scope_version,
+        )
+
+    @staticmethod
+    def is_bot_login(login: str) -> bool:
+        lowered = login.lower()
+        return (
+            lowered.endswith("[bot]")
+            or lowered.endswith("-bot")
+            or lowered in {"goose", "github-actions", "copilot"}
+        )
+
+    def has_human_review(self, live: dict) -> bool:
+        reviews = live.get("reviews") or []
+        if isinstance(reviews, dict):
+            reviews = reviews.get("nodes", [])
+        if not isinstance(reviews, list):
+            return False
+        for review in reviews:
+            if not isinstance(review, dict):
+                continue
+            author = review.get("author")
+            login = (
+                author.get("login")
+                if isinstance(author, dict)
+                else (author if isinstance(author, str) else "")
+            )
+            if not login or self.is_bot_login(login):
+                continue
+            state = str(review.get("state") or "").upper()
+            if state in {"APPROVED", "CHANGES_REQUESTED", "COMMENTED"}:
+                return True
+        return False
+
+    def stop_lacks_my_review(self, stop: Stop) -> bool:
+        if not self.self_login:
+            return False
+        reviews = stop.live.get("reviews") if isinstance(stop.live, dict) else None
+        if isinstance(reviews, dict):
+            reviews = reviews.get("nodes", [])
+        if not isinstance(reviews, list) or not reviews:
+            return True
+        for r in reviews:
+            if not isinstance(r, dict):
+                continue
+            author = r.get("author")
+            login = (
+                author.get("login")
+                if isinstance(author, dict)
+                else (author if isinstance(author, str) else "")
+            )
+            if login == self.self_login:
+                state = str(r.get("state") or "").upper()
+                if state != "DISMISSED":
+                    return False
+        return True
 
     # ── layout ────────────────────────────────────────────────────────────
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static("loading queue…", id="status-bar")
+        yield Static("AGENT ACTIVITY\nSnapshot: unavailable", id="activity")
         yield Static("Harness Autopilot — CHECKING…", id="harness-status")
         with Horizontal():
             with Vertical(id="queue-pane"):
@@ -3062,45 +3491,66 @@ class ReviewDashboard(App):
             )
 
     @work(thread=True, group="hive", exclusive=True)
-    def load_hive(self) -> None:
+    def load_hive(
+        self, reconciliation_request: int = 0, reconciliation_attempt: int = 0
+    ) -> None:
         """Ask Hive what it is doing. Read-only, and never blocking.
 
         Hive probes are only retried by an explicit maintainer action. The
         exclusive worker prevents repeated key presses from stacking network
         calls while the hub is unavailable.
         """
-        if not hive_api_base():
-            self.call_from_thread(self.hive_failed, "not configured")
-            return
-        status = hive_get("/api/v1/status")
-        if not status.ok:
-            self.call_from_thread(self.hive_failed, status.message)
-            return
-        contributor_result = hive_get("/api/v1/contributors")
-        if not contributor_result.ok:
-            self.call_from_thread(self.hive_failed, contributor_result.message)
-            return
-        contributors = contributor_result.data.get("contributors", [])
-        workers = [
-            {
-                "login": contributor.get("github_username", "?"),
-                "task": contributor.get("current_task") or {},
-            }
-            for contributor in contributors
-            if contributor.get("current_task")
-        ]
-        state = (
-            f"{status.data.get('hub', 'online')} · "
-            f"{status.data.get('actionable_items', '?')} actionable · "
-            f"{len(workers)} working"
-        )
-        self.call_from_thread(self.hive_loaded, state, workers)
+        success = False
+        try:
+            if not hive_api_base():
+                if not get_current_worker().is_cancelled:
+                    self.call_from_thread(self.hive_not_configured)
+                success = True
+                return
+            status = hive_get("/api/v1/status")
+            if not status.ok:
+                if not get_current_worker().is_cancelled:
+                    self.call_from_thread(self.hive_failed, status.message)
+                return
+            contributor_result = hive_get("/api/v1/contributors")
+            if not contributor_result.ok:
+                if not get_current_worker().is_cancelled:
+                    self.call_from_thread(self.hive_failed, contributor_result.message)
+                return
+            contributors = contributor_result.data.get("contributors", [])
+            workers = [
+                {
+                    "login": contributor.get("github_username", "?"),
+                    "task": contributor.get("current_task") or {},
+                }
+                for contributor in contributors
+                if contributor.get("current_task")
+            ]
+            state = (
+                f"{status.data.get('hub', 'online')} · "
+                f"{status.data.get('actionable_items', '?')} actionable · "
+                f"{len(workers)} working"
+            )
+            if get_current_worker().is_cancelled:
+                return
+            success = True
+            self.call_from_thread(self.hive_loaded, state, workers)
+        finally:
+            if reconciliation_request:
+                self.call_from_thread(
+                    self._reconciliation_finished,
+                    "hive",
+                    reconciliation_request,
+                    reconciliation_attempt,
+                    success,
+                )
 
     def hive_loaded(self, state: str, workers: list[dict]) -> None:
         self.hive_state = state
         self.hive_workers = workers
         self.hive_unavailable = False
         self.hive_workers_stale = False
+        self.hive_snapshot_at = time.monotonic()
         self.refresh_status()
         stop = self.current
         if stop:
@@ -3115,6 +3565,67 @@ class ReviewDashboard(App):
         stop = self.current
         if stop:
             self.render_context(stop)
+
+    def hive_not_configured(self) -> None:
+        """Clear Hive state when this dashboard has no Hive projection."""
+        self.hive_state = "not configured"
+        self.hive_workers = []
+        self.hive_unavailable = False
+        self.hive_workers_stale = False
+        self.refresh_status()
+        stop = self.current
+        if stop:
+            self.render_context(stop)
+
+    def _request_reconciliation(self) -> None:
+        """Refresh retained GitHub and Hive evidence after a completed operation."""
+        if self._reconciliation_waiting:
+            self._reconciliation_pending = True
+            return
+        self._start_reconciliation()
+
+    def _start_reconciliation(self) -> None:
+        self._reconciliation_request += 1
+        request = self._reconciliation_request
+        self._reconciliation_waiting = {"queue", "hive"}
+        self._reconciliation_success = {"queue": False, "hive": False}
+        self.reconciliation_state = "refreshing"
+        self.reselect = {stop.key for stop in self.stops if stop.selected}
+        self.refresh_status()
+        self._start_reconciliation_source("queue", request)
+        self._start_reconciliation_source("hive", request)
+
+    def _start_reconciliation_source(self, source: str, request: int) -> None:
+        """Start one source attempt and identify its eventual callback."""
+        self._reconciliation_source_attempts[source] += 1
+        attempt = self._reconciliation_source_attempts[source]
+        if source == "queue":
+            self.load_queue(request, attempt)
+        else:
+            self.load_hive(request, attempt)
+
+    def _reconciliation_finished(
+        self, source: str, request: int, attempt: int, success: bool
+    ) -> None:
+        if not request or request != self._reconciliation_request:
+            return
+        if attempt != self._reconciliation_source_attempts.get(source):
+            return
+        self._reconciliation_success[source] = success
+        self._reconciliation_waiting.discard(source)
+        if self._reconciliation_waiting:
+            return
+        self.reconciliation_state = (
+            "fresh"
+            if all(self._reconciliation_success.values())
+            else "unavailable"
+        )
+        if self.reconciliation_state == "fresh":
+            self.reconciliation_updated_at = time.monotonic()
+        self.refresh_status()
+        if self._reconciliation_pending:
+            self._reconciliation_pending = False
+            self._start_reconciliation()
 
     def repo_queue(self, repository: str) -> tuple[dict[str, int], int]:
         """This repository's merge queue, by segment, and its total."""
@@ -3147,7 +3658,11 @@ class ReviewDashboard(App):
     def action_hive(self) -> None:
         """Ask Hive again, and say what it is working on right now."""
         self.notify("asking Hive…")
-        self.load_hive()
+        request = self._reconciliation_request if self._reconciliation_waiting else 0
+        if request:
+            self._start_reconciliation_source("hive", request)
+        else:
+            self.load_hive()
 
     def action_steer(self) -> None:
         """Focus the steering box: free text that rides along with the next
@@ -3208,21 +3723,33 @@ class ReviewDashboard(App):
         )
 
     @work(thread=True)
-    def start_review_batch(self, stops: list[Stop]) -> None:
+    def start_review_batch(
+        self, stops: list[Stop], *, model: str | None = None, effort: str | None = None
+    ) -> None:
         from tui.review_snapshot import hydrate_batch_snapshot
 
         snapshot = hydrate_batch_snapshot(stops, fetch_live_review)
         self.call_from_thread(
-            self.begin_review_batch, list(stops), snapshot
+            self.begin_review_batch, list(stops), snapshot, model=model, effort=effort
         )
 
     def begin_review_batch(
-        self, stops: list[Stop], snapshot: BatchSnapshot
+        self,
+        stops: list[Stop],
+        snapshot: BatchSnapshot,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> None:
         requested_keys = {stop.key for stop in stops}
         self.review_pending_keys.difference_update(requested_keys)
         current_by_key = {stop.key: stop for stop in self.stops}
         if not requested_keys.issubset(current_by_key):
+            for stop in stops:
+                id_ = self.active_review_identities.get(stop.key) or self.run_identity(stop)
+                rec = self.run_store.get(id_)
+                if rec and rec.state in (RunState.REVIEWING, RunState.RE_REVIEWING):
+                    self.run_store.transition(id_, RunState.REVIEW_FAILED, reason="queue changed")
             self.notify(
                 "batch review not started: the visible queue changed.",
                 severity="warning",
@@ -3231,6 +3758,10 @@ class ReviewDashboard(App):
         current_stops = [current_by_key[stop.key] for stop in stops]
         if not snapshot.ready:
             for stop in current_stops:
+                id_ = self.active_review_identities.get(stop.key) or self.run_identity(stop)
+                rec = self.run_store.get(id_)
+                if rec and rec.state in (RunState.REVIEWING, RunState.RE_REVIEWING):
+                    self.run_store.transition(id_, RunState.REVIEW_FAILED, reason="snapshot failed")
                 failure = snapshot.failures.get(stop.key)
                 if failure:
                     stop.failure = f"review snapshot failed: {failure}"
@@ -3254,6 +3785,10 @@ class ReviewDashboard(App):
         ]
         if stale:
             for stop in stale:
+                id_ = self.active_review_identities.get(stop.key) or self.run_identity(stop)
+                rec = self.run_store.get(id_)
+                if rec and rec.state in (RunState.REVIEWING, RunState.RE_REVIEWING):
+                    self.run_store.revalidate_head(id_, by_key[stop.key].head_sha)
                 stop.failure = "review snapshot stale: head changed"
                 stop.failure_command = "gh pr view"
                 stop.review_status = "failed"
@@ -3266,6 +3801,11 @@ class ReviewDashboard(App):
                 severity="warning",
             )
             return
+        default_model, default_effort = self.review_profile(
+            current_stops[0].repository
+        )
+        selected_model = model or default_model
+        selected_effort = effort or default_effort
         for stop in current_stops:
             item = by_key[stop.key]
             self.evidence_generation[stop.key] = (
@@ -3284,13 +3824,17 @@ class ReviewDashboard(App):
             stop.cached_age = ""
             stop.triage_state = "reviewed"
             self.triage[self.triage_key(stop)] = "reviewed"
-        selected_model, selected_effort = self.review_profile(
-            current_stops[0].repository
-        )
+            _bound_map(self.triage, MAX_TRIAGE_ENTRIES)
+            self.active_review_identities[stop.key] = self.run_identity(
+                stop, model=selected_model, effort=selected_effort, head_sha=item.head_sha
+            )
         event_heads = {
             item.key: item.head_sha for item in snapshot.items
         }
         self.review_expected_heads.update(event_heads)
+        review_started = time.monotonic()
+        for key in event_heads:
+            self.review_started_at[key] = review_started
         try:
             batch = self.review_engine.start(
                 snapshot,
@@ -3304,8 +3848,13 @@ class ReviewDashboard(App):
         except (OSError, RuntimeError, ValueError) as error:
             for key in event_heads:
                 self.review_expected_heads.pop(key, None)
+                self.review_started_at.pop(key, None)
             detail = bounded_detail(str(error) or type(error).__name__)
             for stop in current_stops:
+                id_ = self.run_identity(stop)
+                rec = self.run_store.get(id_)
+                if rec and rec.state == RunState.REVIEWING:
+                    self.run_store.transition(id_, RunState.REVIEW_FAILED, reason=detail)
                 stop.review_status = "failed"
                 stop.review_failure = detail
                 stop.failure = f"review dispatch failed: {detail}"
@@ -3317,6 +3866,7 @@ class ReviewDashboard(App):
             )
             return
         self.review_batches.append(batch)
+        self.prune_review_batches()
         for item in batch.items:
             self.review_batch_ids[item.key] = batch.batch_id
         pending_events = self.pending_review_events.pop(
@@ -3361,6 +3911,10 @@ class ReviewDashboard(App):
             and stop.head_identity
             and expected_head != stop.head_identity
         ):
+            id_ = self.run_identity(stop)
+            rec = self.run_store.get(id_)
+            if rec and rec.state == RunState.REVIEWING:
+                self.run_store.revalidate_head(id_, stop.head_identity)
             if event.state in {
                 "cached",
                 "complete",
@@ -3409,74 +3963,182 @@ class ReviewDashboard(App):
             and stop.head_identity
             and batch_item.head_sha != stop.head_identity
         ):
+            id_ = self.run_identity(stop)
+            rec = self.run_store.get(id_)
+            if rec and rec.state == RunState.REVIEWING:
+                self.run_store.revalidate_head(id_, stop.head_identity)
             stop.review_status = ""
             stop.review_result = None
             stop.cached_age = ""
             return
         if event.receipt:
             receipt_name = os.path.basename(event.receipt)
+            id_ = self.run_identity(stop)
+            rec = self.run_store.get(id_)
             if receipt_name != event.receipt:
-                stop.review_status = "failed"
+                stop.review_status = "review_failed"
                 stop.review_failure = "invalid review receipt path"
                 self.notify(
                     f"{stop.key}: invalid review receipt path",
                     severity="error",
                 )
+                if rec and rec.state == RunState.REVIEWING:
+                    self.run_store.transition(id_, RunState.REVIEW_FAILED, reason="invalid review receipt path")
             else:
                 cache = getattr(
                     self.review_engine, "cache", self.review_cache
                 )
-                try:
-                    receipt = ReviewReceipt.from_json(
-                        (cache.root / receipt_name).read_text(
-                            encoding="utf-8"
-                        )
-                    )
-                except (
-                    OSError,
-                    UnicodeError,
-                    ValueError,
-                ) as error:
-                    stop.review_status = "failed"
-                    stop.review_failure = bounded_detail(
-                        str(error) or type(error).__name__
-                    )
+                receipt_path = cache.root / receipt_name
+                if not receipt_path.exists():
+                    stop.review_status = "review_missing"
+                    stop.review_failure = "review receipt missing"
                     self.notify(
-                        f"{stop.key}: review receipt unavailable: "
-                        f"{bounded_detail(str(error))}",
+                        f"{stop.key}: review receipt missing",
                         severity="error",
                     )
+                    if rec and rec.state == RunState.REVIEWING:
+                        self.run_store.transition(id_, RunState.REVIEW_MISSING, reason="review receipt missing")
                 else:
-                    if (
-                        receipt.identity.repository != stop.repository
-                        or receipt.identity.pull_request != stop.number
-                        or receipt.identity.head_sha != stop.head_identity
-                        or receipt.identity.base_sha
-                        != str(stop.live.get("baseRefOid") or "")
-                    ):
-                        self.review_expected_heads.pop(event.key, None)
-                        self.review_batch_ids.pop(event.key, None)
-                        stop.review_status = ""
-                        stop.review_result = None
-                        stop.cached_age = ""
-                        return
-                    stop.review_result = receipt.analysis_result(
-                        live=stop.live, overlap=stop.overlap
-                    )
-                    stop.review_failure = ""
-                    stop.cached_age = (
-                        self.receipt_age(receipt)
-                        if event.state == "cached"
-                        else ""
-                    )
-                    stop.review_status = event.state
+                    try:
+                        receipt = ReviewReceipt.from_json(
+                            receipt_path.read_text(
+                                encoding="utf-8"
+                            )
+                        )
+                    except (
+                        json.JSONDecodeError,
+                        UnicodeError,
+                        ValueError,
+                    ) as error:
+                        stop.review_status = "review_unparsable"
+                        stop.review_failure = bounded_detail(
+                            str(error) or type(error).__name__
+                        )
+                        self.notify(
+                            f"{stop.key}: review receipt unparsable: "
+                            f"{bounded_detail(str(error))}",
+                            severity="error",
+                        )
+                        if rec and rec.state == RunState.REVIEWING:
+                            self.run_store.transition(id_, RunState.REVIEW_UNPARSABLE, reason=stop.review_failure)
+                    except OSError as error:
+                        stop.review_status = "review_failed"
+                        stop.review_failure = bounded_detail(
+                            str(error) or type(error).__name__
+                        )
+                        self.notify(
+                            f"{stop.key}: review receipt unavailable: "
+                            f"{bounded_detail(str(error))}",
+                            severity="error",
+                        )
+                        if rec and rec.state == RunState.REVIEWING:
+                            self.run_store.transition(id_, RunState.REVIEW_FAILED, reason=stop.review_failure)
+                    else:
+                        if (
+                            receipt.identity.repository != stop.repository
+                            or receipt.identity.pull_request != stop.number
+                            or receipt.identity.head_sha != stop.head_identity
+                            or receipt.identity.base_sha
+                            != str(stop.live.get("baseRefOid") or "")
+                        ):
+                            if rec and rec.state == RunState.REVIEWING:
+                                if receipt.identity.head_sha != stop.head_identity:
+                                    self.run_store.revalidate_head(id_, stop.head_identity)
+                                else:
+                                    self.run_store.transition(id_, RunState.REVIEW_FAILED, reason="receipt identity mismatch")
+                            self.review_expected_heads.pop(event.key, None)
+                            self.review_batch_ids.pop(event.key, None)
+                            stop.review_status = ""
+                            stop.review_result = None
+                            stop.cached_age = ""
+                            return
+                        stop.review_result = receipt.analysis_result(
+                            live=stop.live, overlap=stop.overlap
+                        )
+                        stop.review_failure = ""
+                        stop.cached_age = (
+                            self.receipt_age(receipt)
+                            if event.state == "cached"
+                            else ""
+                        )
+                        stop.review_status = event.state
         else:
-            stop.review_status = event.state
-            if event.state in {"failed", "cancelled"}:
+            if event.state in {"missing", "review_missing"}:
+                stop.review_status = "review_missing"
                 stop.review_result = None
                 stop.cached_age = ""
                 stop.review_failure = event.note
-        if event.state in {
+            elif event.state in {"incomplete", "review_incomplete"} or (event.note and "incomplete" in event.note.lower()):
+                stop.review_status = "review_incomplete"
+                stop.review_result = None
+                stop.cached_age = ""
+                stop.review_failure = event.note
+            elif event.state in {"unparsable", "review_unparsable"}:
+                stop.review_status = "review_unparsable"
+                stop.review_result = None
+                stop.cached_age = ""
+                stop.review_failure = event.note
+            elif event.state in {"failed", "review_failed"}:
+                stop.review_status = "failed"
+                stop.review_result = None
+                stop.cached_age = ""
+                stop.review_failure = event.note
+            else:
+                stop.review_status = event.state
+
+        id_ = self.active_review_identities.pop(event.key, None) or self.run_identity(stop)
+        rec = self.run_store.get(id_)
+        if rec and rec.state in (RunState.REVIEWING, RunState.RE_REVIEWING):
+            if stop.review_status in {"cached", "complete", "findings"}:
+                self.review_expected_heads.pop(event.key, None)
+                self.review_batch_ids.pop(event.key, None)
+                findings = list(stop.review_result.findings if stop.review_result else [])
+                target_state = (
+                    RunState.REVIEW_FINDINGS
+                    if (findings or stop.review_status == "findings")
+                    else RunState.REVIEW_CLEAN
+                )
+                self.run_store.transition(id_, target_state)
+                self._dispatch_slay_landing(stop, identity=id_)
+            elif (
+                stop.review_status in {
+                    "failed",
+                    "cancelled",
+                    "missing",
+                    "incomplete",
+                    "unparsable",
+                    "review_failed",
+                    "review_missing",
+                    "review_incomplete",
+                    "review_unparsable",
+                }
+                or event.state in {
+                    "failed",
+                    "cancelled",
+                    "missing",
+                    "incomplete",
+                    "unparsable",
+                    "review_failed",
+                    "review_missing",
+                    "review_incomplete",
+                    "review_unparsable",
+                }
+            ):
+                self.review_expected_heads.pop(event.key, None)
+                self.review_batch_ids.pop(event.key, None)
+                if stop.review_status in {"missing", "review_missing"} or event.state in {"missing", "review_missing"}:
+                    self.run_store.transition(id_, RunState.REVIEW_MISSING, reason=stop.review_failure or "review missing")
+                elif stop.review_status in {"incomplete", "review_incomplete"} or event.state in {"incomplete", "review_incomplete"}:
+                    self.run_store.transition(id_, RunState.REVIEW_INCOMPLETE, reason=stop.review_failure or "review incomplete")
+                elif stop.review_status in {"unparsable", "review_unparsable"} or event.state in {"unparsable", "review_unparsable"}:
+                    self.run_store.transition(id_, RunState.REVIEW_UNPARSABLE, reason=stop.review_failure or "review unparsable")
+                else:
+                    self.run_store.transition(id_, RunState.REVIEW_FAILED, reason=stop.review_failure or "review failed")
+                self.notify(
+                    f"[$] {stop.key}: review {stop.review_status}, auto-landing aborted",
+                    severity="warning",
+                )
+        elif event.state in {
             "cached",
             "complete",
             "findings",
@@ -3487,6 +4149,45 @@ class ReviewDashboard(App):
             self.review_batch_ids.pop(event.key, None)
         if batch is not None:
             self.sync_batch_headroom(batch)
+        terminal_states = {
+            "cached",
+            "complete",
+            "findings",
+            "failed",
+            "cancelled",
+            "missing",
+            "incomplete",
+            "unparsable",
+            "review_failed",
+            "review_missing",
+            "review_incomplete",
+            "review_unparsable",
+        }
+        if event.state in terminal_states:
+            started = self.review_started_at.pop(event.key, None)
+            if started is not None:
+                if stop.review_status == "findings":
+                    outcome = "findings"
+                elif event.state == "cancelled":
+                    outcome = "cancelled"
+                elif stop.review_status in {
+                    "incomplete",
+                    "unparsable",
+                    "review_incomplete",
+                    "review_unparsable",
+                    "missing",
+                    "review_missing",
+                }:
+                    outcome = "incomplete"
+                elif stop.review_status in {"cached", "complete"}:
+                    outcome = "complete"
+                else:
+                    outcome = "failed"
+                self.observability.operation(
+                    f"review.{outcome}", time.monotonic() - started
+                )
+        if event.state == "complete" and stop.review_status == "complete":
+            self._request_reconciliation()
         self.refresh_rows()
 
     def sync_batch_headroom(self, batch: ReviewBatch) -> None:
@@ -3495,6 +4196,26 @@ class ReviewDashboard(App):
             batch.headroom_output_reduction
         )
         self.refresh_status()
+
+    def prune_review_batches(self) -> None:
+        """Bound the finished-batch history without dropping live work.
+
+        Running batches are never evicted: the watcher and every event
+        route through them. Only finished batches age out, oldest first.
+        """
+        if len(self.review_batches) <= MAX_REVIEW_BATCHES:
+            return
+        running = [batch for batch in self.review_batches if batch.running]
+        finished = [batch for batch in self.review_batches if not batch.running]
+        keep = max(0, MAX_REVIEW_BATCHES - len(running))
+        evicted = {id(batch) for batch in finished[:-keep]} if keep else {
+            id(batch) for batch in finished
+        }
+        if not evicted:
+            return
+        self.review_batches = [
+            batch for batch in self.review_batches if id(batch) not in evicted
+        ]
 
     def watch_review_batch(self, batch: ReviewBatch) -> None:
         self.sync_batch_headroom(batch)
@@ -3537,38 +4258,69 @@ class ReviewDashboard(App):
 
     # ── data layer (walker parity) ────────────────────────────────────────
 
-    @work(thread=True, exclusive=True)
-    def load_queue(self) -> None:
+    @work(thread=True, group="queue", exclusive=True)
+    def load_queue(
+        self, reconciliation_request: int = 0, reconciliation_attempt: int = 0
+    ) -> None:
+        success = False
+        try:
+            with self._queue_load_lock:
+                snapshot = self._load_queue_data()
+            if get_current_worker().is_cancelled:
+                return
+            success = snapshot["state"] in {"ready", "empty"}
+            self.call_from_thread(self._apply_queue_snapshot, snapshot)
+        finally:
+            if reconciliation_request:
+                self.call_from_thread(
+                    self._reconciliation_finished,
+                    "queue",
+                    reconciliation_request,
+                    reconciliation_attempt,
+                    success,
+                )
+
+    def _load_queue_data(self) -> dict:
         try:
             who = gh("api", "user", "--jq", ".login")
             identity_detail = (who.stderr or who.stdout).strip()
         except (OSError, subprocess.TimeoutExpired) as error:
             who = None
             identity_detail = str(error)
-        self.self_login = who.stdout.strip() if who and who.returncode == 0 else ""
-        if not self.self_login:
-            self.source_state = "auth-failed"
-            self.source_message = bounded_detail(identity_detail or "GitHub identity is unavailable; sign in and retry")
-            self.all_items = self.queue_items = []
-            self.call_from_thread(self.apply_filters)
-            return
-        if self.filters.live:
-            snapshot = self.load_live_queue(self.filters.live_repository)
-        else:
-            snapshot = self.load_org_queue()
-        # Keep the whole queue: the action filter is a view over it, so
-        # narrowing and widening never needs another fetch.
-        # The unfiltered set: "how busy is this repository" must count the
-        # maintainer's own pull requests too, even though they never appear
-        # as stops to review.
-        self.all_items = snapshot.get("items", [])
-        self.queue_items = [
-            item
-            for item in self.all_items
-            # Own-work filtering: a maintainer reviews other people's work.
-            if not (self.self_login and item.get("author") == self.self_login)
-        ]
-        self.call_from_thread(self.apply_filters)
+        login = who.stdout.strip() if who and who.returncode == 0 else ""
+        if not login:
+            return {
+                "self_login": "",
+                "state": "auth-failed",
+                "message": bounded_detail(
+                    identity_detail or "GitHub identity is unavailable; sign in and retry"
+                ),
+                "items": [],
+            }
+        snapshot = (
+            self.load_live_queue(self.filters.live_repository)
+            if self.filters.live
+            else self.load_org_queue()
+        )
+        snapshot["self_login"] = login
+        return snapshot
+
+    def _apply_queue_snapshot(self, snapshot: dict) -> None:
+        self.self_login = str(snapshot["self_login"])
+        state = str(snapshot["state"])
+        if self.view_mode == "prs":
+            self.source_state = state
+            self.source_message = str(snapshot["message"])
+        if state in {"ready", "empty"}:
+            self.all_items = snapshot["items"]
+            self.queue_items = [
+                item
+                for item in self.all_items
+                if not (self.self_login and item.get("author") == self.self_login)
+            ]
+            self.queue_snapshot_at = time.monotonic()
+        if self.view_mode == "prs":
+            self.apply_filters()
 
     def load_org_queue(self) -> dict:
         """Every open pull request in the organization, live from GitHub.
@@ -3576,33 +4328,52 @@ class ReviewDashboard(App):
         One paginated GraphQL search carries the evidence the recommended
         action is classified from; there is no static snapshot behind this.
         """
+        started = time.monotonic()
+        pages_count = 0
+        items_count = 0
+
+        def finished(state: str, message: str, items: list[dict]) -> dict:
+            self.observability.operation(
+                "queue.refresh",
+                time.monotonic() - started,
+                pages=pages_count,
+                items=items_count,
+            )
+            return {"state": state, "message": message, "items": items}
+
         try:
             result = gh(
                 "api", "graphql", "--paginate", "--slurp",
                 "-f", f"query={ORG_QUEUE_QUERY}",
             )
         except (OSError, subprocess.TimeoutExpired) as error:
-            self.source_state = "error"
-            self.source_message = bounded_detail(
-                f"GitHub could not list the {GITHUB_ORG} queue: {error}"
+            return finished(
+                "error",
+                bounded_detail(
+                    f"GitHub could not list the {GITHUB_ORG} queue: {error}"
+                ),
+                [],
             )
-            return {"items": []}
         if result.returncode:
             detail = bounded_detail((result.stderr or result.stdout).strip())
             lowered = detail.lower()
             if ("authentication" in lowered or "login" in lowered
                     or "permission" in lowered or "forbidden" in lowered
                     or "not accessible" in lowered):
-                self.source_state = "inaccessible"
+                state = "inaccessible"
             else:
-                self.source_state = "error"
-            self.source_message = detail or f"GitHub could not list the {GITHUB_ORG} queue"
-            return {"items": []}
+                state = "error"
+            return finished(
+                state,
+                detail or f"GitHub could not list the {GITHUB_ORG} queue",
+                [],
+            )
         try:
             pages = json.loads(result.stdout)
             if not isinstance(pages, list) or any(not isinstance(page, dict) for page in pages):
                 raise ValueError("GitHub returned malformed search pages")
             items = []
+            pages_count = len(pages)
             for page in pages:
                 nodes = ((page.get("data") or {}).get("search") or {}).get("nodes")
                 if not isinstance(nodes, list):
@@ -3613,52 +4384,78 @@ class ReviewDashboard(App):
                     if not node:
                         continue
                     items.append(org_queue_item(node))
+            items_count = len(items)
         except (json.JSONDecodeError, ValueError) as error:
-            self.source_state = "malformed"
-            self.source_message = bounded_detail(f"malformed GitHub response: {error}")
-            return {"items": []}
-        self.source_state = "empty" if not items else "ready"
-        self.source_message = ""
-        return {"items": items}
+            return finished(
+                "malformed",
+                bounded_detail(f"malformed GitHub response: {error}"),
+                [],
+            )
+        return finished("empty" if not items else "ready", "", items)
 
     def load_live_queue(self, repository: str) -> dict:
+        started = time.monotonic()
+        pages_count = 0
+        items_count = 0
+
+        def finished(state: str, message: str, items: list[dict]) -> dict:
+            self.observability.operation(
+                "queue.refresh",
+                time.monotonic() - started,
+                pages=pages_count,
+                items=items_count,
+            )
+            return {"state": state, "message": message, "items": items}
+
         if not re.fullmatch(r"[^/\s]+/[^/\s]+", repository):
-            self.source_state = "malformed"
-            self.source_message = bounded_detail(f"invalid repository '{repository}'; use owner/repo")
-            return {"items": []}
+            return finished(
+                "malformed",
+                bounded_detail(
+                    f"invalid repository '{repository}'; use owner/repo"
+                ),
+                [],
+            )
         try:
             result = gh(
                 "api", "--paginate", "--slurp", "--method", "GET",
                 f"repos/{repository}/pulls?state=open&per_page=100",
             )
         except (OSError, subprocess.TimeoutExpired) as error:
-            self.source_state = "error"
-            self.source_message = bounded_detail(f"GitHub could not read this repository: {error}")
-            return {"items": []}
+            return finished(
+                "error",
+                bounded_detail(
+                    f"GitHub could not read this repository: {error}"
+                ),
+                [],
+            )
         if result.returncode:
             detail = bounded_detail((result.stderr or result.stdout).strip())
             lowered = detail.lower()
             if ("authentication" in lowered or "login" in lowered
                     or "permission" in lowered or "forbidden" in lowered
                     or "not accessible" in lowered):
-                self.source_state = "inaccessible"
+                state = "inaccessible"
             elif "not found" in lowered or "could not resolve" in lowered:
-                self.source_state = "missing"
+                state = "missing"
             else:
-                self.source_state = "error"
-            self.source_message = detail or "GitHub could not read this repository"
-            return {"items": []}
+                state = "error"
+            return finished(
+                state, detail or "GitHub could not read this repository", []
+            )
         try:
             pages = json.loads(result.stdout)
             if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
                 raise ValueError("GitHub returned malformed pull-request pages")
+            pages_count = len(pages)
             pulls = [pull for page in pages for pull in page]
             if any(not isinstance(pull, dict) for pull in pulls):
                 raise ValueError("GitHub returned a malformed pull-request entry")
         except (json.JSONDecodeError, ValueError) as error:
-            self.source_state = "malformed"
-            self.source_message = bounded_detail(f"malformed GitHub response: {error}")
-            return {"items": []}
+            return finished(
+                "malformed",
+                bounded_detail(f"malformed GitHub response: {error}"),
+                [],
+            )
         try:
             items = []
             for index, pull in enumerate(pulls, 1):
@@ -3698,13 +4495,14 @@ class ReviewDashboard(App):
                         or ""
                     ),
                 })
+            items_count = len(items)
         except ValueError as error:
-            self.source_message = bounded_detail(f"malformed GitHub response: {error}")
-            self.source_state = "malformed"
-            return {"items": []}
-        self.source_state = "empty" if not items else "ready"
-        self.source_message = ""
-        return {"items": items}
+            return finished(
+                "malformed",
+                bounded_detail(f"malformed GitHub response: {error}"),
+                [],
+            )
+        return finished("empty" if not items else "ready", "", items)
 
     @work(thread=True, exclusive=True)
     def load_issues(self) -> None:
@@ -3853,6 +4651,7 @@ class ReviewDashboard(App):
         return {"items": items}
 
     def apply_filters(self) -> None:
+        prior_stops = {stop.key: stop for stop in self.stops}
         for stop in self.stops:
             self.evidence_generation[stop.key] = (
                 self.evidence_generation.get(stop.key, 0) + 1
@@ -3909,26 +4708,50 @@ class ReviewDashboard(App):
             if not self.filters.wants(item):
                 continue
             head_sha = item.get("head_sha", "") or ""
-            stop = Stop(
-                repository=item["repository"],
-                number=item["number"],
-                action=item.get("recommended_action", ""),
-                title=item.get("title", ""),
-                author=item.get("author", "") or "",
-                mergeable_state=item.get("mergeable_state", "") or "",
-                check_state=item.get("check_state", "") or "",
-                review_state=item.get("review_state", "") or "",
-                live={
+            key = f"{item['repository']}#{item['number']}"
+            stop = prior_stops.get(key)
+            if stop is None:
+                stop = Stop(
+                    repository=item["repository"],
+                    number=item["number"],
+                    action=item.get("recommended_action", ""),
+                    title=item.get("title", ""),
+                    author=item.get("author", "") or "",
+                    mergeable_state=item.get("mergeable_state", "") or "",
+                    check_state=item.get("check_state", "") or "",
+                    review_state=item.get("review_state", "") or "",
+                    live={
+                        "baseRefOid": item.get("base_sha", "") or "",
+                        "headRefOid": head_sha,
+                        "reviews": item.get("reviews", []),
+                    },
+                    head_sha=head_sha,
+                )
+            else:
+                stop.action = item.get("recommended_action", "")
+                stop.title = item.get("title", "")
+                stop.author = item.get("author", "") or ""
+                stop.mergeable_state = item.get("mergeable_state", "") or ""
+                stop.check_state = item.get("check_state", "") or ""
+                stop.review_state = item.get("review_state", "") or ""
+                stop.live.update({
                     "baseRefOid": item.get("base_sha", "") or "",
                     "headRefOid": head_sha,
-                },
-                head_sha=head_sha,
-            )
+                    "reviews": item.get("reviews", []),
+                })
+                stop.head_sha = head_sha
             stop.triage_state = self.triage.get(
                 self.triage_key(stop), "unseen"
             )
             stops.append(stop)
-        stops.sort(key=lambda stop: (action_rank(stop.action), stop.repository, stop.number))
+        stops.sort(
+            key=lambda stop: (
+                0 if self.stop_lacks_my_review(stop) else 1,
+                action_rank(stop.action),
+                stop.repository,
+                stop.number,
+            )
+        )
         self.restore_landing_marks(stops)
         if self.reselect:
             for stop in stops:
@@ -4018,8 +4841,19 @@ class ReviewDashboard(App):
     def _review_badge(stop: Stop) -> str:
         if stop.review_status in {"queued", "running"}:
             return "⏳ running"
-        if stop.review_status in {"failed", "cancelled"}:
-            return f" ? {stop.review_status}"
+        if stop.review_status in {
+            "failed",
+            "cancelled",
+            "missing",
+            "incomplete",
+            "unparsable",
+            "review_failed",
+            "review_missing",
+            "review_incomplete",
+            "review_unparsable",
+        }:
+            status = stop.review_status.removeprefix("review_")
+            return f" ? {status}"
         result = stop.review_result
         if result is None:
             return ""
@@ -4103,6 +4937,117 @@ class ReviewDashboard(App):
             item.set_class(stop.selected, "selected")
         self.refresh_status()
 
+    def _activity_freshness(self) -> str:
+        timestamps = [
+            timestamp
+            for timestamp in (
+                self.queue_snapshot_at,
+                self.hive_snapshot_at,
+                self.reconciliation_updated_at,
+            )
+            if timestamp is not None
+        ]
+        age = activity_age(min(timestamps)) if timestamps else ""
+        if self.reconciliation_state == "refreshing":
+            return (
+                f"refreshing — last good {age}"
+                if age else "refreshing"
+            )
+        if self.hive_unavailable or self.reconciliation_state == "unavailable":
+            return (
+                f"retained/last good — {age}"
+                if age else "unavailable"
+            )
+        if timestamps:
+            return f"current — {age}" if age else "current"
+        return "unavailable"
+
+    @staticmethod
+    def _activity_work(keys: list[str]) -> str:
+        shown = [
+            bounded_detail(key)[:MAX_ACTIVITY_TEXT]
+            for key in keys[:MAX_ACTIVITY_WORK_KEYS]
+        ]
+        if len(keys) > len(shown):
+            shown.append(f"+{len(keys) - len(shown)}")
+        return ", ".join(shown)[:MAX_ACTIVITY_TEXT] or "assignment unavailable"
+
+    def refresh_activity(self) -> None:
+        """Render current lifecycle state without discovering new work."""
+        try:
+            panel = self.query_one("#activity", Static)
+        except NoMatches:
+            return
+        active_reviews: list[str] = []
+        parent_reviews = 0
+        for batch in self.review_batches:
+            if not getattr(batch, "running", False):
+                continue
+            parent_reviews += 1
+            for item in getattr(batch, "items", ()):
+                key = str(getattr(item, "key", ""))
+                if key and key not in active_reviews:
+                    active_reviews.append(key)
+        active_reviews.extend(
+            stop.key
+            for stop in self.stops
+            if stop.review_status == "running" and stop.key not in active_reviews
+        )
+        check_workers = getattr(
+            self.review_engine, "active_review_slots", lambda: 0
+        )()
+        active_landings = [
+            task for task in self.landing_queue
+            if self._landing_task_active(task)
+        ]
+        queued_landings = [
+            task for task in self.landing_queue
+            if (
+                not self._landing_task_active(task)
+                and task.process is None
+                and task.returncode is None
+            )
+        ]
+        lines = [
+            "AGENT ACTIVITY",
+            f"Parent reviews: {parent_reviews}",
+            f"Check workers: {check_workers}",
+            f"Landing agents: {len(active_landings)}",
+            f"Queued work: {len(queued_landings)}",
+            f"Snapshot: {self._activity_freshness()}",
+        ]
+        rows = [f"Review — {self._activity_work([key])}" for key in active_reviews]
+        rows.extend(
+            f"Landing — {self._activity_work(list(task.keys))}"
+            for task in active_landings
+        )
+        for worker in self.hive_workers:
+            task = worker.get("task")
+            repository = task.get("repo") if isinstance(task, dict) else None
+            number = task.get("number") if isinstance(task, dict) else None
+            login = bounded_detail(str(worker.get("login") or "?"))[:48]
+            if (
+                isinstance(repository, str)
+                and re.fullmatch(r"[^/\s]+/[^/\s]+", repository)
+                and isinstance(number, int)
+                and not isinstance(number, bool)
+                and number > 0
+            ):
+                prefix = "Hive last known @" if self.hive_workers_stale else "Hive @"
+                rows.append(
+                    f"{prefix}{login} — "
+                    f"{self._activity_work([f'{repository}#{number}'])}"
+                )
+            else:
+                rows.append(f"Hive @{login} — assignment unavailable")
+        if self.hive_unavailable and not self.hive_workers:
+            rows.append("Hive assignments unavailable")
+        if len(rows) > MAX_ACTIVITY_ROWS:
+            rows = rows[:MAX_ACTIVITY_ROWS - 1] + [
+                f"… {len(rows) - (MAX_ACTIVITY_ROWS - 1)} more active assignments"
+            ]
+        panel.update("\n".join(escape(line) for line in [*lines, *rows]))
+
     def refresh_status(self) -> None:
         selected = sum(1 for s in self.stops if s.selected)
         failed = sum(1 for s in self.stops if s.failure)
@@ -4110,7 +5055,17 @@ class ReviewDashboard(App):
         review_failed = sum(
             1
             for stop in self.stops
-            if stop.review_status in {"failed", "cancelled"}
+            if stop.review_status in {
+                "failed",
+                "cancelled",
+                "missing",
+                "incomplete",
+                "unparsable",
+                "review_failed",
+                "review_missing",
+                "review_incomplete",
+                "review_unparsable",
+            }
         )
         review_failures = (
             f" | {review_failed} review failed"
@@ -4132,6 +5087,26 @@ class ReviewDashboard(App):
             if self.landing_queue
             else ""
         )
+        review_cap = getattr(self.review_engine, "effective_review_cap", lambda: 0)()
+        review_running = getattr(self.review_engine, "active_review_slots", lambda: 0)()
+        active_reviews = sum(
+            1 for stop in self.stops if stop.review_status == "running"
+        )
+        self.observability.state("reviews.active", active_reviews)
+        self.observability.state("landings.active", running)
+        self.observability.state("check_workers.active", review_running)
+        reviews = f" | review slots: {review_running}/{review_cap}"
+        breaker_parts = []
+        for dep in Dependency:
+            b_state = getattr(self.gh_client, "state", lambda d: BreakerState(False))(dep)
+            if not b_state.blocked:
+                d_state = get_breaker(dep)
+                if d_state.blocked:
+                    b_state = d_state
+            if b_state.blocked:
+                retry_detail = f" (retry_at {b_state.retry_at})" if b_state.retry_at is not None else ""
+                breaker_parts.append(f" | {dep.value} breaker: blocked{retry_detail}")
+        breakers = "".join(breaker_parts)
         shown = len(self.stops)
         total = len(self.queue_items)
         scope = self.filters.action or "all"
@@ -4183,6 +5158,13 @@ class ReviewDashboard(App):
             and isinstance(method, str)
             else ""
         )
+        countme = (
+            " | Countme unavailable"
+            if self.observability.status == "unavailable"
+            else ""
+        )
+        reconciliation = f" | queue {self.reconciliation_state}"
+        self.refresh_activity()
         try:
             status_bar = self.query_one("#status-bar", Static)
         except NoMatches:
@@ -4193,16 +5175,16 @@ class ReviewDashboard(App):
                 f" {view_tag}Issues: {shown} open "
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
-                f"| batch: {selected}"
-                f" | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
+                f"| batch: {selected}{reconciliation}"
+                f"{reviews}{breakers}{countme} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
             )
         else:
             status_bar.update(
                 f" {view_tag}Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
-                f"| batch: {selected}{stuck}{review_failures}{agents}{landed}{policy}"
-                f" | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
+                f"| batch: {selected}{reconciliation}{stuck}{review_failures}{agents}{landed}{policy}"
+                f"{reviews}{breakers}{countme} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
             )
 
     def action_filter(self) -> None:
@@ -4392,6 +5374,7 @@ class ReviewDashboard(App):
         stop.head_sha = str(stop.live.get("headRefOid") or "")
         if merge_rights is not None:
             self.merge_rights[stop.repository] = merge_rights
+            _bound_map(self.merge_rights, MAX_MERGE_RIGHTS_ENTRIES)
         current_base = str(stop.live.get("baseRefOid") or "")
         result_base = str(
             (stop.review_result.provenance if stop.review_result else {}).get(
@@ -4928,7 +5911,7 @@ class ReviewDashboard(App):
         for command in commands:
             try:
                 result = _run_mutation(
-                    command, timeout=MUTATION_TIMEOUT
+                    command, timeout=MUTATION_TIMEOUT, idempotent=False
                 )
             except (subprocess.TimeoutExpired, OSError) as error:
                 trace(
@@ -4999,6 +5982,8 @@ class ReviewDashboard(App):
             self.show_evidence(stop)
         elif self.current:
             self.show_evidence(self.current)
+        if not stop.is_issue:
+            self._request_reconciliation()
 
     # ── actions ───────────────────────────────────────────────────────────
 
@@ -5102,18 +6087,14 @@ class ReviewDashboard(App):
         if not self.stops:
             return
         start = self._queue().index or 0
-        current = self.current
-        if current is not None and current.triage_state == "unseen":
-            current.triage_state = "skipped"
-            self.triage[self.triage_key(current)] = "skipped"
         for offset in range(1, len(self.stops) + 1):
             index = (start + offset) % len(self.stops)
             stop = self.stops[index]
-            if stop.triage_state == "unseen":
+            if self.stop_lacks_my_review(stop):
                 self._queue().index = index
                 return
         self.notify(
-            "all visible rows have been triaged.",
+            "no visible pull requests lack your review.",
             severity="information",
         )
 
@@ -5145,11 +6126,242 @@ class ReviewDashboard(App):
         elif self.current:
             self.start_review(self.current)
 
+    def action_slay_pr(self) -> None:
+        """`$`: slay a pull request (review if unreviewed, fix if findings, land in batch)."""
+        if self.view_mode == "issues" or (self.current and self.current.is_issue):
+            self.notify("action applies to pull requests only", severity="warning")
+            return
+        if not self.self_login:
+            self.notify("your GitHub login is unknown; needed for landing.", severity="warning")
+            return
+        targets = [s for s in self.stops if s.selected] or ([self.current] if self.current else [])
+        if not targets:
+            self.notify("nothing selected to slay", severity="warning")
+            return
+        review_targets = []
+        for stop in targets:
+            identity = self.run_identity(stop)
+            record = self.run_store.get(identity)
+            if record is not None:
+                if record.in_flight:
+                    self.notify(f"[$] {stop.key} is already being slayed", severity="warning")
+                    continue
+                if record.is_terminal:
+                    self.notify(
+                        f"[$] {stop.key} at {identity.head_sha[:8]} already reached terminal state {record.state.value}; head must advance to re-slay",
+                        severity="warning",
+                    )
+                    continue
+            else:
+                record = self.run_store.create(identity)
+
+            has_review = (
+                stop.review_status in {"cached", "complete", "findings"}
+                or stop.review_result is not None
+            )
+            if has_review:
+                findings = list(stop.review_result.findings if stop.review_result else [])
+                target_state = (
+                    RunState.REVIEW_FINDINGS
+                    if (findings or stop.review_status == "findings")
+                    else RunState.REVIEW_CLEAN
+                )
+                if record.state == RunState.PENDING:
+                    self.run_store.transition(identity, RunState.REVIEWING)
+                    record = self.run_store.transition(identity, target_state)
+                self._dispatch_slay_landing(stop, identity=identity)
+            else:
+                if record.state == RunState.PENDING:
+                    self.run_store.transition(identity, RunState.REVIEWING)
+                self.notify(f"[$] slaying {stop.key}: running review…")
+                review_targets.append(stop)
+        if not review_targets:
+            return
+        active = {
+            item.key
+            for review_batch in self.review_batches
+            if review_batch.running
+            for item in review_batch.items
+        }
+        ready = []
+        for stop in review_targets:
+            if stop.key in (active | self.review_pending_keys):
+                # The claim in run_store stays: the review already
+                # running will complete, and its event handler lands it.
+                self.notify(
+                    f"[$] {stop.key} is already being reviewed.",
+                    severity="warning",
+                )
+            else:
+                ready.append(stop)
+        if not ready:
+            return
+        ready_keys = {stop.key for stop in ready}
+        self.review_pending_keys.update(ready_keys)
+        self.start_review_batch(ready)
+
+    def _dispatch_slay_landing(
+        self, stop: Stop, identity: RunIdentity | None = None
+    ) -> None:
+        if not self.self_login:
+            self.notify("your GitHub login is unknown; needed for landing.", severity="warning")
+            return
+        if identity is None:
+            identity = self.run_identity(stop)
+        record = self.run_store.get(identity)
+        if record is None:
+            record = self.run_store.create(identity)
+        if not record.may_mutate():
+            self.notify(
+                f"[$] {stop.key}: cannot land — run state {record.state.value} cannot mutate",
+                severity="error",
+            )
+            return
+
+        try:
+            live_data = self.fetch_live_pr(stop.repository, stop.number, force=True)
+        except Exception as error:
+            self.notify(
+                f"[$] {stop.key}: live re-fetch failed: {error}",
+                severity="error",
+            )
+            return
+
+        live_head_sha = str(live_data.get("headRefOid") or "")
+        if not FULL_SHA.fullmatch(live_head_sha):
+            live_head_sha = identity.head_sha
+
+        # Revalidate head (#410, #411)
+        head_moved = (live_head_sha != identity.head_sha)
+        fixer_advanced = head_moved and self.is_fixer_head(stop.repository, stop.number, live_head_sha)
+
+        record = self.run_store.revalidate_head(identity, live_head_sha, fixer_advanced=fixer_advanced)
+        if record.state == RunState.HEAD_CHANGED:
+            stop.failure = f"landing aborted: head changed (reviewed {identity.head_sha[:12]}, live {live_head_sha[:12]})"
+            stop.failure_command = "gh pr view"
+            self.notify(
+                f"[$] {stop.key}: head changed between review and mutation; landing aborted",
+                severity="error",
+            )
+            self.refresh_rows()
+            return
+
+        if record.state == RunState.ESCALATION_REQUIRED:
+            # Head was advanced by our fixer (#411). Trigger fresh high-assurance review of the new head.
+            esc_backend, esc_model, esc_effort = self.escalation_profile(stop)
+            new_id = self.run_identity(
+                stop, head_sha=live_head_sha, model=esc_model, effort=esc_effort
+            )
+            self.run_store.create(new_id)
+            self.run_store.transition(new_id, RunState.RE_REVIEWING)
+            stop.head_sha = live_head_sha
+            stop.live["headRefOid"] = live_head_sha
+            stop.review_status = "running"
+            stop.review_result = None
+            self.active_review_identities[stop.key] = new_id
+            if stop.key not in self.review_pending_keys:
+                self.start_review_batch([stop], model=esc_model, effort=esc_effort)
+            self.notify(
+                f"[$] {stop.key}: head advanced by fixer ({live_head_sha[:8]}) — triggering fresh strong review ({esc_model})…",
+            )
+            self.refresh_rows()
+            return
+
+        findings = list(stop.review_result.findings if stop.review_result else [])
+        if findings or stop.review_status == "findings":
+            task = landing.new_fix_task(stop, findings, self.self_login)
+            task.policy = self.final_policy or "automatic"
+            self.enqueue_landing(task)
+            self.notify(f"[$] {stop.key}: findings detected — dispatched auto-fix & land [w]")
+            stop.selected = False
+            self.refresh_rows()
+            return
+
+        # Escalation check on clean review (#411)
+        low_risk = is_low_risk(stop)
+        high_assurance = is_high_assurance(identity.model)
+        if not high_assurance and not low_risk:
+            # Cheap first-pass clean verdict cannot authorise merge on its own (#411).
+            # Escalation is skippable only for the explicit low-risk class.
+            self.run_store.transition(
+                identity,
+                RunState.ESCALATION_REQUIRED,
+                reason=f"cheap model {identity.model} clean verdict cannot authorise merge",
+            )
+            esc_backend, esc_model, esc_effort = self.escalation_profile(stop)
+            new_id = self.run_identity(
+                stop, head_sha=live_head_sha, model=esc_model, effort=esc_effort
+            )
+            self.run_store.create(new_id)
+            self.run_store.transition(new_id, RunState.RE_REVIEWING)
+            stop.review_status = "running"
+            stop.review_result = None
+            self.active_review_identities[stop.key] = new_id
+            if stop.key not in self.review_pending_keys:
+                self.start_review_batch([stop], model=esc_model, effort=esc_effort)
+            self.notify(
+                f"[$] {stop.key}: clean first pass ({identity.model}) cannot authorise merge — triggering strong review ({esc_model})…",
+            )
+            self.refresh_rows()
+            return
+
+        # Transition to MUTATING before gate checks
+        self.run_store.transition(identity, RunState.MUTATING, low_risk=low_risk)
+
+        # Human review invariant at the landing gate (#414)
+        if not self.has_human_review(live_data):
+            self.run_store.transition(
+                identity,
+                RunState.HUMAN_REVIEW_MISSING,
+                reason="no human review on GitHub",
+            )
+            stop.failure = "landing refused: no human review on GitHub"
+            stop.failure_command = "landing gate"
+            self.notify(
+                f"[$] {stop.key}: landing refused: no human review on GitHub",
+                severity="error",
+            )
+            self.refresh_rows()
+            return
+
+        # Permissions check
+        try:
+            perm_res = self.gh_client.read(
+                "api", f"repos/{stop.repository}", "--jq", ".permissions.push"
+            )
+            if perm_res.returncode == 0 and perm_res.stdout.strip():
+                has_push = perm_res.stdout.strip().lower() == "true"
+                self.merge_rights[stop.repository] = has_push
+                _bound_map(self.merge_rights, MAX_MERGE_RIGHTS_ENTRIES)
+                if not has_push:
+                    self.run_store.transition(
+                        identity,
+                        RunState.MUTATION_FAILED,
+                        reason="push permission denied",
+                    )
+                    stop.failure = "landing refused: push permission denied"
+                    stop.failure_command = "permissions.push"
+                    self.notify(
+                        f"[$] {stop.key}: push permission denied",
+                        severity="error",
+                    )
+                    self.refresh_rows()
+                    return
+        except Exception:
+            pass
+
+        task = landing.new_task([stop], self.self_login)
+        task.policy = self.final_policy or "automatic"
+        self.enqueue_landing(task)
+        self.notify(f"[$] {stop.key}: review clean — dispatched batch landing [w]")
+        stop.selected = False
+        self.refresh_rows()
+
     def fetch_live_pr(self, repository: str, number: int, force: bool = False) -> dict[str, Any]:
         stop = next((s for s in self.stops if s.repository == repository and s.number == number), None)
         if not force and stop and stop.live.get("baseRefOid") and stop.live.get("headRefOid"):
             return stop.live
-        live = gh(
+        live = self.gh_client.read(
             "pr", "view", str(number), "--repo", repository,
             "--json",
             "author,state,baseRefOid,headRefOid,isDraft,mergeable,mergeStateStatus,"
@@ -5157,12 +6369,17 @@ class ReviewDashboard(App):
             "closingIssuesReferences,statusCheckRollup,labels,reviews,title",
         )
         if live.returncode == 0:
-            data = json.loads(live.stdout)
+            data = json.loads(live.stdout) if (live.stdout and live.stdout.strip()) else {}
             if stop:
-                stop.live = data
-                if data.get("headRefOid"):
-                    stop.head_sha = str(data["headRefOid"])
-                stop.triage_state = self.triage.get(self.triage_key(stop), "unseen")
+                if data:
+                    merged = dict(stop.live)
+                    merged.update(data)
+                    stop.live = merged
+                    if data.get("headRefOid"):
+                        stop.head_sha = str(data["headRefOid"])
+                    stop.triage_state = self.triage.get(self.triage_key(stop), "unseen")
+                    return merged
+                return stop.live
             return data
         if not force and stop and stop.live:
             return stop.live
@@ -5239,8 +6456,17 @@ class ReviewDashboard(App):
         if self.view_mode == "issues":
             self.load_issues()
         else:
-            self.load_queue()
-            self.load_hive()
+            request = (
+                self._reconciliation_request
+                if self._reconciliation_waiting
+                else 0
+            )
+            if request:
+                self._start_reconciliation_source("queue", request)
+                self._start_reconciliation_source("hive", request)
+            else:
+                self.load_queue()
+                self.load_hive()
 
     def action_update_branch(self) -> None:
         """Bring the branch up to date with its base — the batch, if set.
@@ -5377,6 +6603,13 @@ class ReviewDashboard(App):
             return
         self.push_screen(DiffScreen(stop))
 
+    def action_view_comments(self) -> None:
+        # Unlike the diff, a comment thread exists for issues too, and the
+        # issues view is where triage reads them.
+        stop = self.current
+        if stop:
+            self.push_screen(CommentsScreen(stop))
+
     def action_comment(self) -> None:
         stop = self.current
         if not stop:
@@ -5462,7 +6695,7 @@ class ReviewDashboard(App):
         Hive's App-authorship check (#247).
 
         The versioned `/api/v1` route is the only one a GitHub bearer token
-        may use: kubestellar/hive#4052 gave it a hosted ingress without the
+        may use: hivecommons/hive#4052 gave it a hosted ingress without the
         browser-login intercept, while the session-only `/api/prs` route still
         belongs to the dashboard's browser clients (#258).
         """
@@ -5679,6 +6912,7 @@ class ReviewDashboard(App):
             res = _run_mutation(
                 cmd,
                 timeout=MUTATION_TIMEOUT,
+                idempotent=False,
             )
             return action_plan.OperationResult(
                 return_code=res.returncode,
@@ -5752,6 +6986,8 @@ class ReviewDashboard(App):
                 stop.failure = str(reason)
 
         self.refresh_rows()
+        if receipt.succeeded:
+            self._request_reconciliation()
 
     def action_merge(self) -> None:
         if self.view_mode == "issues" or (self.current and self.current.is_issue):
@@ -5881,9 +7117,36 @@ class ReviewDashboard(App):
             )
         )
 
+    def _prune_landing_queue(self) -> None:
+        """Bound the landing history. Caller must hold _landing_condition.
+
+        Only finished tasks are evicted, oldest first, so a running or
+        not-yet-started landing is never dropped and the newest task stays
+        last -- the status line reads the queue's tail.
+        """
+        if len(self.landing_queue) <= MAX_LANDING_QUEUE:
+            return
+        surplus = len(self.landing_queue) - MAX_LANDING_QUEUE
+        kept: list["landing.LandingTask"] = []
+        for task in self.landing_queue:
+            finished = (
+                task.returncode is not None
+                and id(task) not in self._landing_active
+            )
+            if surplus > 0 and finished:
+                # id() is reused once the object is freed, so a stale
+                # membership entry would misreport an unrelated later task
+                # as active.
+                self._landing_active.discard(id(task))
+                surplus -= 1
+                continue
+            kept.append(task)
+        self.landing_queue = kept
+
     def enqueue_landing(self, task: "landing.LandingTask") -> None:
         with self._landing_condition:
             self.landing_queue.append(task)
+            self._prune_landing_queue()
             if not task.phase:
                 # A new dispatch supersedes the previous batch's outcome line.
                 # A final-review round belongs to the batch already on that
@@ -5974,6 +7237,7 @@ class ReviewDashboard(App):
     def run_landing_task(self, task: "landing.LandingTask") -> None:
         """One batch agent, off the UI thread, its own process group so
         [x] stops the agent and everything it spawned together."""
+        task.started = time.monotonic()
         try:
             try:
                 log = open(task.log_path, "a", encoding="utf-8")
@@ -6008,6 +7272,7 @@ class ReviewDashboard(App):
                         )
                     else:
                         task.process = process
+                        self.call_from_thread(self.refresh_status)
                         task.returncode = process.wait()
         finally:
             with self._landing_condition:
@@ -6021,10 +7286,11 @@ class ReviewDashboard(App):
         self.drain_landings()
 
     def landing_finished(self, task: "landing.LandingTask") -> None:
-        """Fold the agent's report back onto the rows and say so: landed
-        work leaves the batch; blocked, failed, and unfinished work stays
-        selected with its reason. The notification announces the outcome —
-        the row marking is what survives it."""
+        """Fold the agent's report back onto rows without re-arming retries.
+
+        Landing results remain visible as row failures, but every retry needs
+        an explicit maintainer selection and confirmation.
+        """
         if task.phase:
             # A final review-and-fix round (#378) is not a landing: the pull
             # requests already have their outcomes, so re-folding them would
@@ -6045,14 +7311,14 @@ class ReviewDashboard(App):
                 stop.selected = False
                 stop.failure = ""
             elif state in ("blocked", "failed", "awaiting-stable"):
-                # blocked/failed need a maintainer; an agent that exits with
-                # a PR still short of :stable has not finished, whatever its
-                # exit code — the row keeps the reason and stays selected.
-                stop.selected = True
-                stop.failure = f"{state}: {event.get('note', 'no reason given')}"
+                stop.selected = False
+                stop.failure = (
+                    f"{state}: "
+                    f"{bounded_detail(str(event.get('note', 'no reason given')))}"
+                )
             else:
                 detail = f"last report: {state}" if state else "no report"
-                stop.selected = True
+                stop.selected = False
                 if done:
                     # The agent closed its report but never carried this
                     # pull request to an outcome — a hole in the report,
@@ -6097,10 +7363,22 @@ class ReviewDashboard(App):
             severity = "warning"
         else:
             severity = "information"
+        duration = max(0.0, time.monotonic() - task.started)
+        if counts["failed"]:
+            outcome = "failed"
+        elif counts["no outcome"] or counts["died mid-batch"] or not done:
+            outcome = "incomplete"
+        elif counts["blocked"] or counts["awaiting-stable"]:
+            outcome = "blocked"
+        else:
+            outcome = "complete"
+        self.observability.operation(f"landing.{outcome}", duration)
         # Set before refresh_rows: refresh_status renders it onto the bar.
         self.last_landing_outcome = message
         self.refresh_rows()
         self.notify(message, severity=severity)
+        if done:
+            self._request_reconciliation()
         self.advance_final_review(task)
         self._wake_landing_dispatch()
 
@@ -6218,7 +7496,10 @@ class ReviewDashboard(App):
                 continue
             state = event.get("state")
             if state in ("blocked", "failed", "awaiting-stable"):
-                stop.failure = f"{state}: {event.get('note', 'no reason given')}"
+                stop.failure = (
+                    f"{state}: "
+                    f"{bounded_detail(str(event.get('note', 'no reason given')))}"
+                )
 
     def action_agents(self) -> None:
         if not self.landing_queue:

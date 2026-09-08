@@ -124,25 +124,6 @@ def choose_option(repository: str, preferences: dict[str, Preference],
     return next((option for option in options if option.discovery.availability is Availability.READY), None)
 
 
-def choose(repository: str, preferences: dict[str, Preference], discovery: Discovery,
-           configured: Preference | None = None) -> Preference | None:
-    candidates = [preferences.get(repository), preferences.get("*"), configured,
-                  Preference("codex", "gemini-3.8-flash", "high")]
-    for candidate in candidates:
-        if candidate and candidate.harness_id == discovery.backend and discovery.availability is Availability.READY:
-            return candidate
-    return None
-
-
-def stale_choice(repository: str, preferences: dict[str, Preference],
-                 discovery: Discovery) -> str | None:
-    remembered = preferences.get(repository) or preferences.get("*")
-    if remembered and discovery.availability is not Availability.READY:
-        return (f"Remembered {remembered.harness_id}/{remembered.model} is "
-                f"{discovery.availability.value}; confirm a replacement.")
-    return None
-
-
 def can_remember(result: ReviewResult, binding: ReviewRequest) -> bool:
     if result.state not in ("complete", "findings"):
         return False

@@ -77,8 +77,8 @@
 # KEY=VALUE, so it cannot be a plain recipe parameter. Unsupported values are
 # hard errors rather than silent fallbacks.
 tool_env := env("TOOL", "")
-hive_repo_url := "https://github.com/kubestellar/hive"
-# origin/v4 via `git ls-remote --heads https://github.com/kubestellar/hive v4`
+hive_repo_url := "https://github.com/hivecommons/hive"
+# origin/v4 via `git ls-remote --heads https://github.com/hivecommons/hive v4`
 # on 2026-09-06.
 hive_commit := "fe34da51434ad9b0924eee1492047c3c95c705ff"
 gemini_model := "gemini-3.8-flash"
@@ -91,7 +91,6 @@ opus_context_limit := "264000"
 sol_model := "gpt-5.6-sol"
 k3_model := "kimi-k3"
 k3_context_limit := "264000"
-default_profile := "gemini"
 # The fsdk-derived contributor image, used by every recipe that starts a
 # container.
 #
@@ -124,7 +123,7 @@ can_run_attended_hive_setup() {
 print_missing_hive_setup_guidance() {
   local path="$1" reason="$2" tool="$3" commit="$4"
   echo "ERROR: missing Hive setup at ${path}; ${reason}." >&2
-  echo "  Re-run review from an interactive terminal, or pre-seed it yourself from kubestellar/hive @ ${commit} by running \`just contribute-setup ${tool}\` in an interactive checkout (set REVIEW_HIVE_COMMIT to another full commit if needed)" >&2
+  echo "  Re-run review from an interactive terminal, or pre-seed it yourself from hivecommons/hive @ ${commit} by running \`just contribute-setup ${tool}\` in an interactive checkout (set REVIEW_HIVE_COMMIT to another full commit if needed)" >&2
 }
 GOOSE_INSTALL_HINT="Install: https://github.com/block/goose/releases"
 GOOSE_FIXIT_HINT="Run: goose configure, select GitHub Copilot, and complete the device flow."
@@ -368,6 +367,69 @@ ensure_contributor_image() {
   return 1
 }
 
+review_queue_kubernetes_available() {
+  command -v kubectl &>/dev/null || return 1
+  kubectl config current-context >/dev/null 2>&1 || return 1
+  kubectl get --raw='/readyz?verbose' --request-timeout=5s >/dev/null 2>&1 || return 1
+  kubectl get pvc review-queue-state -n bluefin-system --request-timeout=5s >/dev/null 2>&1 || {
+    echo "ERROR: Kubernetes dashboard state claim 'review-queue-state' cannot be read; it may be absent or access may be denied." >&2
+    return 2
+  }
+}
+cleanup_kubernetes_dashboard() {
+  [[ -n "${K8S_DASHBOARD_POD:-}" ]] ||
+    [[ -n "${K8S_DASHBOARD_SECRET:-}" ]] || return 0
+  kubectl delete pod "${K8S_DASHBOARD_POD:-}" -n bluefin-system \
+    --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  kubectl delete secret "${K8S_DASHBOARD_SECRET:-}" -n bluefin-system \
+    --ignore-not-found --wait=false >/dev/null 2>&1 || true
+}
+review_queue_kubernetes() {
+  local image="$1"
+  shift
+  local session_id env_names
+  local -a otlp_secret_args=()
+  session_id="$(date +%s)-$$"
+  K8S_DASHBOARD_POD="review-queue-${session_id}"
+  K8S_DASHBOARD_SECRET="review-session-${session_id}"
+  K8S_ENV_NAMES=(
+    GH_TOKEN GITHUB_COPILOT_TOKEN HIVE_HUB BLUEFIN_REVIEW_INSTANCE
+    GOOSE_PROVIDER GOOSE_MODEL GOOSE_THINKING_EFFORT GOOSE_CONTEXT_LIMIT
+    BLUEFIN_REVIEW_BACKEND
+  )
+  if [[ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]]; then
+    K8S_ENV_NAMES+=(OTEL_EXPORTER_OTLP_ENDPOINT)
+    otlp_secret_args+=(
+      --from-file=OTEL_EXPORTER_OTLP_ENDPOINT=<(printf '%s' "$OTEL_EXPORTER_OTLP_ENDPOINT")
+    )
+    if [[ -n "${OTEL_EXPORTER_OTLP_HEADERS:-}" ]]; then
+      K8S_ENV_NAMES+=(OTEL_EXPORTER_OTLP_HEADERS)
+      otlp_secret_args+=(
+        --from-file=OTEL_EXPORTER_OTLP_HEADERS=<(printf '%s' "$OTEL_EXPORTER_OTLP_HEADERS")
+      )
+    fi
+  fi
+  env_names="$(IFS=,; echo "${K8S_ENV_NAMES[*]}")"
+
+  kubectl create secret generic "$K8S_DASHBOARD_SECRET" -n bluefin-system \
+    --from-file=GH_TOKEN=<(printf '%s' "$GH_TOKEN_VALUE") \
+    --from-file=GITHUB_COPILOT_TOKEN=<(printf '%s' "${COPILOT_TOKEN:-}") \
+    --from-file=HIVE_HUB=<(printf '%s' "$DASHBOARD_HIVE_HUB") \
+    --from-file=BLUEFIN_REVIEW_INSTANCE=<(printf '%s' "$K8S_DASHBOARD_POD") \
+    --from-file=GOOSE_PROVIDER=<(printf '%s' "${GOOSE_PROVIDER:-}") \
+    --from-file=GOOSE_MODEL=<(printf '%s' "${GOOSE_MODEL:-}") \
+    --from-file=GOOSE_THINKING_EFFORT=<(printf '%s' "${GOOSE_THINKING_EFFORT:-}") \
+    --from-file=GOOSE_CONTEXT_LIMIT=<(printf '%s' "${GOOSE_CONTEXT_LIMIT:-}") \
+    --from-file=BLUEFIN_REVIEW_BACKEND=<(printf '%s' "$REVIEW_BACKEND") \
+    "${otlp_secret_args[@]}" >/dev/null
+
+  python3 scripts/review-session-runtime.py "$session_id" "$image" \
+    "$K8S_DASHBOARD_SECRET" review-queue-state "$env_names" queue "$@" |
+    kubectl create -f -
+  kubectl wait --for=condition=Ready "pod/${K8S_DASHBOARD_POD}" -n bluefin-system --timeout=5m
+  kubectl attach --stdin --tty "$K8S_DASHBOARD_POD" -n bluefin-system
+}
+
 resolve_copilot_token() {
   # Goose's github_copilot provider needs the long-lived OAuth token minted by
   # the Copilot editor device flow (a "ghu_" user-to-server token). Without it
@@ -472,16 +534,12 @@ resolve_codex_auth_file() {
   return 0
 }
 stage_codex_auth_file() {
-  local stage_root=/tmp
   CODEX_AUTH_FILE=""
   CODEX_AUTH_STAGING_DIR=""
   resolve_codex_auth_file
   [[ -n "$CODEX_AUTH_SOURCE_FILE" ]] || return 0
-  if [[ "$stage_root" != /* || ! -d "$stage_root" || ! -w "$stage_root" ]]; then
-    stage_root=/tmp
-  fi
   umask 077
-  CODEX_AUTH_STAGING_DIR="$(mktemp -d "${stage_root%/}/review-codex-auth.XXXXXX")"
+  CODEX_AUTH_STAGING_DIR="$(mktemp -d /tmp/review-codex-auth.XXXXXX)"
   CODEX_AUTH_FILE="${CODEX_AUTH_STAGING_DIR}/auth.json"
   cp -- "$CODEX_AUTH_SOURCE_FILE" "$CODEX_AUTH_FILE"
   chmod 0600 "$CODEX_AUTH_FILE"
@@ -623,7 +681,7 @@ prepare_pinned_hive_checkout() {
     git -C "$HIVE_SRC_DIR" remote add origin "$HIVE_REPO_URL"
   fi
 
-  echo "Preparing kubestellar/hive @ ${HIVE_COMMIT:0:12} -> ${HIVE_SRC_DIR}..."
+  echo "Preparing hivecommons/hive @ ${HIVE_COMMIT:0:12} -> ${HIVE_SRC_DIR}..."
   git -C "$HIVE_SRC_DIR" fetch --depth 1 origin "$HIVE_COMMIT"
   git -C "$HIVE_SRC_DIR" checkout --detach -f FETCH_HEAD
   actual_commit="$(git -C "$HIVE_SRC_DIR" rev-parse HEAD)"
@@ -1010,8 +1068,6 @@ add_review_exec_container_args() {
     CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_EXEC_SOCKET=/run/bluefin-review-exec/broker.sock")
     CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_EXEC_SESSION=${REVIEW_EXEC_SESSION}")
     CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_EXEC_AVAILABLE=1")
-  else
-    CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_EXEC_AVAILABLE=0")
   fi
 }
 
@@ -1380,11 +1436,25 @@ review-queue *queue_args:
     K3_CONTEXT_LIMIT="{{k3_context_limit}}"
 
     resolve_review_backend
-    command -v podman &>/dev/null || {
-      echo "ERROR: Podman is required to run the contributor container." >&2
-      echo "  Install Podman, then re-run review-queue." >&2
-      exit 1
-    }
+    K8S_DASHBOARD=0
+    if [[ "${REVIEW_RUNTIME:-}" == k8s ]]; then
+      if review_queue_kubernetes_available; then
+        K8S_DASHBOARD=1
+      else
+        runtime_status=$?
+        if [[ "$runtime_status" == 2 ]]; then
+          exit 1
+        fi
+        echo "! Kubernetes is unavailable; using the local Podman dashboard." >&2
+      fi
+    fi
+    if [[ "$K8S_DASHBOARD" != 1 ]]; then
+      command -v podman &>/dev/null || {
+        echo "ERROR: Podman is required to run the contributor container." >&2
+        echo "  Install Podman, then re-run review-queue." >&2
+        exit 1
+      }
+    fi
 
     require_goose_backend "$TOOL"
     if [[ "$REVIEW_BACKEND" == codex ]]; then
@@ -1445,14 +1515,18 @@ review-queue *queue_args:
     fi
 
     CONTRIBUTOR_IMAGE="{{contributor_image}}"
-    require_no_running_instance "$CONTAINER_NAME"
-    ensure_contributor_image "$CONTRIBUTOR_IMAGE"
+    if [[ "$K8S_DASHBOARD" != 1 ]]; then
+      require_no_running_instance "$CONTAINER_NAME"
+      ensure_contributor_image "$CONTRIBUTOR_IMAGE"
+    fi
 
     # The lab offer happens before anything starts and answers in one
     # question. Declining, no terminal, no kubectl, or an unreachable
     # cluster all leave LAB_SOCKET empty and the dashboard fully usable.
-    offer_lab_session
-    offer_review_exec_session
+    if [[ "$K8S_DASHBOARD" != 1 ]]; then
+      offer_lab_session
+      offer_review_exec_session
+    fi
 
     CONTAINER_ARGS=(
       podman run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
@@ -1469,9 +1543,11 @@ review-queue *queue_args:
     # One shared host directory under the host XDG state root: the queue it
     # records is the same whichever instance name runs, and :z keeps it
     # writable for concurrent named dashboards.
-    QUEUE_STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-review"
-    mkdir -p "$QUEUE_STATE_DIR"
-    CONTAINER_ARGS+=(--volume "${QUEUE_STATE_DIR}:/home/dev/.local/state/bluefin-review:rw,z")
+    if [[ "$K8S_DASHBOARD" != 1 ]]; then
+      QUEUE_STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-review"
+      mkdir -p "$QUEUE_STATE_DIR"
+      CONTAINER_ARGS+=(--volume "${QUEUE_STATE_DIR}:/home/dev/.local/state/bluefin-review:rw,z")
+    fi
     # The instance name qualifies each landing batch id: two named dashboards
     # share the state directory, and a bare timestamp id would let their
     # batches overwrite each other's prompt, status, and log.
@@ -1510,15 +1586,19 @@ review-queue *queue_args:
     CODEX_AUTH_STAGING_DIR=""
     # One trap owns this session's teardown: the staged Codex credential,
     # the lab broker, and the review-exec broker die with the terminal.
-    trap 'cleanup_codex_auth_file; cleanup_lab_broker; cleanup_review_exec_broker' EXIT
+    trap 'cleanup_kubernetes_dashboard; cleanup_codex_auth_file; cleanup_lab_broker; cleanup_review_exec_broker' EXIT
     if [[ "$REVIEW_BACKEND" == codex ]]; then
-      stage_codex_auth_file
-      if [[ -n "$CODEX_AUTH_FILE" ]]; then
-        CONTAINER_ARGS+=(--volume "$CODEX_AUTH_FILE:/home/dev/.codex/auth.json:rw,z")
-        echo "✓ Codex subscription login staged as one private file (contents not shown; host cache not mounted)."
+      if [[ "$K8S_DASHBOARD" != 1 ]]; then
+        stage_codex_auth_file
+        if [[ -n "$CODEX_AUTH_FILE" ]]; then
+          CONTAINER_ARGS+=(--volume "$CODEX_AUTH_FILE:/home/dev/.codex/auth.json:rw,z")
+          echo "✓ Codex subscription login staged as one private file (contents not shown; host cache not mounted)."
+        else
+          echo "! Codex subscription login unavailable; run 'codex login' with file credential storage." >&2
+          echo "  Review stays open, reports NEEDS SIGN-IN, and never silently selects Codex." >&2
+        fi
       else
-        echo "! Codex subscription login unavailable; run 'codex login' with file credential storage." >&2
-        echo "  Review stays open, reports NEEDS SIGN-IN, and never silently selects Codex." >&2
+        echo "! Kubernetes dashboard sessions do not stage a Codex subscription login." >&2
       fi
     fi
     # The dashboard is a GitHub reader from the first keystroke to the last, so
@@ -1532,6 +1612,13 @@ review-queue *queue_args:
     export GH_TOKEN="$GH_TOKEN_VALUE"
     CONTAINER_ARGS+=(--env GH_TOKEN)
     report_gh_token_blast_radius "${GH_TOKEN_SOURCE}"
+
+    if [[ "$K8S_DASHBOARD" == 1 ]]; then
+      echo "✓ starting the maintainer review dashboard in Kubernetes."
+      echo "  q or Ctrl-C stops; the dashboard is the only thing running."
+      review_queue_kubernetes "$CONTRIBUTOR_IMAGE" "$@"
+      exit $?
+    fi
 
     # Whatever survived the profile/effort shift belongs to the dashboard.
     CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE" queue "$@")
@@ -1732,7 +1819,7 @@ review-doctor:
     else
       echo "  ✗ ${HIVE_CONTRIBUTOR_ENV} is missing"
       echo "    review runs upstream 'just contribute-setup goose' from"
-      echo "    kubestellar/hive @ ${HIVE_COMMIT:0:12} on first attended launch."
+      echo "    hivecommons/hive @ ${HIVE_COMMIT:0:12} on first attended launch."
       echo "    That runs with upstream's documented HIVE_SKIP_VERSION_CHECK=true,"
       echo "    because the pinned checkout is detached and cannot match origin/v4."
       fail=$((fail+1))

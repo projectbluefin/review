@@ -3,7 +3,7 @@ name: upstream-hive
 version: "1.3"
 last_updated: 2026-08-07
 id: upstream-hive
-one_line_purpose: File and follow up on kubestellar/hive issues as an exemplary downstream.
+one_line_purpose: File and follow up on hivecommons/hive issues as an exemplary downstream.
 entry_point: docs/skills/upstream-hive.md
 category: ci-ops
 mcp_compliance_level: partial
@@ -11,7 +11,7 @@ optimization_status: draft
 status: active
 dependencies: []
 tags: [hive, upstream, issues, evidence, contribution]
-description: "Defines how this repository reports evidence to kubestellar/hive and follows up on filed issues. Use before opening, commenting on, or responding to an upstream Hive issue or pull request."
+description: "Defines how this repository reports evidence to hivecommons/hive and follows up on filed issues. Use before opening, commenting on, or responding to an upstream Hive issue or pull request."
 metadata:
   type: policy
 ---
@@ -21,7 +21,7 @@ metadata:
 ## When to Use
 
 Load this before opening an issue, adding a comment, or responding to a
-maintainer on `kubestellar/hive`, and when a filed issue needs follow-up.
+maintainer on `hivecommons/hive`, and when a filed issue needs follow-up.
 
 We are a downstream consumer of Hive's contributor protocol. Reporting what we
 observe is expected work, not a favor. The standard is to be the downstream an
@@ -45,7 +45,7 @@ by which repository is easiest to file in.
 
 ## Upstream Facts
 
-Verified 2026-09-06 against `kubestellar/hive`:
+Verified 2026-09-06 against `hivecommons/hive`:
 
 - The default branch is `v4` (v2 is retired). Cite code there, not `main`.
 - There is no `CONTRIBUTING.md`, `AGENTS.md`, code of conduct, issue template,
@@ -149,6 +149,6 @@ issue.
 - [ ] No corresponding workaround was added to this repository.
 
 ```bash
-gh issue view <number> --repo kubestellar/hive --comments
+gh issue view <number> --repo hivecommons/hive --comments
 bash scripts/check-skill-frontmatter.sh
 ```

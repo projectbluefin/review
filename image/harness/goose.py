@@ -169,20 +169,34 @@ class GooseHarness:
         resolved = shutil.which(executable)
         if resolved is None:
             return Availability.UNAVAILABLE_BINARY
+        env = dict(os.environ)
+        if "GOOSE_PATH_ROOT" not in env and os.path.isdir("/opt/bluefin/goose"):
+            env["GOOSE_PATH_ROOT"] = "/opt/bluefin/goose"
         try:
             check = subprocess.run(
                 [resolved, "info", "--check"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, check=False,
+                text=True, check=False, env=env,
             )
+            if check.returncode != 0 and env.get("GOOSE_MODEL") != "gpt-4o":
+                retry_env = dict(env)
+                retry_env["GOOSE_MODEL"] = "gpt-4o"
+                retry_check = subprocess.run(
+                    [resolved, "info", "--check"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, check=False, env=retry_env,
+                )
+                if retry_check.returncode == 0:
+                    check = retry_check
         except OSError:
             return Availability.UNAVAILABLE_BINARY
         if check.returncode != 0:
             return Availability.UNAVAILABLE_AUTH
         response = f"{check.stdout}\n{check.stderr}".lower()
+        ready_pattern = r"(?:(?:goose|provider).*\b(?:ready|authenticated|(?<!un)available)\b|connection:\s*ok)"
         return (
             Availability.READY
-            if re.search(r"(?:goose|provider).*(?:ready|authenticated|available)", response)
+            if re.search(ready_pattern, response)
             else Availability.UNAVAILABLE_AUTH
         )
 

@@ -97,6 +97,10 @@ just review-stop cluster
 # Walk one repository's live open pull requests instead of the whole org.
 just review-queue projectbluefin/review
 
+# Run one foreground dashboard session in Kubernetes.
+kubectl apply -f deploy/review-queue-state.yaml
+REVIEW_RUNTIME=k8s just review-queue
+
 # Scale three cluster contributors and open the local review dashboard.
 just turbo-review
 
@@ -177,7 +181,7 @@ been removed; the contributor container is the only runtime.
 
 Running a downstream consumer of Hive's contributor protocol means we find
 things upstream cannot see from inside. Reporting that evidence to
-[`kubestellar/hive`](https://github.com/kubestellar/hive), and following up on
+[`hivecommons/hive`](https://github.com/hivecommons/hive), and following up on
 what we file, is part of the job. We report observations, reproductions, and
 options with tradeoffs; upstream owns the design decision and its own triage.
 We do not add a local workaround for an accepted upstream gap, because a
@@ -368,6 +372,31 @@ all. Stops are ordered for a maintainer — `ready-for-human-merge` first, then
 through each action and back to everything, and the status bar always shows
 how many stops are hidden and why.
 
+### Kubernetes dashboard sessions
+
+Set `REVIEW_RUNTIME=k8s` to select one foreground dashboard Pod in the current
+Kubernetes context. First apply the dedicated durable state claim:
+
+```bash
+kubectl apply -f deploy/review-queue-state.yaml
+REVIEW_RUNTIME=k8s just review-queue
+```
+
+The launcher verifies the context, API, and readable `review-queue-state`
+claim before it creates anything. No context or unreachable API preserves the
+normal Podman dashboard; a reachable cluster with a missing or unreadable
+claim stops before creating a Secret or Pod. The session Pod uses the selected
+image with `imagePullPolicy: Always`, attaches to this terminal, and removes
+its Pod and per-session Secret on `q`, Ctrl-C, or terminal exit. The Secret is
+staged through file descriptors. It carries credentials and optional countme
+configuration only for that session—never commit, print, or persist either.
+
+Countme remains off unless the operator locally supplies
+`OTEL_EXPORTER_OTLP_ENDPOINT` and, if required,
+`OTEL_EXPORTER_OTLP_HEADERS`. It records bounded queue-refresh duration, page
+and item counts, active work counts, and review/landing duration and outcome.
+If export fails, countme is unavailable; review and landing work continue.
+
 ### The dashboard
 
 `just review-queue` opens the maintainer surface: a full-screen Textual app
@@ -377,6 +406,13 @@ gated `u` branch update — MECHANICAL means updateable, never approved or
 merge-safe), a live-evidence details pane, and a context pane carrying the
 duplicate verdicts. The status bar reports queue depth, the queue source, and
 your GitHub identity; your own pull requests are filtered out.
+
+At startup, and once after every successful review, merge, queue, or terminal
+landing, the dashboard asynchronously refreshes its cached live GitHub
+open-PR queue and read-only Hive status. Concurrent triggers coalesce; a
+completion during refresh permits one bounded follow-up. It never polls or
+changes Hive assignments, and a failed refresh retains the last good state
+with its age shown.
 
 `r` is the one that matters: it opens a full-screen review that streams
 Goose's output live and then states its own outcome. `x` stops a running
@@ -389,19 +425,32 @@ finding count anyway — reports **INCOMPLETE** and says the count is not a
 clean bill of health. Those two must never look alike, so they are the
 regression `tests/dashboard_pilot.py` drives the real app to prove.
 
+`Tab` or `I` toggles between the pull requests queue and the live open issues queue.
+Highlighting an issue presents its description and evidence; `c` comments, `x` closes with a
+comment behind the typed issue-number gate, `o` opens in the browser, and `y` copies handoff context.
+
 | Key | Action |
 |---|---|
+| `Tab` / `I` | toggle between open pull requests and open issues queue |
 | `b` | toggle batch selection for the highlighted pull request |
+| `B` | select / clear all visible rows |
+| `Space` | toggle selection on highlighted row and advance |
+| `n` | advance to the next pull request lacking my review on GitHub |
 | `r` | **start a review with Goose** — streams live, reports COMPLETE / INCOMPLETE / FAILED |
+| `$` | **slay pull request** — review if unreviewed, fix with agent if findings exist, land in batch |
 | `L` | leave a review on GitHub: approve, request changes, or comment (also from the review screen) |
 | `d` | docs-update agent task (tracked as #134) |
 | `o` | optional browser escape hatch |
 | `v` | view the complete diff — full screen, coloured, paginated, with loading/error state |
-| `c` | comment |
+| `C` | view the issue or pull request conversation — opening post, comments, and reviews rendered as Markdown |
+| `c` | comment (PR or issue) |
 | `a` | approve and queue through Hive: its App records the exact-head approval and applies `lgtm`; for the batch selection if one exists |
+| `A` | land selected batch through background landing agents (gated with BatchPlanScreen) |
+| `w` | watch running landing agents in the batch queue |
+| `P` | configure session final-review policy |
 | `m` | merge now: squash immediately, no `lgtm`, maintainers only — the batch selection if one exists |
-| `x` | reject: comment, then close |
-| `h` | handoff: copy the pull request's context to your clipboard (OSC 52) |
+| `x` | reject / close: comment then close (PR or issue) |
+| `y` | handoff: copy the pull request or issue context to your clipboard (OSC 52) |
 | `/` | steer: type instructions that ride along with the review you start |
 | `f` | cycle the action filter (every action → one at a time → back) |
 | `R` | re-read the live queue and re-ask Hive (keeps your batch) |
@@ -417,7 +466,12 @@ pull request to Hive's governor sweep with `a`, drafts are
 refused, and every
 action
 is appended as a JSON trace to `~/.local/state/bluefin-review/trace.jsonl`
-for the review feedback loop. The launcher bind-mounts that directory from
+for the review feedback loop. That trace is diagnostics, not run state: it is
+size-capped and rotated (8 MB with three backups by default, tunable with
+`BLUEFIN_REVIEW_TRACE_MAX_BYTES` and `BLUEFIN_REVIEW_TRACE_BACKUPS`), so a
+long unattended run cannot fill the disk with it. What a run still has to act
+on lives in the durable run store instead, which bounds itself and survives
+restart. The launcher bind-mounts that directory from
 the host (`${XDG_STATE_HOME:-~/.local/state}/bluefin-review`), so the trace
 and the landing-batch records under `landings/` — what was dispatched, what
 failed, and the agent's reasons — survive a `review-queue` relaunch, and the
@@ -541,7 +595,7 @@ batch already selected; it never adds pull requests, never removes a hold, and
 never bypasses branch protection. The batch queue (`w`) shows the phase, the
 round, the model, and the heads each round bound to.
 
-### Using your own lab for a session
+### Using your own lab with the Podman dashboard
 
 If your machine can reach a Kubernetes cluster, `just review-queue` asks once
 whether to use it for that session:
@@ -569,6 +623,8 @@ reviews verify published images from the registry. The broker and its socket
 are removed when the session ends, `review-container` never gets any of this,
 and stable verified lab findings are filed automatically to
 `projectbluefin/lab` or `projectbluefin/server` without asking you.
+This optional broker is distinct from `REVIEW_RUNTIME=k8s`, which starts the
+dashboard itself in Kubernetes and does not offer the host broker.
 
 ### Leaving a review
 
@@ -817,6 +873,7 @@ All configuration is read at launch.
 | `REVIEW_CONTRIBUTOR_IMAGE` | Contributor image; defaults to `ghcr.io/projectbluefin/review:stable`. |
 | `REVIEW_HIVE_COMMIT` | Full Hive commit used for contributor setup. |
 | `REVIEW_CONTAINER_NAME` | Contributor container name; defaults to `review-container`. Give a second concurrent instance its own name. |
+| `REVIEW_RUNTIME` | Set to `k8s` to run the dashboard as one foreground Kubernetes Pod. Unset keeps the Podman dashboard. |
 | `REVIEW_HIVE` | Named Hive registration used by `review-container` and consulted by `review-queue`, for example `endusers` selects `~/.config/hive/contributor.endusers.env`. The dashboard receives only its TLS `HIVE_HUB` URL. |
 | `REVIEW_GH_TOKEN` | Optional GitHub token override for container-only mode. |
 | `BLUEFIN_REVIEW_BACKEND` | Optional `review-queue` preselection: `goose` or `codex`; unset preserves the current default. Never affects `review-container`. |
@@ -828,6 +885,8 @@ All configuration is read at launch.
 | `GOOSE_MODEL` | Optional GitHub Copilot model override. |
 | `GOOSE_THINKING_EFFORT` | Optional Copilot reasoning-effort override. |
 | `GITHUB_COPILOT_TOKEN` | Optional Copilot credential override. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Optional local Kubernetes-session countme configuration; it is staged only in the ephemeral session Secret. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Optional local countme authentication headers; they are staged only in the ephemeral session Secret. |
 | `TOOL` | Contributor agent backend selector: `goose` (default), `codex`, or `pi`. It does not select the maintainer dashboard backend. |
 
 The maintainer dashboard may remember non-secret harness preferences at
@@ -850,6 +909,11 @@ reclaim-by-replace relaunch. The dashboard writes it; the launcher only
 creates and mounts it. Named dashboards share it safely because every batch
 id carries its instance name (the launcher passes the container name in as
 `BLUEFIN_REVIEW_INSTANCE`).
+
+For `REVIEW_RUNTIME=k8s`, the equivalent durable state is the
+`bluefin-system` `review-queue-state` PVC defined in
+`deploy/review-queue-state.yaml`; the ephemeral dashboard Pod mounts it
+without a host path.
 
 The image's controlled Goose configuration sets `GOOSE_MODE: auto`, so the
 agent runs its tools without a per-tool confirmation prompt. This is required,
