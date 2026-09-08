@@ -157,9 +157,14 @@ class ReviewDeadlineContractTests(unittest.TestCase):
             grandchild_dead = False
             while time.monotonic() < deadline:
                 try:
+                    proc_stat = Path(f"/proc/{grandchild_pid}/stat").read_text()
+                    state = proc_stat.rsplit(")", 1)[1].split(maxsplit=1)[0]
+                    if state in {"Z", "X"}:
+                        grandchild_dead = True
+                        break
                     os.kill(grandchild_pid, 0)
                     time.sleep(0.05)
-                except ProcessLookupError:
+                except (FileNotFoundError, ProcessLookupError):
                     grandchild_dead = True
                     break
 

@@ -343,8 +343,12 @@ else:
         deadline = time.time() + 3
         while time.time() < deadline:
             try:
+                proc_stat = Path(f"/proc/{grandchild}/stat").read_text()
+                state = proc_stat.rsplit(")", 1)[1].split(maxsplit=1)[0]
+                if state in {"Z", "X"}:
+                    return
                 os.kill(grandchild, 0)
-            except ProcessLookupError:
+            except (FileNotFoundError, ProcessLookupError):
                 return
             time.sleep(0.05)
         self.fail(f"grandchild {grandchild} survived the process-group deadline kill")

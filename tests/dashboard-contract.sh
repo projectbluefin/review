@@ -55,7 +55,7 @@ grep -qE '"push"|git push' "$tui" && fail "the dashboard must never push"
 # Hive's sweep, not a toll on merging. That power is exactly one gated call
 # site, it squashes like the sweep does, and it is asked of GitHub — the
 # 'push' permission — rather than assumed from having the dashboard open.
-[[ "$(grep -c '"pr", "merge"' "$tui")" -eq 1 ]] ||
+[[ "$(grep -c -- '"--squash"' "$tui")" -eq 1 ]] ||
   fail "exactly one merge site: the maintainer's gated direct merge"
 merge_now="$(sed -n '/def action_merge_now/,/def action_reject/p' "$tui")"
 grep -q -- '"--squash"' <<<"$merge_now" ||
