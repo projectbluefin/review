@@ -336,6 +336,11 @@ fi
 "${venv}/bin/python" "$repo_root/tests/action_plan_contract.py"
 "${venv}/bin/python" "$repo_root/tests/re_review_contract.py"
 "${venv}/bin/python" "$repo_root/tests/semantic_view_contract.py"
+"${venv}/bin/python" "$repo_root/tests/landing_watch_contract.py"
+"${venv}/bin/python" "$repo_root/tests/ci_failure_contract.py"
+"${venv}/bin/python" "$repo_root/tests/review_action_comparison_contract.py"
+"${venv}/bin/python" "$repo_root/tests/tui_responsive_contract.py"
+"${venv}/bin/python" "$repo_root/tests/tui_evidence_capture.py" --self-check
 # These current-main suites remain in the pinned Textual environment.
 "${venv}/bin/python" "$repo_root/tests/slay_state_contract.py"
 "${venv}/bin/python" "$repo_root/tests/soak_contract.py"
