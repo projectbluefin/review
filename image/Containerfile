@@ -225,9 +225,9 @@ ARG UV_AARCH64_SHA256
 ARG TEXTUAL_VERSION
 COPY --chmod=0644 image/tui/requirements.lock /opt/bluefin/tui/requirements.lock
 # Every module, not just the entrypoint: the dashboard imports its siblings
-# (review_result, and theirs in turn) by bare name off sys.path[0]. A glob so
-# a new module ships the moment it exists, rather than the next time someone
-# remembers to extend this line.
+# as tui.*/harness.* off the image root, so the whole tree must ship. A glob
+# so a new module ships the moment it exists, rather than the next time
+# someone remembers to extend this line.
 COPY --chmod=0644 image/tui/*.py /opt/bluefin/tui/
 COPY --chmod=0644 image/harness/*.py /opt/bluefin/harness/
 RUN set -eu; \

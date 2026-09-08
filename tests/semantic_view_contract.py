@@ -6,11 +6,11 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parents[1] / "image" / "tui"))
+sys.path.insert(0, str(Path(__file__).parents[1] / "image"))
 
-from semantic_view import DecisionState, build_decision_card
+from tui.semantic_view import DecisionState, build_decision_card
 
-from review_result import ReviewResult
+from tui.review_result import ReviewResult
 
 
 class SemanticViewContractTests(unittest.TestCase):

@@ -6,9 +6,9 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "image" / "tui"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "image"))
 
-from re_review import (  # noqa: E402
+from tui.re_review import (  # noqa: E402
     DeltaInput,
     FallbackReason,
     FindingDisposition,
@@ -18,7 +18,7 @@ from re_review import (  # noqa: E402
     Region,
     classify_head_delta,
 )
-from review_evidence_manifest import ReviewRequest  # noqa: E402
+from tui.review_evidence_manifest import ReviewRequest  # noqa: E402
 
 
 H0 = "0" * 40

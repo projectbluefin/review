@@ -12,9 +12,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "image" / "tui"))
+sys.path.insert(0, str(ROOT / "image"))
 
-import hive_api
+from tui import hive_api
 
 
 def check(condition: bool, message: str) -> None:
