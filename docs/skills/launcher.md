@@ -11,7 +11,7 @@ optimization_status: draft
 status: active
 dependencies: []
 tags: [just, launcher, podman, container, kubernetes]
-description: "Maintains the five review recipes and their credential boundaries. Use when editing justfile."
+description: "Maintains the six review recipes and their credential boundaries. Use when editing justfile."
 metadata:
   type: runbook
   context7-sources: [/websites/podman_io_en, /websites/kubernetes_io]
@@ -36,10 +36,11 @@ Goose, or image build skill documents.
 
 ## Core Process
 
-1. Keep exactly five public recipes:
+1. Keep exactly six public recipes:
 
    | Recipe | Purpose |
    |---|---|
+   | `contribute` | Start a detached contributor worker for unattended runs; `contribute cluster N` uses the existing cluster scale-out path. |
    | `review-container` | Run the Hive queue worker: the contributor container that receives assigned tasks. `REVIEW_DETACH=1` runs it detached. |
    | `review-stop` | Stop a detached worker; refuses attended runs and unlabeled containers. |
    | `review-doctor` | Perform read-only preflight checks. |
@@ -48,16 +49,17 @@ Goose, or image build skill documents.
 
    `just` reads only this directory's justfile; use a `~/.local/bin` shim elsewhere.
 
-2. Interactive paths stay foreground; Ctrl-C stops them. `REVIEW_DETACH=1`
-   alone backgrounds a labeled worker; its only lifecycle verb is polite
-   `review-stop`. The launcher owns its Hive checkout and Podman dashboard state.
+2. Interactive paths stay foreground; Ctrl-C stops them. `contribute` and
+   `REVIEW_DETACH=1` start a labeled worker detached; its only lifecycle verb
+   is polite `review-stop`. The launcher owns its Hive checkout and Podman
+   dashboard state.
 3. Mount only read-only Hive contributor configuration. `review-queue` gets
    an optional TLS `HIVE_HUB` URL, mounts
    `${XDG_STATE_HOME:-~/.local/state}/bluefin-review` with shared `rw,z`, and
    passes `BLUEFIN_REVIEW_INSTANCE`; `REVIEW_HIVE` selects a named registration.
 4. Keep Goose as the default backend (`TOOL=goose`); Codex (`TOOL=codex`) and
    Pi (`TOOL=pi`) are explicit backends. Profiles set defaults:
-   `gemini` (`gemini-3.8-flash`, high effort), `sol` (`gpt-5.6-sol`, medium),
+   `gemini` (`gemini-3.8-flash`, max effort), `sol` (`gpt-5.6-sol`, medium),
    `opus5` (`claude-opus-5`, high, 264k context), `k3` (`kimi-k3`, max, 264k).
    Environment `GOOSE_*` always wins.
 5. Pass credentials via inherited environment, never CLI args; stage Codex auth at `0600`.
@@ -197,7 +199,7 @@ bash tests/just-onboarding.sh
 git diff --check
 ```
 
-The recipe list must contain only the five public commands. Doctor must not start a container.
+The recipe list must contain only the six public commands. Doctor must not start a container.
 
 ## Sources
 

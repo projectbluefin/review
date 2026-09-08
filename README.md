@@ -16,6 +16,7 @@ dashboard. Pick the launch path that matches what you want to do:
 | Review pull requests as a maintainer | Maintainer dashboard | `just review-queue` |
 | Review while scaling contributor throughput | Turbo dashboard + workers | `just turbo-review` |
 | Donate an agent to Hive | Contributor worker | `just review-container` |
+| Donate an agent while away | Detached contributor worker | `just contribute` |
 | Check whether this machine is ready | Diagnostics | `just review-doctor` |
 | Stop a detached worker | Lifecycle | `just review-stop` |
 
@@ -55,7 +56,7 @@ supports today:
 
 Goose is fixed to GitHub Copilot here: `GOOSE_PROVIDER` may be unset or
 `github_copilot`. Contributor model profiles are defaults from the justfile:
-`gemini` uses `gemini-3.8-flash` at `high` and is the default for both
+`gemini` uses `gemini-3.8-flash` at `max` and is the default for both
 recipes, `sol` (also `gpt-sol`) uses `gpt-5.6-sol` at `medium`, `opus5` uses
 `claude-opus-5` at `high` with a `264000` context limit, and `k3` (also
 `kimi`) uses `kimi-k3` at `max` with the same clamp. Environment values still
@@ -72,6 +73,9 @@ BLUEFIN_REVIEW_BACKEND=codex just review-queue
 
 # Default Hive contributor worker: Goose + GitHub Copilot.
 just review-container
+
+# Detached Hive contributor worker for an unattended run.
+just contribute
 
 # Hive contributor worker with Codex.
 TOOL=codex just review-container
@@ -205,15 +209,17 @@ For a checkout, run the recipes directly:
 ```bash
 just --list
 just review-container
+just contribute
 ```
 
 ## Commands
 
 `justfile` is the installable artifact and exposes exactly
-five public recipes:
+six public recipes:
 
 | Command | Purpose |
 |---|---|
+| `just contribute [profile] [effort]` | Run an unattended local worker; it is detached by default. `just contribute cluster [N]` uses the existing Kubernetes scale-out path. |
 | `just review-container [profile] [effort]` | Run the Hive queue worker locally in Podman (or `just review-container cluster [N]` to scale out across Kubernetes). |
 | `just review-stop [name]` | Stop a detached worker (`just review-stop cluster` stops cluster workers). |
 | `just review-queue [profile] [effort] [flags…]` | Walk the Bluefin PR queue interactively in the contributor container. |
@@ -263,7 +269,7 @@ supported provider. Maintainer-side `review-queue` may explicitly preselect
 Codex with `BLUEFIN_REVIEW_BACKEND=codex`; that choice never changes Hive's
 backend. `GOOSE_PROVIDER` may be unset or `github_copilot`; `GOOSE_MODEL`
 optionally overrides the `gemini-3.8-flash` default, and
-`GOOSE_THINKING_EFFORT` optionally overrides the default `high` reasoning
+`GOOSE_THINKING_EFFORT` optionally overrides the default `max` reasoning
 effort. A `gh auth
 token` does not authenticate Copilot inference.
 
@@ -272,7 +278,7 @@ and a thinking effort:
 
 | Invocation | Model | Effort | Context |
 |---|---|---|---|
-| `just review-container` or `just review-container gemini` | `gemini-3.8-flash` | `high` | provider default |
+| `just review-container` or `just review-container gemini` | `gemini-3.8-flash` | `max` | provider default |
 | `just review-container sol` or `just review-container gpt-sol` | `gpt-5.6-sol` | `medium` | provider default |
 | `just review-container opus5 high` | `claude-opus-5` | `high` | `264000` |
 | `just review-container k3` or `kimi` | `kimi-k3` | `max` | `264000` |

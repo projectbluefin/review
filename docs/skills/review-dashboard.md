@@ -1,6 +1,6 @@
 ---
 name: review-dashboard
-version: "2.7"
+version: "2.9"
 last_updated: 2026-09-08
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
@@ -19,20 +19,9 @@ metadata:
 
 # Review Dashboard
 
-`just review-queue` reads the organization's open pull requests live: one
-paginated GraphQL search through the shipped GitHub CLI, carrying the review,
-mergeability, and CI-rollup evidence each recommended action is classified
-from. `just review-queue owner/repo` reads that repository's open pull
-requests the same way and normalizes them into the same repository-qualified
-queue rows. The authenticated maintainer's own pull requests remain hidden.
-The dashboard distinguishes ready, empty, missing, inaccessible, malformed,
-and failed sources; `R` rereads whichever source is active. The flag form
-`--repo` narrows the org-wide queue to one repository.
+`just review-queue` reads the organization's open pull requests live: one paginated GraphQL search through the shipped GitHub CLI, carrying the review, mergeability, and CI-rollup evidence each recommended action is classified from. `just review-queue owner/repo` reads that repository's open pull requests the same way and normalizes them into the same repository-qualified queue rows. The authenticated maintainer's own pull requests remain hidden. The dashboard distinguishes ready, empty, missing, inaccessible, malformed, and failed sources; `R` rereads whichever source is active. The flag form `--repo` narrows the org-wide queue to one repository.
 
-The dashboard retains its last good live GitHub queue and read-only Hive view. Receipt-verified
-clean reviews, successful mutations or batch queues, and terminal landing completion request
-reconciliation. Requests coalesce with one bounded follow-up; there is no polling or Hive
-assignment/completion mutation. `R` is the explicit-read control; failed reads retain visibly aged data.
+The dashboard retains its last good live GitHub queue and read-only Hive view. Receipt-verified clean reviews, successful mutations or batch queues, and terminal landing completion request reconciliation. Requests coalesce with one bounded follow-up; there is no polling or Hive assignment/completion mutation. `R` is the explicit-read control; failed reads retain visibly aged data.
 
 ## When to Use
 
@@ -70,9 +59,10 @@ Right-hand panes scroll evidence (`h`/`l`), `e` opens decisions, and `[u]` updat
    consequence first — creating a missing `lgtm` label before submitting the
    approval means a failure leaves no approval that nothing will act on.
 4. **A failure must survive the notification.** Record it on the `Stop`, mark
-   the row, count it in the status line, and keep the stop selected so a
-   batch carries it forward. A toast is gone before a batch of eight
-   finishes.
+   the row, and count it in the status line. Review and ordinary mutation
+   failures keep their selection; terminal landing outcomes are visibly
+   deselected and need an explicit new selection before retry. A toast is gone
+   before a batch of eight finishes.
 5. **Batch every action that a maintainer repeats.** Merging and updating
    branches take the batch selection when one exists. `A` on a selection is
    different: the reviewed batch becomes one landing agent's brief behind one
@@ -84,13 +74,7 @@ Right-hand panes scroll evidence (`h`/`l`), `e` opens decisions, and `[u]` updat
 7. **Completed reviews cross the `ReviewResult` contract.** Transcripts without
    valid JSONL findings and terminal events are `unparsable`, never clean. Keep
    decision cards concise and bounded raw evidence on `e`.
-8. **Keep the acting surface and activity explicit.** The shipped keys cover
-   review, merge, branch updates, rejection, handoff, docs, and dupe cleanup;
-   label and priority mutation are excluded. Above the queue, `AGENT ACTIVITY`
-   shows active parent reviews, Check workers, landing agents, queued work,
-   bounded repository-qualified rows, and freshness. Hive rows are read-only,
-   unavailable when malformed, and never inferred from a name, prompt, title,
-   or task identifier.
+8. **Keep the acting surface and activity explicit.** The shipped keys cover review, merge, branch updates, rejection, handoff, docs, and dupe cleanup; label and priority mutation are excluded. Above the queue, `AGENT ACTIVITY` shows active parent reviews, Check workers, landing agents, queued work, bounded repository-qualified rows, and freshness. Hive rows are read-only, unavailable when malformed, and never inferred from a name, prompt, title, or task identifier. Selected rows also state remote analysis in progress, local clean/findings drafts, and a GitHub review submitted by the authenticated maintainer; all derive from retained local/live evidence and add no transport or polling.
 
 ## Textual Patterns
 
@@ -202,6 +186,6 @@ pre-commit run --all-files
 
 - [ ] Every new mutation runs through `mutate_all()` and shows its commands.
 - [ ] Multi-command actions are one gate, ordered so the first failure is harmless.
-- [ ] Failures mark the row and keep the stop selected.
+- [ ] Failures mark the row; terminal landing outcomes require explicit reselection.
 - [ ] All GitHub- and agent-sourced text passes through `escape()`. No thread DOM access.
 - [ ] The pilot presses the key and asserts the result.
