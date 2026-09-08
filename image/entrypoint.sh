@@ -263,7 +263,7 @@ if ! infocmp "${TERM:-}" >/dev/null 2>&1; then
   export TERM="$tmux_fallback_term"
 fi
 agent_pid=
-attach_pid=
+status_pid=
 # Podman sends SIGTERM and waits ten seconds before SIGKILL, so teardown has
 # to be BOUNDED: an unbounded wait on a stuck agent stalls until that deadline
 # and dies by SIGKILL, which is the "Ctrl-C stops it" promise failing in the
@@ -293,8 +293,8 @@ cleanup() {
   # A second signal during teardown would re-enter this handler and restart
   # the escalation, stretching a bounded teardown past podman's deadline.
   trap '' HUP INT TERM
-  if [ -n "$attach_pid" ] && kill -0 "$attach_pid" 2>/dev/null; then
-    kill "$attach_pid" 2>/dev/null || true
+  if [ -n "$status_pid" ] && kill -0 "$status_pid" 2>/dev/null; then
+    kill -TERM "$status_pid" 2>/dev/null || true
   fi
   if [ -n "$agent_pid" ] && kill -0 "$agent_pid" 2>/dev/null; then
     kill -TERM "$agent_pid" 2>/dev/null || true
@@ -331,33 +331,26 @@ while ! tmux has-session -t contributor 2>/dev/null; do
   sleep 0.1
 done
 
-# Attach only when there is a terminal. Without this an unattended run would
-# fail on `tmux attach`, which refuses to run without a tty.
+# The attended surface is a passive status companion. Hive still creates and
+# owns the contributor tmux session; the companion prints its exact attach
+# command so a maintainer can enter that session deliberately.
 #
-# The attach runs as a background job and is waited on rather than run in the
-# foreground. Bash defers a trap handler until the foreground child returns, so
-# a foreground `tmux attach-session` swallows SIGTERM/SIGINT for as long as the
-# session is attached -- which is the entire run. Podman then hits its ten
-# second deadline and SIGKILLs the container: Ctrl-C and `podman stop` both
-# stall for ten seconds and the run ends by force, which is exactly the
-# foreground guarantee in AGENTS.md failing where a user can see it. `wait` is
-# interruptible, so this keeps PID 1 responsive to signals for the whole
-# session. Job control is off here, so the background attach shares this
-# shell's process group and still owns the terminal normally -- no
-# SIGTTIN/SIGTTOU, no visible behaviour change.
+# The companion runs as a background job and is waited on rather than run in
+# the foreground so this shell remains PID 1 and signal-responsive. Its input
+# is the attended terminal; Hive's own tmux session remains a separate,
+# explicitly attachable runtime.
 #
 # The explicit `<&3` matters: with job control off, bash redirects an
 # asynchronous command's stdin from /dev/null unless the command carries a
-# redirection of its own, and `tmux attach` dies with "open terminal failed:
-# not a terminal" the moment it loses the tty.
+# redirection of its own, and the companion would lose its attended terminal.
 if [ -t 0 ] && [ -t 1 ]; then
   exec 3<&0
-  tmux attach-session -t contributor <&3 &
-  attach_pid=$!
-  wait "$attach_pid" || true
-  attach_pid=
+  /opt/bluefin/tui/.venv/bin/python /opt/bluefin/tui/worker_status.py <&3 &
+  status_pid=$!
   exec 3<&-
-  note 'tmux detached; the agent remains foreground in this terminal. Press Ctrl-C or close this terminal to stop it.'
+  wait "$status_pid" || true
+  status_pid=
+  note 'status companion closed; the agent remains foreground in this terminal. Press Ctrl-C or close this terminal to stop it.'
   wait "$agent_pid"
 else
   note 'no tty; following the agent without attaching'
