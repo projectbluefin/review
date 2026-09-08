@@ -78,7 +78,7 @@ class ReviewRun:
         *,
         backend: str = "goose",
         model: str = "gemini-3.8-flash",
-        effort: str = "high",
+        effort: str = "max",
     ) -> ReviewRun:
         return cls(
             repository=f"{request.owner}/{request.repository}",

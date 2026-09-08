@@ -16,6 +16,7 @@ dashboard. Pick the launch path that matches what you want to do:
 | Review pull requests as a maintainer | Maintainer dashboard | `just review-queue` |
 | Review while scaling contributor throughput | Turbo dashboard + workers | `just turbo-review` |
 | Donate an agent to Hive | Contributor worker | `just review-container` |
+| Donate an agent while away | Detached contributor worker | `just contribute` |
 | Check whether this machine is ready | Diagnostics | `just review-doctor` |
 | Stop a detached worker | Lifecycle | `just review-stop` |
 
@@ -55,7 +56,7 @@ supports today:
 
 Goose is fixed to GitHub Copilot here: `GOOSE_PROVIDER` may be unset or
 `github_copilot`. Contributor model profiles are defaults from the justfile:
-`gemini` uses `gemini-3.8-flash` at `high` and is the default for both
+`gemini` uses `gemini-3.8-flash` at `max` and is the default for both
 recipes, `sol` (also `gpt-sol`) uses `gpt-5.6-sol` at `medium`, `opus5` uses
 `claude-opus-5` at `high` with a `264000` context limit, and `k3` (also
 `kimi`) uses `kimi-k3` at `max` with the same clamp. Environment values still
@@ -72,6 +73,9 @@ BLUEFIN_REVIEW_BACKEND=codex just review-queue
 
 # Default Hive contributor worker: Goose + GitHub Copilot.
 just review-container
+
+# Detached Hive contributor worker for an unattended run.
+just contribute
 
 # Hive contributor worker with Codex.
 TOOL=codex just review-container
@@ -96,6 +100,10 @@ just review-stop cluster
 
 # Walk one repository's live open pull requests instead of the whole org.
 just review-queue projectbluefin/review
+
+# Run one foreground dashboard session in Kubernetes.
+kubectl apply -f deploy/review-queue-state.yaml
+REVIEW_RUNTIME=k8s just review-queue
 
 # Scale three cluster contributors and open the local review dashboard.
 just turbo-review
@@ -201,15 +209,17 @@ For a checkout, run the recipes directly:
 ```bash
 just --list
 just review-container
+just contribute
 ```
 
 ## Commands
 
 `justfile` is the installable artifact and exposes exactly
-five public recipes:
+six public recipes:
 
 | Command | Purpose |
 |---|---|
+| `just contribute [profile] [effort]` | Run an unattended local worker; it is detached by default. `just contribute cluster [N]` uses the existing Kubernetes scale-out path. |
 | `just review-container [profile] [effort]` | Run the Hive queue worker locally in Podman (or `just review-container cluster [N]` to scale out across Kubernetes). |
 | `just review-stop [name]` | Stop a detached worker (`just review-stop cluster` stops cluster workers). |
 | `just review-queue [profile] [effort] [flags…]` | Walk the Bluefin PR queue interactively in the contributor container. |
@@ -259,7 +269,7 @@ supported provider. Maintainer-side `review-queue` may explicitly preselect
 Codex with `BLUEFIN_REVIEW_BACKEND=codex`; that choice never changes Hive's
 backend. `GOOSE_PROVIDER` may be unset or `github_copilot`; `GOOSE_MODEL`
 optionally overrides the `gemini-3.8-flash` default, and
-`GOOSE_THINKING_EFFORT` optionally overrides the default `high` reasoning
+`GOOSE_THINKING_EFFORT` optionally overrides the default `max` reasoning
 effort. A `gh auth
 token` does not authenticate Copilot inference.
 
@@ -268,7 +278,7 @@ and a thinking effort:
 
 | Invocation | Model | Effort | Context |
 |---|---|---|---|
-| `just review-container` or `just review-container gemini` | `gemini-3.8-flash` | `high` | provider default |
+| `just review-container` or `just review-container gemini` | `gemini-3.8-flash` | `max` | provider default |
 | `just review-container sol` or `just review-container gpt-sol` | `gpt-5.6-sol` | `medium` | provider default |
 | `just review-container opus5 high` | `claude-opus-5` | `high` | `264000` |
 | `just review-container k3` or `kimi` | `kimi-k3` | `max` | `264000` |
@@ -368,6 +378,31 @@ all. Stops are ordered for a maintainer — `ready-for-human-merge` first, then
 through each action and back to everything, and the status bar always shows
 how many stops are hidden and why.
 
+### Kubernetes dashboard sessions
+
+Set `REVIEW_RUNTIME=k8s` to select one foreground dashboard Pod in the current
+Kubernetes context. First apply the dedicated durable state claim:
+
+```bash
+kubectl apply -f deploy/review-queue-state.yaml
+REVIEW_RUNTIME=k8s just review-queue
+```
+
+The launcher verifies the context, API, and readable `review-queue-state`
+claim before it creates anything. No context or unreachable API preserves the
+normal Podman dashboard; a reachable cluster with a missing or unreadable
+claim stops before creating a Secret or Pod. The session Pod uses the selected
+image with `imagePullPolicy: Always`, attaches to this terminal, and removes
+its Pod and per-session Secret on `q`, Ctrl-C, or terminal exit. The Secret is
+staged through file descriptors. It carries credentials and optional countme
+configuration only for that session—never commit, print, or persist either.
+
+Countme remains off unless the operator locally supplies
+`OTEL_EXPORTER_OTLP_ENDPOINT` and, if required,
+`OTEL_EXPORTER_OTLP_HEADERS`. It records bounded queue-refresh duration, page
+and item counts, active work counts, and review/landing duration and outcome.
+If export fails, countme is unavailable; review and landing work continue.
+
 ### The dashboard
 
 `just review-queue` opens the maintainer surface: a full-screen Textual app
@@ -377,6 +412,13 @@ gated `u` branch update — MECHANICAL means updateable, never approved or
 merge-safe), a live-evidence details pane, and a context pane carrying the
 duplicate verdicts. The status bar reports queue depth, the queue source, and
 your GitHub identity; your own pull requests are filtered out.
+
+At startup, and once after every successful review, merge, queue, or terminal
+landing, the dashboard asynchronously refreshes its cached live GitHub
+open-PR queue and read-only Hive status. Concurrent triggers coalesce; a
+completion during refresh permits one bounded follow-up. It never polls or
+changes Hive assignments, and a failed refresh retains the last good state
+with its age shown.
 
 `r` is the one that matters: it opens a full-screen review that streams
 Goose's output live and then states its own outcome. `x` stops a running
@@ -559,7 +601,7 @@ batch already selected; it never adds pull requests, never removes a hold, and
 never bypasses branch protection. The batch queue (`w`) shows the phase, the
 round, the model, and the heads each round bound to.
 
-### Using your own lab for a session
+### Using your own lab with the Podman dashboard
 
 If your machine can reach a Kubernetes cluster, `just review-queue` asks once
 whether to use it for that session:
@@ -587,6 +629,8 @@ reviews verify published images from the registry. The broker and its socket
 are removed when the session ends, `review-container` never gets any of this,
 and stable verified lab findings are filed automatically to
 `projectbluefin/lab` or `projectbluefin/server` without asking you.
+This optional broker is distinct from `REVIEW_RUNTIME=k8s`, which starts the
+dashboard itself in Kubernetes and does not offer the host broker.
 
 ### Leaving a review
 
@@ -835,6 +879,7 @@ All configuration is read at launch.
 | `REVIEW_CONTRIBUTOR_IMAGE` | Contributor image; defaults to `ghcr.io/projectbluefin/review:stable`. |
 | `REVIEW_HIVE_COMMIT` | Full Hive commit used for contributor setup. |
 | `REVIEW_CONTAINER_NAME` | Contributor container name; defaults to `review-container`. Give a second concurrent instance its own name. |
+| `REVIEW_RUNTIME` | Set to `k8s` to run the dashboard as one foreground Kubernetes Pod. Unset keeps the Podman dashboard. |
 | `REVIEW_HIVE` | Named Hive registration used by `review-container` and consulted by `review-queue`, for example `endusers` selects `~/.config/hive/contributor.endusers.env`. The dashboard receives only its TLS `HIVE_HUB` URL. |
 | `REVIEW_GH_TOKEN` | Optional GitHub token override for container-only mode. |
 | `BLUEFIN_REVIEW_BACKEND` | Optional `review-queue` preselection: `goose` or `codex`; unset preserves the current default. Never affects `review-container`. |
@@ -846,6 +891,8 @@ All configuration is read at launch.
 | `GOOSE_MODEL` | Optional GitHub Copilot model override. |
 | `GOOSE_THINKING_EFFORT` | Optional Copilot reasoning-effort override. |
 | `GITHUB_COPILOT_TOKEN` | Optional Copilot credential override. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Optional local Kubernetes-session countme configuration; it is staged only in the ephemeral session Secret. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Optional local countme authentication headers; they are staged only in the ephemeral session Secret. |
 | `TOOL` | Contributor agent backend selector: `goose` (default), `codex`, or `pi`. It does not select the maintainer dashboard backend. |
 
 The maintainer dashboard may remember non-secret harness preferences at
@@ -868,6 +915,11 @@ reclaim-by-replace relaunch. The dashboard writes it; the launcher only
 creates and mounts it. Named dashboards share it safely because every batch
 id carries its instance name (the launcher passes the container name in as
 `BLUEFIN_REVIEW_INSTANCE`).
+
+For `REVIEW_RUNTIME=k8s`, the equivalent durable state is the
+`bluefin-system` `review-queue-state` PVC defined in
+`deploy/review-queue-state.yaml`; the ephemeral dashboard Pod mounts it
+without a host path.
 
 The image's controlled Goose configuration sets `GOOSE_MODE: auto`, so the
 agent runs its tools without a per-tool confirmation prompt. This is required,

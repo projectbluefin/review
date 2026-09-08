@@ -30,7 +30,7 @@ class GooseHarness:
         "goose", "Goose", "GS", "Goose", "aaif-goose/goose", None
     )
     model: str = "gemini-3.8-flash"
-    effort: str = "high"
+    effort: str = "max"
     availability: Availability = Availability.READY
     executable: str = "goose"
     capabilities: HarnessCapabilities = HarnessCapabilities(

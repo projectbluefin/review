@@ -367,6 +367,69 @@ ensure_contributor_image() {
   return 1
 }
 
+review_queue_kubernetes_available() {
+  command -v kubectl &>/dev/null || return 1
+  kubectl config current-context >/dev/null 2>&1 || return 1
+  kubectl get --raw='/readyz?verbose' --request-timeout=5s >/dev/null 2>&1 || return 1
+  kubectl get pvc review-queue-state -n bluefin-system --request-timeout=5s >/dev/null 2>&1 || {
+    echo "ERROR: Kubernetes dashboard state claim 'review-queue-state' cannot be read; it may be absent or access may be denied." >&2
+    return 2
+  }
+}
+cleanup_kubernetes_dashboard() {
+  [[ -n "${K8S_DASHBOARD_POD:-}" ]] ||
+    [[ -n "${K8S_DASHBOARD_SECRET:-}" ]] || return 0
+  kubectl delete pod "${K8S_DASHBOARD_POD:-}" -n bluefin-system \
+    --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  kubectl delete secret "${K8S_DASHBOARD_SECRET:-}" -n bluefin-system \
+    --ignore-not-found --wait=false >/dev/null 2>&1 || true
+}
+review_queue_kubernetes() {
+  local image="$1"
+  shift
+  local session_id env_names
+  local -a otlp_secret_args=()
+  session_id="$(date +%s)-$$"
+  K8S_DASHBOARD_POD="review-queue-${session_id}"
+  K8S_DASHBOARD_SECRET="review-session-${session_id}"
+  K8S_ENV_NAMES=(
+    GH_TOKEN GITHUB_COPILOT_TOKEN HIVE_HUB BLUEFIN_REVIEW_INSTANCE
+    GOOSE_PROVIDER GOOSE_MODEL GOOSE_THINKING_EFFORT GOOSE_CONTEXT_LIMIT
+    BLUEFIN_REVIEW_BACKEND
+  )
+  if [[ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]]; then
+    K8S_ENV_NAMES+=(OTEL_EXPORTER_OTLP_ENDPOINT)
+    otlp_secret_args+=(
+      --from-file=OTEL_EXPORTER_OTLP_ENDPOINT=<(printf '%s' "$OTEL_EXPORTER_OTLP_ENDPOINT")
+    )
+    if [[ -n "${OTEL_EXPORTER_OTLP_HEADERS:-}" ]]; then
+      K8S_ENV_NAMES+=(OTEL_EXPORTER_OTLP_HEADERS)
+      otlp_secret_args+=(
+        --from-file=OTEL_EXPORTER_OTLP_HEADERS=<(printf '%s' "$OTEL_EXPORTER_OTLP_HEADERS")
+      )
+    fi
+  fi
+  env_names="$(IFS=,; echo "${K8S_ENV_NAMES[*]}")"
+
+  kubectl create secret generic "$K8S_DASHBOARD_SECRET" -n bluefin-system \
+    --from-file=GH_TOKEN=<(printf '%s' "$GH_TOKEN_VALUE") \
+    --from-file=GITHUB_COPILOT_TOKEN=<(printf '%s' "${COPILOT_TOKEN:-}") \
+    --from-file=HIVE_HUB=<(printf '%s' "$DASHBOARD_HIVE_HUB") \
+    --from-file=BLUEFIN_REVIEW_INSTANCE=<(printf '%s' "$K8S_DASHBOARD_POD") \
+    --from-file=GOOSE_PROVIDER=<(printf '%s' "${GOOSE_PROVIDER:-}") \
+    --from-file=GOOSE_MODEL=<(printf '%s' "${GOOSE_MODEL:-}") \
+    --from-file=GOOSE_THINKING_EFFORT=<(printf '%s' "${GOOSE_THINKING_EFFORT:-}") \
+    --from-file=GOOSE_CONTEXT_LIMIT=<(printf '%s' "${GOOSE_CONTEXT_LIMIT:-}") \
+    --from-file=BLUEFIN_REVIEW_BACKEND=<(printf '%s' "$REVIEW_BACKEND") \
+    "${otlp_secret_args[@]}" >/dev/null
+
+  python3 scripts/review-session-runtime.py "$session_id" "$image" \
+    "$K8S_DASHBOARD_SECRET" review-queue-state "$env_names" queue "$@" |
+    kubectl create -f -
+  kubectl wait --for=condition=Ready "pod/${K8S_DASHBOARD_POD}" -n bluefin-system --timeout=5m
+  kubectl attach --stdin --tty "$K8S_DASHBOARD_POD" -n bluefin-system
+}
+
 resolve_copilot_token() {
   # Goose's github_copilot provider needs the long-lived OAuth token minted by
   # the Copilot editor device flow (a "ghu_" user-to-server token). Without it
@@ -532,7 +595,7 @@ resolve_model_profile() {
   case "${profile,,}" in
     ""|gemini|gemini-3.8|gemini38)
       PROFILE_MODEL="${GEMINI_MODEL}"
-      PROFILE_EFFORT="high"
+      PROFILE_EFFORT="max"
       PROFILE_CONTEXT_LIMIT=""
       ;;
     opus5)
@@ -1105,7 +1168,7 @@ stop_cluster_contributors() {
 # Receives Hive-assigned tasks and donates inference through the
 # maintainer's credentials.
 #
-#   just review-container              # gemini: gemini-3.8-flash at high effort
+#   just review-container              # gemini: gemini-3.8-flash at max effort
 #   just review-container gemini       # the same, named explicitly
 #   just review-container sol          # gpt-5.6-sol, medium effort
 #   just review-container opus5 high   # claude-opus-5, high effort, 264k context
@@ -1159,7 +1222,7 @@ review-container profile="" effort="":
     if [[ "$raw_profile" == "cluster" || -n "${REVIEW_SCALE:-}" ]]; then
       replicas="${REVIEW_SCALE:-2}"
       model_profile="gemini"
-      model_effort="high"
+      model_effort="max"
       if [[ "$raw_profile" == "cluster" ]]; then
         if [[ "$raw_effort" =~ ^[0-9]+$ ]]; then
           replicas="$raw_effort"
@@ -1168,7 +1231,7 @@ review-container profile="" effort="":
         fi
       elif [[ -n "$raw_profile" ]]; then
         model_profile="$raw_profile"
-        model_effort="${raw_effort:-high}"
+        model_effort="${raw_effort:-max}"
       fi
       scale_cluster_contributors "$replicas" "$model_profile" "$model_effort"
       exit 0
@@ -1306,6 +1369,15 @@ review-container profile="" effort="":
     fi
     exec "${CONTAINER_ARGS[@]}"
 
+# Start an unattended contributor worker. The existing launcher owns all
+# credential checks and lifecycle behavior; this selects its explicit
+# detached path so the worker survives the launching terminal.
+[doc("Start an unattended Hive contributor worker; local runs detach by default.")]
+contribute profile="" effort="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    REVIEW_DETACH=1 just review-container "{{profile}}" "{{effort}}"
+
 # Stop a detached review worker. This is the explicit lifecycle verb for
 # containers started with REVIEW_DETACH=1; it refuses to touch anything this
 # launcher did not start (no review.owner label) and never force-removes.
@@ -1349,7 +1421,7 @@ review-stop name="review-container":
 # Foreground: q or Ctrl-C stops.
 # Arguments pass straight through to the dashboard:
 #
-#   just review-queue                      # gemini: gemini-3.8-flash at high effort
+#   just review-queue                      # gemini: gemini-3.8-flash at max effort
 #   just review-queue sol                  # gpt-5.6-sol at medium effort
 #   just review-queue k3 high              # pick the model profile and effort
 #   just review-queue owner/repo            # live open PRs for one repository
@@ -1373,11 +1445,25 @@ review-queue *queue_args:
     K3_CONTEXT_LIMIT="{{k3_context_limit}}"
 
     resolve_review_backend
-    command -v podman &>/dev/null || {
-      echo "ERROR: Podman is required to run the contributor container." >&2
-      echo "  Install Podman, then re-run review-queue." >&2
-      exit 1
-    }
+    K8S_DASHBOARD=0
+    if [[ "${REVIEW_RUNTIME:-}" == k8s ]]; then
+      if review_queue_kubernetes_available; then
+        K8S_DASHBOARD=1
+      else
+        runtime_status=$?
+        if [[ "$runtime_status" == 2 ]]; then
+          exit 1
+        fi
+        echo "! Kubernetes is unavailable; using the local Podman dashboard." >&2
+      fi
+    fi
+    if [[ "$K8S_DASHBOARD" != 1 ]]; then
+      command -v podman &>/dev/null || {
+        echo "ERROR: Podman is required to run the contributor container." >&2
+        echo "  Install Podman, then re-run review-queue." >&2
+        exit 1
+      }
+    fi
 
     require_goose_backend "$TOOL"
     if [[ "$REVIEW_BACKEND" == codex ]]; then
@@ -1438,14 +1524,18 @@ review-queue *queue_args:
     fi
 
     CONTRIBUTOR_IMAGE="{{contributor_image}}"
-    require_no_running_instance "$CONTAINER_NAME"
-    ensure_contributor_image "$CONTRIBUTOR_IMAGE"
+    if [[ "$K8S_DASHBOARD" != 1 ]]; then
+      require_no_running_instance "$CONTAINER_NAME"
+      ensure_contributor_image "$CONTRIBUTOR_IMAGE"
+    fi
 
     # The lab offer happens before anything starts and answers in one
     # question. Declining, no terminal, no kubectl, or an unreachable
     # cluster all leave LAB_SOCKET empty and the dashboard fully usable.
-    offer_lab_session
-    offer_review_exec_session
+    if [[ "$K8S_DASHBOARD" != 1 ]]; then
+      offer_lab_session
+      offer_review_exec_session
+    fi
 
     CONTAINER_ARGS=(
       podman run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
@@ -1462,9 +1552,11 @@ review-queue *queue_args:
     # One shared host directory under the host XDG state root: the queue it
     # records is the same whichever instance name runs, and :z keeps it
     # writable for concurrent named dashboards.
-    QUEUE_STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-review"
-    mkdir -p "$QUEUE_STATE_DIR"
-    CONTAINER_ARGS+=(--volume "${QUEUE_STATE_DIR}:/home/dev/.local/state/bluefin-review:rw,z")
+    if [[ "$K8S_DASHBOARD" != 1 ]]; then
+      QUEUE_STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-review"
+      mkdir -p "$QUEUE_STATE_DIR"
+      CONTAINER_ARGS+=(--volume "${QUEUE_STATE_DIR}:/home/dev/.local/state/bluefin-review:rw,z")
+    fi
     # The instance name qualifies each landing batch id: two named dashboards
     # share the state directory, and a bare timestamp id would let their
     # batches overwrite each other's prompt, status, and log.
@@ -1503,15 +1595,19 @@ review-queue *queue_args:
     CODEX_AUTH_STAGING_DIR=""
     # One trap owns this session's teardown: the staged Codex credential,
     # the lab broker, and the review-exec broker die with the terminal.
-    trap 'cleanup_codex_auth_file; cleanup_lab_broker; cleanup_review_exec_broker' EXIT
+    trap 'cleanup_kubernetes_dashboard; cleanup_codex_auth_file; cleanup_lab_broker; cleanup_review_exec_broker' EXIT
     if [[ "$REVIEW_BACKEND" == codex ]]; then
-      stage_codex_auth_file
-      if [[ -n "$CODEX_AUTH_FILE" ]]; then
-        CONTAINER_ARGS+=(--volume "$CODEX_AUTH_FILE:/home/dev/.codex/auth.json:rw,z")
-        echo "✓ Codex subscription login staged as one private file (contents not shown; host cache not mounted)."
+      if [[ "$K8S_DASHBOARD" != 1 ]]; then
+        stage_codex_auth_file
+        if [[ -n "$CODEX_AUTH_FILE" ]]; then
+          CONTAINER_ARGS+=(--volume "$CODEX_AUTH_FILE:/home/dev/.codex/auth.json:rw,z")
+          echo "✓ Codex subscription login staged as one private file (contents not shown; host cache not mounted)."
+        else
+          echo "! Codex subscription login unavailable; run 'codex login' with file credential storage." >&2
+          echo "  Review stays open, reports NEEDS SIGN-IN, and never silently selects Codex." >&2
+        fi
       else
-        echo "! Codex subscription login unavailable; run 'codex login' with file credential storage." >&2
-        echo "  Review stays open, reports NEEDS SIGN-IN, and never silently selects Codex." >&2
+        echo "! Kubernetes dashboard sessions do not stage a Codex subscription login." >&2
       fi
     fi
     # The dashboard is a GitHub reader from the first keystroke to the last, so
@@ -1525,6 +1621,13 @@ review-queue *queue_args:
     export GH_TOKEN="$GH_TOKEN_VALUE"
     CONTAINER_ARGS+=(--env GH_TOKEN)
     report_gh_token_blast_radius "${GH_TOKEN_SOURCE}"
+
+    if [[ "$K8S_DASHBOARD" == 1 ]]; then
+      echo "✓ starting the maintainer review dashboard in Kubernetes."
+      echo "  q or Ctrl-C stops; the dashboard is the only thing running."
+      review_queue_kubernetes "$CONTRIBUTOR_IMAGE" "$@"
+      exit $?
+    fi
 
     # Whatever survived the profile/effort shift belongs to the dashboard.
     CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE" queue "$@")

@@ -51,6 +51,7 @@ require image/Containerfile \
   'COPY image/tmux.conf /etc/tmux.conf' \
   'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-agent.sh' \
   'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-relay.sh' \
+  'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/pi-backend.js' \
   'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/config/backends.conf' \
   '/usr/local/bin/goose --version' \
   'tmux -V' \
@@ -113,6 +114,7 @@ for path in \
   image/config/goose.yaml \
   image/tmux.conf \
   image/tui/bluefin_review_tui.py \
+  image/tui/observability.py \
   image/harness/goose.py \
   package.json \
   package-lock.json; do
@@ -121,6 +123,17 @@ for path in \
     fail=1
   }
 done
+
+grep -q '^opentelemetry-exporter-otlp-proto-http==' image/tui/requirements.lock ||
+  {
+    echo "::error file=image/tui/requirements.lock::the TUI requirements must pin the optional Countme exporter"
+    fail=1
+  }
+grep -q '^opentelemetry-sdk==' image/tui/requirements.lock ||
+  {
+    echo "::error file=image/tui/requirements.lock::the TUI requirements must pin the Countme SDK"
+    fail=1
+  }
 
 # shellcheck disable=SC2016 # single quotes are intentional: matching literal string
 require image/entrypoint.sh \

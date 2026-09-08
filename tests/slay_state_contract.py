@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import sys
+from unittest import mock
 
 site_pkgs = glob.glob(str(Path(__file__).parents[1] / ".cache" / "tui-venv" / "lib" / "python*" / "site-packages"))
 if site_pkgs:
@@ -296,6 +297,131 @@ class SlayStateMachineContractTests(unittest.TestCase):
 
             self.assertEqual(len(app.landing_queue), init_landings + 1)
             self.assertEqual(app.run_store.get(id_dep).state, RunState.MUTATING)
+
+    def test_failed_landing_deselects_work_and_starts_one_recovery_review(self):
+        """Failed terminal work remains visible but needs explicit re-selection."""
+        with self._store_dir() as root:
+            app = self._setup_app(root)
+            app._request_reconciliation = lambda: None
+            failed = tui.Stop(
+                repository="projectbluefin/review",
+                number=420,
+                action="review",
+                title="fix: failed landing",
+                selected=True,
+            )
+            blocked = tui.Stop(
+                repository="projectbluefin/review",
+                number=421,
+                action="review",
+                title="fix: blocked landing",
+                selected=True,
+            )
+            status_path = Path(root) / "failed-landing.jsonl"
+            status_path.write_text(
+                '{"pr":"projectbluefin/review#420","state":"failed",'
+                '"note":"OAuth workflow scope is missing"}\n'
+                '{"pr":"projectbluefin/review#421","state":"blocked",'
+                '"note":"required check is failing"}\n'
+                '{"state":"done","note":"terminal outcomes recorded"}\n'
+            )
+            task = tui.landing.LandingTask(
+                task_id="failed-landing",
+                stops=[failed, blocked],
+                login="jorge",
+                status_path=str(status_path),
+                log_path=str(Path(root) / "failed-landing.log"),
+                started=0.0,
+            )
+            app.advance_final_review = lambda _task: None
+
+            app.landing_finished(task)
+
+            self.assertFalse(failed.selected)
+            self.assertEqual(failed.failure, "failed: OAuth workflow scope is missing")
+            self.assertFalse(blocked.selected)
+            self.assertEqual(blocked.failure, "blocked: required check is failing")
+
+            dispatched = []
+            app.enqueue_landing = dispatched.append
+            with mock.patch.object(tui.landing, "landing_state_dir", return_value=root):
+                tui.ReviewDashboard.advance_final_review(app, task)
+
+            self.assertEqual(len(dispatched), 1)
+            recovery = dispatched[0]
+            self.assertEqual(recovery.phase, "final-review")
+            prompt = Path(recovery.prompt_path).read_text()
+            self.assertIn("Terminal landing outcomes needing maintainer recovery:", prompt)
+            self.assertIn(
+                'projectbluefin/review#420 — failed: "OAuth workflow scope is missing"',
+                prompt,
+            )
+            self.assertIn(
+                'projectbluefin/review#421 — blocked: "required check is failing"',
+                prompt,
+            )
+
+    def test_landing_failure_reason_is_bounded_when_finished_or_restored(self):
+        """Landing notes cannot make a failed queue row unbounded."""
+        with self._store_dir() as root:
+            app = self._setup_app(root)
+            app._request_reconciliation = lambda: None
+            note = "x" * 300
+            stop = tui.Stop(
+                repository="projectbluefin/review",
+                number=422,
+                action="review",
+                title="fix: long failed landing",
+                selected=True,
+            )
+            status_path = Path(root) / "long-failure.jsonl"
+            status_path.write_text(
+                f'{{"pr":"{stop.key}","state":"failed","note":"{note}"}}\n'
+                '{"state":"done","note":"terminal outcome recorded"}\n'
+            )
+            task = tui.landing.LandingTask(
+                task_id="long-failure",
+                stops=[stop],
+                login="jorge",
+                status_path=str(status_path),
+                started=0.0,
+            )
+            app.advance_final_review = lambda _task: None
+
+            app.landing_finished(task)
+
+            self.assertEqual(stop.failure, f"failed: {'x' * 240}")
+
+            restored = tui.Stop(
+                repository="projectbluefin/review",
+                number=422,
+                action="review",
+                title="fix: restored failed landing",
+            )
+            with mock.patch.object(
+                tui.landing,
+                "persisted_events",
+                return_value={stop.key: {"state": "failed", "note": note}},
+            ):
+                app.restore_landing_marks([restored])
+
+            self.assertEqual(restored.failure, f"failed: {'x' * 240}")
+
+    def test_late_reconciliation_callback_cannot_overwrite_fresh_source(self):
+        """A cancelled worker cannot stale a source settled by its replacement."""
+        with self._store_dir() as root:
+            app = self._setup_app(root)
+            app._reconciliation_request = 1
+            app._reconciliation_waiting = {"hive"}
+            app._reconciliation_success = {"queue": True, "hive": False}
+            app._reconciliation_source_attempts = {"queue": 1, "hive": 2}
+            app.reconciliation_state = "refreshing"
+
+            app._reconciliation_finished("hive", 1, 2, True)
+            self.assertEqual(app.reconciliation_state, "fresh")
+
+            app._reconciliation_finished("hive", 1, 1, False)
+            self.assertEqual(app.reconciliation_state, "fresh")
 
 
 if __name__ == "__main__":

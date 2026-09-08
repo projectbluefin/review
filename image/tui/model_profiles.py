@@ -7,7 +7,7 @@ import re
 
 # Reviewing is the expensive judgement; fixing is mechanical. Gemini is the
 # automatic default, while K3 fixes every policy's findings.
-GEMINI_TRIPLE = ("goose", "gemini-3.8-flash", "high")
+GEMINI_TRIPLE = ("goose", "gemini-3.8-flash", "max")
 SOL_TRIPLE = ("goose", "gpt-5.6-sol", "medium")
 OPUS_TRIPLE = ("goose", "claude-opus-5", "high")
 KIMI_TRIPLE = ("goose", "kimi-k3", "high")  # alias K3

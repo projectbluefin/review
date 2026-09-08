@@ -189,6 +189,19 @@ class ReviewResultContractTests(unittest.TestCase):
         self.assertEqual(result.state, "unparsable")
         self.assertFalse(result.is_clean)
 
+    def test_current_engine_adapter_treats_no_changes_to_review_as_clean(self):
+        output = "goose review: no changes to review"
+        result = adapt_current_engine(output, 0)
+        self.assertEqual(result.state, "complete")
+        self.assertTrue(result.is_clean)
+        self.assertEqual(result.findings, [])
+
+    def test_current_engine_adapter_treats_no_changes_with_nonzero_exit_as_failed(self):
+        output = "goose review: no changes to review"
+        result = adapt_current_engine(output, 2)
+        self.assertEqual(result.state, "failed")
+        self.assertFalse(result.is_clean)
+
     def test_current_engine_adapter_keeps_failed_check_incomplete(self):
         result = adapt_current_engine(fixture("goose-review-incomplete.txt"), 65)
         self.assertEqual(result.state, "incomplete")

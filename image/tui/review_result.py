@@ -316,6 +316,8 @@ def adapt_current_engine(
         for item in checks
     ):
         return ReviewResult(1, "incomplete", counts=counts, findings=findings, **context)
+    if any(line.strip().startswith("goose review: no changes to review") for line in raw):
+        return ReviewResult(1, "complete", counts=counts, findings=findings, **context)
     if summary is None:
         return ReviewResult(1, "unparsable", counts=counts, findings=findings, **context)
     try:

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-07",
+  "generated_at": "2026-09-08",
   "schema_version": "1.0",
   "skills": [
     {
@@ -17,8 +17,8 @@
         "turbo"
       ],
       "description": "Manages cluster contributor workers in bluefin-system, secret synchronization, and turbo-review orchestration. Use when scaling workers or operating review-contributor on Kubernetes.",
-      "version": "1.0",
-      "last_updated": "2026-09-06",
+      "version": "1.1",
+      "last_updated": "2026-09-07",
       "doc_type": "procedure"
     },
     {
@@ -210,8 +210,8 @@
         "automerge"
       ],
       "description": "Manages batch landings, multi-repo lane partitioning, fix-and-land agents, and landing status persistence. Use when modifying batch execution or landing.py.",
-      "version": "1.0",
-      "last_updated": "2026-09-06",
+      "version": "1.1",
+      "last_updated": "2026-09-08",
       "doc_type": "procedure"
     },
     {
@@ -225,11 +225,12 @@
         "just",
         "launcher",
         "podman",
-        "container"
+        "container",
+        "kubernetes"
       ],
-      "description": "Maintains the five review recipes and their credential boundaries. Use when editing justfile.",
-      "version": "3.5",
-      "last_updated": "2026-09-06",
+      "description": "Maintains the six review recipes and their credential boundaries. Use when editing justfile.",
+      "version": "3.8",
+      "last_updated": "2026-09-08",
       "doc_type": "runbook"
     },
     {
@@ -304,8 +305,8 @@
         "maintainer"
       ],
       "description": "Maintains image/tui/bluefin_review_tui.py: the mutation gate, the queue view, and its Textual patterns. Use when editing the dashboard or its pilot tests.",
-      "version": "2.6",
-      "last_updated": "2026-09-07",
+      "version": "2.9",
+      "last_updated": "2026-09-08",
       "doc_type": "runbook"
     },
     {
@@ -336,14 +337,15 @@
       "status": "active",
       "tags": [
         "monitoring",
-        "container",
         "review",
         "landings",
-        "queue"
+        "queue",
+        "kubernetes",
+        "countme"
       ],
       "description": "Use when observing, diagnosing, or monitoring running review-queue or review-container instances, landing batches, or agent process health.",
-      "version": "1.0",
-      "last_updated": "2026-09-07",
+      "version": "1.5",
+      "last_updated": "2026-09-08",
       "doc_type": "procedure"
     },
     {
