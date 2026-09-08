@@ -565,6 +565,17 @@ BLUEFIN_REVIEW_SKILLS_ROOT="$scratch/skills" \
   "$review" main...HEAD >/dev/null
 [[ "$(tr '\0' '\n' <"$scratch/argv-kb")" == *"$scratch/agent.md"* ]]
 
+# The default must resolve an isolated HOME's agent.md when no explicit path is
+# provided; otherwise a host knowledge file can mask a missing export.
+default_home="$scratch/default-home"
+mkdir -p "$default_home"
+printf 'DEFAULT_HOME_KB\n' >"$default_home/agent.md"
+env -u BLUEFIN_REVIEW_KNOWLEDGE_FILE \
+  HOME="$default_home" BLUEFIN_REVIEW_SKILLS_ROOT="$scratch/skills" \
+  PATH="$scratch/bin:$PATH" GOOSE_ARGV="$scratch/argv-default-home" \
+  "$review" main...HEAD >/dev/null
+[[ "$(tr '\0' '\n' <"$scratch/argv-default-home")" == *"$default_home/agent.md"* ]]
+
 # An absent knowledge file must not leave a dangling pointer in the prompt.
 BLUEFIN_REVIEW_SKILLS_ROOT="$scratch/skills" \
   BLUEFIN_REVIEW_KNOWLEDGE_FILE="$scratch/no-agent.md" \

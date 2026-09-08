@@ -106,7 +106,7 @@ credential handling ([`launcher.md`](launcher.md)).
 
 Hosted deployments serve under `hivecommons.dev` (with the Project Bluefin spoke
 at `https://hosted-projectbluefin-knuckle-gjvq.hive.hivecommons.dev`). At Hive
-`0b78dc0`, the public `/api/contribute` prefix exposes read-only status, queue,
+`11bee81280861d03416a0c6278da35c9778cbdee`, the public `/api/contribute` prefix exposes read-only status, queue,
 events, activity, fleet, limits, and triage projections. Prefix
 publicity does not make mutation handlers unauthenticated; those handlers
 still enforce their own write requirements. Review may display these
@@ -171,14 +171,14 @@ and no launcher change duplicates Hive lifecycle behavior.
 Cite upstream by pinned permalink, never a branch path.
 
 - Relay message cases, including `task_unavailable`:
-  [`bin/contributor-relay.sh` @ fe34da5](https://github.com/hivecommons/hive/blob/fe34da51434ad9b0924eee1492047c3c95c705ff/bin/contributor-relay.sh)
+  [`bin/contributor-relay.sh` @ 11bee81](https://github.com/hivecommons/hive/blob/11bee81280861d03416a0c6278da35c9778cbdee/bin/contributor-relay.sh)
 - Workspace preparation and tmux rooting:
-  [`bin/contributor-agent.sh` @ fe34da5](https://github.com/hivecommons/hive/blob/fe34da51434ad9b0924eee1492047c3c95c705ff/bin/contributor-agent.sh)
+  [`bin/contributor-agent.sh` @ 11bee81](https://github.com/hivecommons/hive/blob/11bee81280861d03416a0c6278da35c9778cbdee/bin/contributor-agent.sh)
 - Task release on disconnect:
-  [`src/pkg/dashboard/contribute_ws.go#L3445-L3470` @ fe34da5](https://github.com/hivecommons/hive/blob/fe34da51434ad9b0924eee1492047c3c95c705ff/src/pkg/dashboard/contribute_ws.go#L3445-L3470)
+  [`src/pkg/dashboard/contribute_ws.go#L3445-L3470` @ 11bee81](https://github.com/hivecommons/hive/blob/11bee81280861d03416a0c6278da35c9778cbdee/src/pkg/dashboard/contribute_ws.go#L3445-L3470)
 - tmux terminal and mouse configuration: Context7 `/tmux/tmux`
-- Public contribute projections and assignment policy @ `fe34da5`:
+- Public contribute projections and assignment policy @ `11bee81`:
   [`server.go`, `api_contribute.go`, `contribute_sse.go`, and
-  `contribute_ws.go`](https://github.com/hivecommons/hive/tree/fe34da51434ad9b0924eee1492047c3c95c705ff/src/pkg/dashboard)
-- PR-link projection @ `fe34da5`:
-  [`contribute_prlink.go`](https://github.com/hivecommons/hive/blob/fe34da51434ad9b0924eee1492047c3c95c705ff/src/pkg/dashboard/contribute_prlink.go)
+  `contribute_ws.go`](https://github.com/hivecommons/hive/tree/11bee81280861d03416a0c6278da35c9778cbdee/src/pkg/dashboard)
+- PR-link projection @ `11bee81`:
+  [`contribute_prlink.go`](https://github.com/hivecommons/hive/blob/11bee81280861d03416a0c6278da35c9778cbdee/src/pkg/dashboard/contribute_prlink.go)
