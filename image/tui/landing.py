@@ -485,19 +485,20 @@ def batch_outcome(
         for key, event in events.items()
         if key and isinstance(event, dict)
     }
+    if task.stop_requested:
+        return BatchOutcome("stopped", "stopped", "stopped by the maintainer", {}, 0, len(task.stops))
     if task.returncode is None:
         if not active:
             return BatchOutcome("queued", "queued", "awaiting a landing slot", {}, 0, len(task.stops))
         if states & {"waiting-ci", "awaiting-stable"}:
             return BatchOutcome("waiting", "waiting", "waiting on external verification", {}, 0, len(task.stops))
         return BatchOutcome("running", "running", "landing agent is active", {}, 0, len(task.stops))
-    if task.stop_requested:
-        return BatchOutcome("stopped", "stopped", "stopped by the maintainer", {}, 0, len(task.stops))
     if task.returncode != 0:
         return BatchOutcome("failed", "failed", f"agent exited {task.returncode}", {}, 0, len(task.stops))
 
     final = events.get(FINAL_KEY, {})
-    if final and str(final.get("phase", final.get("state", ""))) not in FINAL_TERMINAL_PHASES:
+    final_phase = str(final.get("phase", final.get("state", ""))) if final else ""
+    if final_phase and final_phase not in FINAL_TERMINAL_PHASES:
         return BatchOutcome("waiting", "waiting", "final review is still in progress", {}, 0, len(task.stops))
 
     counts: dict[str, int] = {}
@@ -516,6 +517,15 @@ def batch_outcome(
             "completed-with-blockers",
             "completed with blockers",
             f"{blockers} pull request(s) did not complete cleanly",
+            counts,
+            terminal,
+            total,
+        )
+    if final_phase == "review-blocked":
+        return BatchOutcome(
+            "completed-with-blockers",
+            "completed with blockers",
+            "final review is blocked",
             counts,
             terminal,
             total,

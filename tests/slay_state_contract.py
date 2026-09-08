@@ -666,12 +666,6 @@ class SlayStateMachineContractTests(unittest.TestCase):
             "unclassified",
         )
 
-    def test_generation_tokens_reject_late_editor_results(self):
-        """#196: cancellation, replacement, and edits invalidate a draft."""
-        self.assertTrue(tui.generation_is_current(4, 2, 4, 2, False))
-        self.assertFalse(tui.generation_is_current(4, 2, 5, 2, False))
-        self.assertFalse(tui.generation_is_current(4, 2, 4, 3, False))
-        self.assertFalse(tui.generation_is_current(4, 2, 4, 2, True))
         self.assertEqual(
             tui.classify_review_action(
                 result,
@@ -746,6 +740,13 @@ class SlayStateMachineContractTests(unittest.TestCase):
             ).classification,
             "unclassified",
         )
+
+    def test_generation_tokens_reject_late_editor_results(self):
+        """#196: cancellation, replacement, and edits invalidate a draft."""
+        self.assertTrue(tui.generation_is_current(4, 2, 4, 2, False))
+        self.assertFalse(tui.generation_is_current(4, 2, 5, 2, False))
+        self.assertFalse(tui.generation_is_current(4, 2, 4, 3, False))
+        self.assertFalse(tui.generation_is_current(4, 2, 4, 2, True))
 
     def test_landing_task_uses_argv_cwd_and_delimits_untrusted_prompt_data(self):
         """#383: hostile titles and paths must remain data in generated work."""

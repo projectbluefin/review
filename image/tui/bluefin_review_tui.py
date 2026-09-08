@@ -5299,6 +5299,25 @@ class ReviewDashboard(App):
             f"{escape(stop.title[:60])}{tag} "
             f"{marks} {escape('[' + stop.action + ']')}{failed}"
         )
+        landing_task = next(
+            (
+                task
+                for task in self.landing_queue
+                if not task.phase and stop.key in task.keys
+            ),
+            None,
+        )
+        if landing_task is not None:
+            landing_mark = (
+                "⟳ LANDING"
+                if self._landing_task_active(landing_task)
+                else "… LANDING QUEUED"
+            )
+            body = (
+                f"{selected}{link(stop.key, pr_url(stop.repository, stop.number))}: "
+                f"{escape(stop.title[:60])}{tag} {marks} {landing_mark} "
+                f"{escape('[' + stop.action + ']')}{failed}"
+            )
         style = stop_style(
             stop.action, stop.mergeable_state, checks, stop.review_state
         )
@@ -7681,6 +7700,8 @@ class ReviewDashboard(App):
                 self.notify("aborted; nothing was dispatched.", severity="warning")
                 return
             for task in tasks:
+                for stop in task.stops:
+                    stop.selected = False
                 self.enqueue_landing(task)
             self.notify(
                 f"dispatched {len(tasks)} landing batch"
@@ -7951,7 +7972,12 @@ class ReviewDashboard(App):
             )
             if counts[state]
         ]
-        if done:
+        if task.stop_requested:
+            message = (
+                f"batch {task.task_id} stopped by maintainer: "
+                f"{', '.join(parts) or 'no terminal outcomes'}"
+            )
+        elif done:
             message = f"batch {task.task_id} finished: {', '.join(parts)}"
         else:
             # The agent never closed its report: distinguishable from a
@@ -7960,7 +7986,9 @@ class ReviewDashboard(App):
                 f"batch {task.task_id} agent exited without reporting done: "
                 f"{', '.join(parts)}"
             )
-        if (
+        if task.stop_requested:
+            severity = "warning"
+        elif (
             counts["failed"]
             or counts["no outcome"]
             or counts["died mid-batch"]
@@ -7972,7 +8000,9 @@ class ReviewDashboard(App):
         else:
             severity = "information"
         duration = max(0.0, time.monotonic() - task.started)
-        if counts["failed"]:
+        if task.stop_requested:
+            outcome = "stopped"
+        elif counts["failed"]:
             outcome = "failed"
         elif counts["no outcome"] or counts["died mid-batch"] or not done:
             outcome = "incomplete"
