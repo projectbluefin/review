@@ -13,16 +13,15 @@ if site_pkgs:
     sys.path.insert(0, site_pkgs[0])
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "image"))
-sys.path.insert(0, str(Path(__file__).parents[1] / "image" / "tui"))
 
-from run_state import (
+from tui.run_state import (
     IllegalRunTransition,
     RunIdentity,
     RunState,
     RunStateStore,
     TerminalOutcome,
 )
-import bluefin_review_tui as tui
+import tui.bluefin_review_tui as tui
 
 
 def _sha(char: str) -> str:

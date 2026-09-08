@@ -60,29 +60,27 @@ except ModuleNotFoundError:  # minimal non-Textual import contracts
     def get_current_worker():
         return type("_NoWorker", (), {"is_cancelled": False})()
 
-_TUI_DIR = os.path.dirname(__file__)
-if _TUI_DIR not in sys.path:
-    sys.path.insert(0, _TUI_DIR)
-from review_result import ReviewResult, adapt_current_engine
-from semantic_view import DecisionState, build_decision_card
-import action_plan
-import landing
-import lab_client
-import hive_api
-from observability import ReviewObservability
+# image/ is the single import root: every sibling is spelled tui.*/harness.*.
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from tui.review_result import ReviewResult, adapt_current_engine
+from tui.semantic_view import DecisionState, build_decision_card
+from tui import action_plan
+from tui import landing
+from tui import lab_client
+from tui import hive_api
 from harness.codex import CodexHarness
 from harness.goose import GooseHarness
 from harness.autopilot import (HarnessOption, Preference, can_remember,
                                choose_option, discover_all, load_preferences,
                                remember_success)
-from review_evidence_manifest import ReviewRequest
-from re_review import (DeltaInput, FindingEvidence, H1Evidence, PriorFinding,
-                       Region, classify_head_delta)
+from tui.review_evidence_manifest import ReviewRequest
+from tui.re_review import (DeltaInput, FindingEvidence, H1Evidence, PriorFinding,
+                           Region, classify_head_delta)
 from harness.registry import Availability, DraftRequest, DraftState, HarnessRegistry
 from tui.headroom import HeadroomSession
 from tui.review_cache import ReviewCache
 from tui.review_receipt import ReviewReceipt
+from tui.observability import ReviewObservability
 from tui.review_run import ReviewRun
 from tui.run_state import (
     FULL_SHA,
@@ -93,45 +91,24 @@ from tui.run_state import (
     RunStateStore,
     TerminalOutcome,
 )
-try:
-    from tui.gh_client import (
-        BreakerRegistry,
-        BreakerState,
-        Dependency,
-        GhClient,
-        default_client,
-        get_breaker,
-        gh as gh_client_read,
-        run_mutation as gh_client_run_mutation,
-    )
-except ImportError:
-    from gh_client import (  # type: ignore[no-redef]
-        BreakerRegistry,
-        BreakerState,
-        Dependency,
-        GhClient,
-        default_client,
-        get_breaker,
-        gh as gh_client_read,
-        run_mutation as gh_client_run_mutation,
-    )
+from tui.gh_client import (
+    BreakerRegistry,
+    BreakerState,
+    Dependency,
+    GhClient,
+    default_client,
+    get_breaker,
+    gh as gh_client_read,
+    run_mutation as gh_client_run_mutation,
+)
 
-try:
-    from tui.model_profiles import (
-        HIGH_ASSURANCE_MODELS,
-        classify_batch,
-        escalation_triple,
-        is_high_assurance,
-        is_low_risk,
-    )
-except ImportError:
-    from model_profiles import (  # type: ignore[no-redef]
-        HIGH_ASSURANCE_MODELS,
-        classify_batch,
-        escalation_triple,
-        is_high_assurance,
-        is_low_risk,
-    )
+from tui.model_profiles import (
+    HIGH_ASSURANCE_MODELS,
+    classify_batch,
+    escalation_triple,
+    is_high_assurance,
+    is_low_risk,
+)
 
 if TYPE_CHECKING:
     from tui.review_engine import ReviewBatch, ReviewEvent

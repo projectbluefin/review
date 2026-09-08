@@ -29,20 +29,16 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 
-try:
-    from tui.model_profiles import (
-        OPUS_TRIPLE,
-        classify_batch,
-        final_environment,
-        final_triple,
-    )
-except ImportError:
-    from model_profiles import (  # type: ignore[no-redef]
-        OPUS_TRIPLE,
-        classify_batch,
-        final_environment,
-        final_triple,
-    )
+# Also run by path as a CLI (/opt/bluefin/tui/landing.py report ...): put the
+# image root on sys.path so the packaged import below resolves either way.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from tui.model_profiles import (
+    OPUS_TRIPLE,
+    classify_batch,
+    final_environment,
+    final_triple,
+)
 
 # One-shot agent invocation. Goose's documented non-interactive entry point
 # is `run --no-session -i <file>` (the same headless shape Hive's relay

@@ -12,10 +12,7 @@ from tui.review_evidence_manifest import ReviewRequest
 from .registry import (Availability, DraftRequest, DraftResult, DraftState,
                        HarnessBranding, HarnessCapabilities)
 
-try:
-    from tui.review_result import ReviewResult, parse_review_result
-except ImportError:
-    from image.tui.review_result import ReviewResult, parse_review_result
+from tui.review_result import ReviewResult, parse_review_result
 
 
 @dataclass

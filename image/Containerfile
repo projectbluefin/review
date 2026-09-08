@@ -15,7 +15,7 @@
 ARG FSDK_RUNNER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:8161102cfbe84d51f0ca7d7a8c8b0e6d7ef5f78bd4bb92454da87b74dd0be8ed
 # Kept equal to justfile's hive_commit: host setup and the
 # image runtime use the same contributor relay protocol revision.
-ARG HIVE_COMMIT=894ba2557d7f403ed1149691c9fbbf7388d2128a
+ARG HIVE_COMMIT=11bee81280861d03416a0c6278da35c9778cbdee
 ARG NODE_VERSION=24.18.1
 ARG GH_VERSION=2.97.0
 ARG TMUX_VERSION=3.7b
@@ -226,9 +226,9 @@ ARG UV_AARCH64_SHA256
 ARG TEXTUAL_VERSION
 COPY --chmod=0644 image/tui/requirements.lock /opt/bluefin/tui/requirements.lock
 # Every module, not just the entrypoint: the dashboard imports its siblings
-# (review_result, and theirs in turn) by bare name off sys.path[0]. A glob so
-# a new module ships the moment it exists, rather than the next time someone
-# remembers to extend this line.
+# as tui.*/harness.* off the image root, so the whole tree must ship. A glob
+# so a new module ships the moment it exists, rather than the next time
+# someone remembers to extend this line.
 COPY --chmod=0644 image/tui/*.py /opt/bluefin/tui/
 COPY --chmod=0644 image/harness/*.py /opt/bluefin/harness/
 RUN set -eu; \
@@ -266,8 +266,8 @@ RUN set -eu; \
     /opt/bluefin/tui/.venv/bin/python -c "import opentelemetry.sdk, textual; print(textual.__version__)"; \
     /opt/bluefin/tui/.venv/bin/python -m compileall -q /opt/bluefin/tui/*.py; \
     for tui_module in /opt/bluefin/tui/*.py; do \
-      PYTHONPATH=/opt/bluefin/tui:/opt/bluefin /opt/bluefin/tui/.venv/bin/python \
-        -c "import $(basename "$tui_module" .py)"; \
+      PYTHONPATH=/opt/bluefin /opt/bluefin/tui/.venv/bin/python \
+        -c "import tui.$(basename "$tui_module" .py)"; \
     done; \
     test ! -e /root/.cache/uv
 
