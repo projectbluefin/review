@@ -6279,6 +6279,13 @@ class ReviewDashboard(App):
                 severity="error",
             )
             return
+        if (
+            isinstance(self.screen, CIFailureScreen)
+            and self.screen.stop_record is stop
+        ):
+            # A refresh failure must not erase the exact head owned by the
+            # CI evidence screen while its on-demand result is being read.
+            return
         stop.live = {}
         stop.head_sha = ""
         stop.review_result = None
