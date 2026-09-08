@@ -2,7 +2,6 @@
 import unittest
 from pathlib import Path
 import sys
-sys.path.insert(0, str(Path(__file__).parents[1] / "image" / "tui"))
 sys.path.insert(0, str(Path(__file__).parents[1] / "image"))
 
 from tui.review_snapshot import BatchReviewItem, hydrate_batch_snapshot

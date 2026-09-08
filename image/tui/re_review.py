@@ -12,7 +12,7 @@ import json
 import re
 from typing import Any
 
-from review_evidence_manifest import ReviewRequest
+from tui.review_evidence_manifest import ReviewRequest
 
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")

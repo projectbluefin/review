@@ -9,12 +9,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
-TUI_ROOT = Path(__file__).resolve().parents[1] / "image" / "tui"
+TUI_ROOT = Path(__file__).resolve().parents[1] / "image"
 if str(TUI_ROOT) not in sys.path:
     sys.path.insert(0, str(TUI_ROOT))
 
 try:
-    import action_plan as contract
+    from tui import action_plan as contract
 except ModuleNotFoundError:
     contract = None
 
@@ -681,7 +681,7 @@ def test_batch_stale_fetch_does_not_fall_back_to_stale_cache():
         "textual.geometry",
     ]:
         sys.modules.setdefault(mod, unittest.mock.MagicMock())
-    import bluefin_review_tui as tui
+    import tui.bluefin_review_tui as tui
 
     class DummyDashboard:
         self_login = "maintainer"
@@ -722,7 +722,7 @@ def test_batch_stale_fetch_does_not_fall_back_to_stale_cache():
 class BatchActionPlanContractTests(unittest.TestCase):
     def test_shared_action_plan_module_exists(self):
         self.assertIsNotNone(
-            importlib.util.find_spec("action_plan"),
+            importlib.util.find_spec("tui.action_plan"),
             "the shared action plan contract module must exist",
         )
 

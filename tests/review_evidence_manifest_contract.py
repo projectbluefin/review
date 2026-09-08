@@ -7,8 +7,8 @@ import sys
 import json
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from image.tui.review_evidence_manifest import ReviewRequest
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "image"))
+from tui.review_evidence_manifest import ReviewRequest
 
 
 class ReviewRequestContractTests(unittest.TestCase):

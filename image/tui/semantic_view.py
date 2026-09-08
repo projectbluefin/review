@@ -8,7 +8,7 @@ import re
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from review_result import ReviewResult
+from tui.review_result import ReviewResult
 
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
