@@ -7703,7 +7703,7 @@ async def main() -> int:
             "confirming partitioned batch must return to the review queue",
         )
         check(
-            len(app.landing_queue) == 2,
+            sum(1 for task in app.landing_queue if not task.phase) == 2,
             "confirming partitioned batch must enqueue both landing tasks",
         )
     os.environ["BLUEFIN_REVIEW_PARTITION_BATCH"] = "0"
