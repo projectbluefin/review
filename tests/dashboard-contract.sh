@@ -23,6 +23,7 @@ python3 "$repo_root/tests/capacity_contract.py"
 python3 "$repo_root/tests/model_profiles_contract.py"
 python3 "$repo_root/tests/run_state_contract.py"
 python3 "$repo_root/tests/gh_client_contract.py"
+python3 "$repo_root/tests/landing-probe-contract.py"
 
 fail() {
   echo "FAIL: $1" >&2

@@ -795,7 +795,10 @@ def probe_package(package: str, manifest: str = "") -> tuple[dict, int]:
                 try:
                     body = json.loads(response.read())
                 except ValueError:
-                    body = {}
+                    return {
+                        **result,
+                        "error": f"manifest {manifest} returned invalid JSON",
+                    }, 1
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 return {**result, "manifest": manifest, "present": False}, 0
@@ -809,7 +812,13 @@ def probe_package(package: str, manifest: str = "") -> tuple[dict, int]:
         except (urllib.error.URLError, OSError) as exc:
             return {**result, "error": f"manifest {manifest} unreachable: {exc}"}, 1
 
-        answer = {**result, "manifest": manifest, "readable": True, "digest": digest}
+        answer = {
+            **result,
+            "manifest": manifest,
+            "present": True,
+            "readable": True,
+            "digest": digest,
+        }
         children = body.get("manifests")
         if isinstance(children, list):
             answer["children"] = [
