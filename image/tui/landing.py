@@ -1255,11 +1255,12 @@ def report_watch(status_path: str, target: WatchTarget, note: str) -> int:
         if mine:
             previous = watch_target(mine[-1])
             if previous and previous.status in {"queued", "in_progress"} and previous != target:
-                print(
-                    f"error: {pr} has a different active watch; refusing superseded target",
-                    file=sys.stderr,
-                )
-                return 1
+                if target.observed_at <= previous.observed_at:
+                    print(
+                        f"error: {pr} has an older active watch; refusing stale target",
+                        file=sys.stderr,
+                    )
+                    return 1
         event = {
             "pr": pr,
             "state": "waiting-ci",

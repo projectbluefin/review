@@ -57,7 +57,8 @@ status changes pass through its locked reporter. A `WatchTarget` retains the
 exact repository, pull request, head, workflow run, attempt, status, observed
 time, and deadline. A timeout while the same run remains queued or active is a
 continuation of that watch; an active run is never rerun merely because a watch
-command timed out.
+command timed out. A newer observed attempt or head may supersede an active
+target; an older late observation is rejected so it cannot restore stale state.
 
 `LandingScreen` reads a bounded log tail by bytes and lines and preserves the
 current scroll position unless the maintainer is following the tail. The

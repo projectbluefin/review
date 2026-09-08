@@ -191,7 +191,7 @@ class LandingWatchContractTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     landing.WatchTarget.from_dict({**base, key: value})
 
-    def test_report_watch_rejects_a_superseded_active_target(self) -> None:
+    def test_report_watch_accepts_a_newer_superseding_active_target(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             path = str(Path(root) / "watch.jsonl")
             current = landing.WatchTarget(
@@ -203,7 +203,25 @@ class LandingWatchContractTests(unittest.TestCase):
                 attempt=1, status="in_progress", observed_at=101.0, deadline=400.0,
             )
             self.assertEqual(landing.report_watch(path, current, "waiting"), 0)
-            self.assertNotEqual(landing.report_watch(path, superseded, "waiting"), 0)
+            self.assertEqual(landing.report_watch(path, superseded, "waiting"), 0)
+            self.assertEqual(
+                landing.watch_target(landing.parse_status(path)["org/repo#7"]).head_sha,
+                "b" * 40,
+            )
+
+    def test_report_watch_rejects_an_older_active_target(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = str(Path(root) / "watch.jsonl")
+            current = landing.WatchTarget(
+                "org/repo", pull_request=7, run_id=2, head_sha="b" * 40,
+                attempt=2, status="in_progress", observed_at=101.0, deadline=401.0,
+            )
+            stale = landing.WatchTarget(
+                "org/repo", pull_request=7, run_id=1, head_sha="a" * 40,
+                attempt=1, status="in_progress", observed_at=100.0, deadline=400.0,
+            )
+            self.assertEqual(landing.report_watch(path, current, "waiting"), 0)
+            self.assertNotEqual(landing.report_watch(path, stale, "late"), 0)
 
     def test_report_watch_requires_the_exact_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as root:
