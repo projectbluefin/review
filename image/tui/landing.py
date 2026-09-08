@@ -84,14 +84,18 @@ FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 PULL_REQUEST = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*$")
 SAFE_TEXT = re.compile(r"^[^\x00-\x1f\x7f]*$")
+SAFE_NOTE = re.compile(r"^[^\x00-\x08\x0b\x0c\x0e-\x1f\x7f]*$")
 MAX_TITLE = 512
 MAX_PATH = 1024
 MAX_NOTE = 1024
 
 
-def _bounded_text(value: Any, *, field: str, limit: int) -> str:
+def _bounded_text(
+    value: Any, *, field: str, limit: int, allow_newlines: bool = False
+) -> str:
     text = str(value or "")
-    if len(text) > limit or not SAFE_TEXT.fullmatch(text):
+    pattern = SAFE_NOTE if allow_newlines else SAFE_TEXT
+    if len(text) > limit or not pattern.fullmatch(text):
         raise ValueError(f"watch {field} is invalid")
     return text
 
@@ -1178,7 +1182,7 @@ def report_event(status_path: str, pr: str, state: str, note: str) -> int:
         print("error: invalid pull request event", file=sys.stderr)
         return 1
     try:
-        note = _bounded_text(note, field="note", limit=MAX_NOTE)
+        note = _bounded_text(note, field="note", limit=MAX_NOTE, allow_newlines=True)
     except ValueError:
         print("error: invalid pull request event note", file=sys.stderr)
         return 1
@@ -1229,7 +1233,7 @@ def report_watch(status_path: str, target: WatchTarget, note: str) -> int:
         print("error: invalid watch target identity", file=sys.stderr)
         return 1
     try:
-        note = _bounded_text(note, field="note", limit=MAX_NOTE)
+        note = _bounded_text(note, field="note", limit=MAX_NOTE, allow_newlines=True)
     except ValueError:
         print("error: invalid watch note", file=sys.stderr)
         return 1
@@ -1280,7 +1284,7 @@ def report_done(status_path: str, expect: list[str], note: str) -> int:
         print("error: invalid expected pull request", file=sys.stderr)
         return 1
     try:
-        note = _bounded_text(note, field="note", limit=MAX_NOTE)
+        note = _bounded_text(note, field="note", limit=MAX_NOTE, allow_newlines=True)
     except ValueError:
         print("error: invalid completion note", file=sys.stderr)
         return 1
