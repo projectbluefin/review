@@ -174,6 +174,59 @@ class CIFailureEvidenceContractTests(unittest.TestCase):
         self.assertEqual(tui.ci_log_failure_state("404 log not found"), "expired or unavailable")
         self.assertEqual(tui.ci_log_failure_state("connection reset"), "transport failed")
 
+    def test_on_demand_failure_survives_a_failed_background_refresh(self) -> None:
+        class Dashboard(tui.ReviewDashboard):
+            def load_queue(self, *args, **kwargs):
+                return None
+
+            def load_hive(self, *args, **kwargs):
+                return None
+
+            def discover_harness(self, *args, **kwargs):
+                return None
+
+            def show_evidence(self, *args, **kwargs):
+                return None
+
+        stop = tui.Stop(
+            "acme/widgets", 42, "fix-ci", "failing check", check_state="failure",
+            head_sha=HEAD,
+            live={"headRefOid": HEAD},
+        )
+        live = {
+            "repository": "acme/widgets",
+            "number": 42,
+            "headRefOid": HEAD,
+            "statusCheckRollup": [{
+                "name": "linux",
+                "conclusion": "FAILURE",
+                "runId": 9001,
+                "headSha": HEAD,
+            }],
+        }
+
+        async def exercise():
+            app = Dashboard()
+            async with app.run_test(size=(80, 24)) as pilot:
+                app.stops = [stop]
+                app.populate(app.stops)
+                app.evidence_generation[stop.key] = 1
+                expected_head = stop.head_identity
+                app.evidence_failed(stop, "background refresh failed", 1, False)
+                self.assertEqual(stop.head_identity, "")
+                app.show_ci_failure_evidence(
+                    stop,
+                    expected_head,
+                    live,
+                    tui.ci_failure_evidence(live),
+                    "",
+                )
+                await pilot.pause()
+                self.assertIsInstance(app.screen, tui.CIFailureScreen)
+                self.assertEqual(stop.live.get("headRefOid"), HEAD)
+
+        asyncio.run(exercise())
+
     def test_late_ci_results_cannot_cross_selection_head_or_cancel(self) -> None:
         self.assertTrue(tui.ci_result_is_current("acme/widgets", 42, HEAD, 7, False,
                                                   "acme/widgets", 42, HEAD, 7))

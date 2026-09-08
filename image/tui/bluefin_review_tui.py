@@ -7704,7 +7704,10 @@ class ReviewDashboard(App):
         failures: list[dict],
         error: str,
     ) -> None:
-        if self.current is not stop or stop.head_identity != expected_head:
+        current_head = stop.head_identity
+        if self.current is not stop or (
+            current_head and current_head != expected_head
+        ):
             return
         live_head = str(live.get("headRefOid") or "")
         if live_head and live_head != expected_head:
