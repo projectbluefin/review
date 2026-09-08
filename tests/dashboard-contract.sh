@@ -11,6 +11,20 @@
 # dashboard must never have cannot be proven missing by exercising it.
 set -euo pipefail
 
+# Keep import-time landing/TUI state private to this contract run (#424).
+dashboard_state_root="$(mktemp -d /tmp/bluefin-dashboard-contract.XXXXXXXXXX)"
+cleanup_dashboard_state() {
+  local status=$?
+  trap - EXIT HUP INT TERM
+  rm -rf -- "$dashboard_state_root"
+  exit "$status"
+}
+trap cleanup_dashboard_state EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+export XDG_STATE_HOME="$dashboard_state_root"
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tui="$repo_root/image/tui/bluefin_review_tui.py"
 
