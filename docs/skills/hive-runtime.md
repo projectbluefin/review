@@ -49,8 +49,11 @@ credential handling ([`launcher.md`](launcher.md)).
    (`src/pkg/knowledge/context7.go`) and delivers assigned-task context through
    its knowledge export, and the image's controlled Goose config enables the
    `context7` extension for on-demand lookups (see `goose-context.md`).
-   review starts the runtime and attaches to it; it does not reproduce Hive's
-   jobs.
+   review starts the runtime and does not reproduce Hive's jobs. The attended
+   contributor surface may display a passive status
+   companion that reads only Hive's public `/api/contribute` projections,
+   renders unknown when fields are absent, and leaves the Hive-owned tmux
+   session authoritative.
 2. Attach only to inspect or deliberately steer a live session:
 
    ```bash

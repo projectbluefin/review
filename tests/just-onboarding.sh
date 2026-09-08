@@ -13,6 +13,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+python3 "$repo_root/tests/worker_status_contract.py"
+
 # REVIEW_TEST_JUSTFILE exists so the harness itself can be negative-
 # tested against a deliberately broken copy of the launcher.
 justfile="${REVIEW_TEST_JUSTFILE:-$repo_root/justfile}"
@@ -2236,6 +2238,12 @@ fi
 # shellcheck disable=SC2016 # the entrypoint source is matched literally, not expanded
 grep -q '^/usr/local/bin/contributor-agent.sh "\$@" &$' "$entry_code" ||
   fail "the entrypoint must hand straight over to Hive's contributor-agent.sh, unwrapped"
+grep -Fq '/opt/bluefin/tui/worker_status.py' "$entry_code" ||
+  fail "the attended contributor path must launch the passive worker-status companion"
+grep -Fq 'status_pid=' "$entry_code" ||
+  fail "the companion must have explicit PID-1 cleanup ownership"
+grep -Fq 'tmux attach -t contributor' "$repo_root/image/tui/worker_status.py" ||
+  fail "the companion must show Hive's named contributor tmux attach command"
 
 # ══ result ════════════════════════════════════════════════════════════════
 if [[ "$failures" -gt 0 ]]; then

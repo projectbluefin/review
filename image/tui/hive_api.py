@@ -15,6 +15,7 @@ from dataclasses import dataclass
 MAX_DETAIL = 240
 MAX_SNIPPET = 120
 MAX_BODY = 16_384
+CONTRIBUTE_PROJECTIONS = ("status", "fleet", "triage", "metrics")
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -132,6 +133,22 @@ def request(
     if not isinstance(data, dict):
         return _malformed(code, content_type, body, token, "not a JSON object")
     return Result(True, "ok", "online", data)
+
+
+def read_projections(base: str, token: str, *, timeout: float = 15, opener=None) -> dict:
+    """Read Hive's public contribute projections without adding write powers."""
+    result = {}
+    for projection in CONTRIBUTE_PROJECTIONS:
+        response = request(
+            f"{base.rstrip('/')}/api/contribute/{projection}",
+            token,
+            timeout=timeout,
+            opener=opener,
+        )
+        if not response.ok:
+            return {"ok": False, "category": response.category, "message": response.message}
+        result[projection] = response.data
+    return {"ok": True, "data": result}
 
 
 def main() -> int:

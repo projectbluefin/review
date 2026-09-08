@@ -52,7 +52,10 @@ Goose, or image build skill documents.
 2. Interactive paths stay foreground; Ctrl-C stops them. `contribute` and
    `REVIEW_DETACH=1` start a labeled worker detached; its only lifecycle verb
    is polite `review-stop`. The launcher owns its Hive checkout and Podman
-   dashboard state.
+   dashboard state. An attended contributor run starts a passive Textual
+   worker-status companion after Hive has created `contributor`. It shows the
+   exact `podman exec -it <container> tmux attach -t contributor` command and
+   never selects, injects, captures, restarts, or completes work.
 3. Mount only read-only Hive contributor configuration. `review-queue` gets
    an optional TLS `HIVE_HUB` URL, mounts
    `${XDG_STATE_HOME:-~/.local/state}/bluefin-review` with shared `rw,z`, and
