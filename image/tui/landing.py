@@ -19,6 +19,7 @@ import argparse
 import contextlib
 import fcntl
 import json
+import math
 import os
 import re
 import shlex
@@ -81,6 +82,18 @@ TERMINAL_PR_STATES = ("merged", "blocked", "failed")
 WATCH_STATUSES = ("queued", "in_progress", "completed", "cancelled")
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+PULL_REQUEST = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*$")
+SAFE_TEXT = re.compile(r"^[^\x00-\x1f\x7f]*$")
+MAX_TITLE = 512
+MAX_PATH = 1024
+MAX_NOTE = 1024
+
+
+def _bounded_text(value: Any, *, field: str, limit: int) -> str:
+    text = str(value or "")
+    if len(text) > limit or not SAFE_TEXT.fullmatch(text):
+        raise ValueError(f"watch {field} is invalid")
+    return text
 
 
 @dataclass(frozen=True, init=False)
@@ -131,16 +144,50 @@ class WatchTarget:
             observed_at = now
         if deadline is None:
             deadline = observed_at + 300
-        object.__setattr__(self, "repository", str(repository))
+        try:
+            observed_at = float(observed_at)
+            deadline = float(deadline)
+        except (TypeError, ValueError) as error:
+            raise ValueError("watch timing is invalid") from error
+        if (
+            not math.isfinite(observed_at)
+            or not math.isfinite(deadline)
+            or observed_at < 0
+            or deadline < observed_at
+        ):
+            raise ValueError("watch deadline is invalid")
+        repository = str(repository)
+        if not REPOSITORY.fullmatch(repository):
+            raise ValueError("watch repository is invalid")
+        if pull_request is not None and (
+            isinstance(pull_request, bool)
+            or not isinstance(pull_request, int)
+            or pull_request < 1
+        ):
+            raise ValueError("watch pull request is invalid")
+        if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id < 1:
+            raise ValueError("watch run id is invalid")
+        if not FULL_SHA.fullmatch(str(head_sha)):
+            raise ValueError("watch head is invalid")
+        if attempt is not None and (
+            isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1
+        ):
+            raise ValueError("watch attempt is invalid")
+        status = str(status)
+        if status not in WATCH_STATUSES:
+            raise ValueError("watch status is invalid")
+        title = _bounded_text(title, field="title", limit=MAX_TITLE)
+        path = _bounded_text(path, field="path", limit=MAX_PATH)
+        object.__setattr__(self, "repository", repository)
         object.__setattr__(self, "pull_request", pull_request)
         object.__setattr__(self, "head_sha", str(head_sha))
         object.__setattr__(self, "run_id", run_id)
         object.__setattr__(self, "attempt", attempt)
-        object.__setattr__(self, "status", str(status))
-        object.__setattr__(self, "observed_at", float(observed_at))
-        object.__setattr__(self, "deadline", float(deadline))
-        object.__setattr__(self, "title", str(title))
-        object.__setattr__(self, "path", str(path))
+        object.__setattr__(self, "status", status)
+        object.__setattr__(self, "observed_at", observed_at)
+        object.__setattr__(self, "deadline", deadline)
+        object.__setattr__(self, "title", title)
+        object.__setattr__(self, "path", path)
 
     @classmethod
     def from_dict(cls, value: Any) -> "WatchTarget":
@@ -148,11 +195,15 @@ class WatchTarget:
             raise ValueError("watch target must be an object")
         repository = str(value.get("repository") or "")
         pull_request = value.get("pull_request")
-        run_id = value.get("run_id")
-        if pull_request is not None and (
-            isinstance(pull_request, bool) or not isinstance(pull_request, int) or pull_request < 1
+        if not REPOSITORY.fullmatch(repository):
+            raise ValueError("watch repository is invalid")
+        if (
+            isinstance(pull_request, bool)
+            or not isinstance(pull_request, int)
+            or pull_request < 1
         ):
             raise ValueError("watch pull request is invalid")
+        run_id = value.get("run_id")
         if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id < 1:
             raise ValueError("watch run id is invalid")
         head_sha = str(value.get("head_sha") or "")
@@ -171,7 +222,12 @@ class WatchTarget:
             deadline = float(value["deadline"])
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("watch timing is invalid") from error
-        if observed_at < 0 or deadline < observed_at:
+        if (
+            not math.isfinite(observed_at)
+            or not math.isfinite(deadline)
+            or observed_at < 0
+            or deadline < observed_at
+        ):
             raise ValueError("watch deadline is invalid")
         return cls(
             repository,
@@ -182,8 +238,8 @@ class WatchTarget:
             status=status,
             observed_at=observed_at,
             deadline=deadline,
-            title=str(value.get("title") or ""),
-            path=str(value.get("path") or ""),
+            title=_bounded_text(value.get("title"), field="title", limit=MAX_TITLE),
+            path=_bounded_text(value.get("path"), field="path", limit=MAX_PATH),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -966,10 +1022,13 @@ def landing_command(task: LandingTask) -> list[str]:
     template = os.environ.get(
         "BLUEFIN_REVIEW_LANDING_COMMAND", DEFAULT_LANDING_COMMAND
     )
-    return [
+    argv = [
         arg.replace("@PROMPT", task.prompt_path)
         for arg in shlex.split(template)
     ]
+    if not argv:
+        raise ValueError("landing command template is empty")
+    return argv
 
 
 def report_age(path: str) -> str:
@@ -1115,6 +1174,14 @@ def report_event(status_path: str, pr: str, state: str, note: str) -> int:
     terminal state — the latest event wins the fold — so a premature
     `merged` never becomes uncorrectable. Events after the batch's `done`
     are refused. Returns the process exit status."""
+    if not PULL_REQUEST.fullmatch(str(pr)) or state not in PR_STATES:
+        print("error: invalid pull request event", file=sys.stderr)
+        return 1
+    try:
+        note = _bounded_text(note, field="note", limit=MAX_NOTE)
+    except ValueError:
+        print("error: invalid pull request event note", file=sys.stderr)
+        return 1
     with _locked_status(status_path) as (handle, events):
         if any(
             not event.get("pr") and event.get("state") == TASK_DONE
@@ -1151,8 +1218,20 @@ def report_watch(status_path: str, target: WatchTarget, note: str) -> int:
         or target.pull_request is None
         or not FULL_SHA.fullmatch(target.head_sha)
         or target.run_id < 1
+        or target.attempt is None
+        or target.attempt < 1
+        or target.status not in WATCH_STATUSES
+        or not math.isfinite(target.observed_at)
+        or not math.isfinite(target.deadline)
+        or target.observed_at < 0
+        or target.deadline < target.observed_at
     ):
         print("error: invalid watch target identity", file=sys.stderr)
+        return 1
+    try:
+        note = _bounded_text(note, field="note", limit=MAX_NOTE)
+    except ValueError:
+        print("error: invalid watch note", file=sys.stderr)
         return 1
     pr = f"{target.repository}#{target.pull_request}"
     with _locked_status(status_path) as (handle, events):
@@ -1169,6 +1248,14 @@ def report_watch(status_path: str, target: WatchTarget, note: str) -> int:
                 file=sys.stderr,
             )
             return 1
+        if mine:
+            previous = watch_target(mine[-1])
+            if previous and previous.status in {"queued", "in_progress"} and previous != target:
+                print(
+                    f"error: {pr} has a different active watch; refusing superseded target",
+                    file=sys.stderr,
+                )
+                return 1
         event = {
             "pr": pr,
             "state": "waiting-ci",
@@ -1189,6 +1276,14 @@ def report_done(status_path: str, expect: list[str], note: str) -> int:
     --expect keys, so the gate holds even when the agent under-names its
     batch. An identical retry is a no-op; a conflicting one is refused.
     Returns the process exit status."""
+    if not all(PULL_REQUEST.fullmatch(str(key)) for key in expect):
+        print("error: invalid expected pull request", file=sys.stderr)
+        return 1
+    try:
+        note = _bounded_text(note, field="note", limit=MAX_NOTE)
+    except ValueError:
+        print("error: invalid completion note", file=sys.stderr)
+        return 1
     with _locked_status(status_path) as (handle, events):
         latest: dict[str, dict] = {}
         seeded: list[str] = []
