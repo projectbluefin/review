@@ -25,7 +25,7 @@ class CodexHarness:
         "codex", "Codex CLI", "CX", "OpenAI Codex CLI", "openai/codex", None
     )
     model: str = "gemini-3.8-flash"
-    effort: str = "high"
+    effort: str = "max"
     availability: Availability = Availability.UNAVAILABLE_BINARY
     executable: str = "codex"
     capabilities: HarnessCapabilities = HarnessCapabilities(

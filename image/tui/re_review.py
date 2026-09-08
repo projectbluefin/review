@@ -12,7 +12,7 @@ import json
 import re
 from typing import Any
 
-from review_evidence_manifest import ReviewEvidenceManifest
+from review_evidence_manifest import ReviewRequest
 
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -87,7 +87,7 @@ class DeltaInput:
     current_head_sha: str
     reviewed_merge_base_sha: str
     current_merge_base_sha: str
-    current_h1_manifest: ReviewEvidenceManifest
+    current_h1_request: ReviewRequest
     changed_regions: tuple[Region, ...] = ()
     prior_findings: tuple[PriorFinding, ...] = ()
     evidence: tuple[FindingEvidence, ...] = ()
@@ -104,11 +104,11 @@ class DeltaInput:
         for name in ("reviewed_head_sha", "current_head_sha", "reviewed_merge_base_sha", "current_merge_base_sha"):
             if not _SHA.fullmatch(getattr(self, name)):
                 raise ValueError(f"{name} must be a full lowercase SHA-1 value")
-        request = self.current_h1_manifest.request
+        request = self.current_h1_request
         if request.head_sha != self.current_head_sha:
-            raise ValueError("current H1 manifest head does not match current_head_sha")
+            raise ValueError("current H1 request head does not match current_head_sha")
         if request.base_sha != self.current_merge_base_sha:
-            raise ValueError("current H1 manifest base does not match current_merge_base_sha")
+            raise ValueError("current H1 request base does not match current_merge_base_sha")
 
 
 @dataclass(frozen=True)
@@ -121,7 +121,7 @@ class ClassifiedFinding:
 class ReReviewResult:
     reviewed_head_sha: str
     current_head_sha: str
-    current_h1_manifest: ReviewEvidenceManifest
+    current_h1_request: ReviewRequest
     findings: tuple[ClassifiedFinding, ...] = ()
     newly_supported: tuple[H1Evidence, ...] = ()
     fallback_reasons: tuple[FallbackReason, ...] = ()
@@ -188,7 +188,7 @@ def classify_head_delta(value: DeltaInput) -> ReReviewResult:
     return ReReviewResult(
         value.reviewed_head_sha,
         value.current_head_sha,
-        value.current_h1_manifest,
+        value.current_h1_request,
         tuple(classified),
         value.newly_supported,
         tuple(reasons),

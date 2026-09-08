@@ -12,7 +12,7 @@
 # was never once offered an update and silently froze. A pin no tool can track
 # is not a stricter pin, it is a stale one. The reference below is the only
 # source of truth for which base this is; do not restate its value here.
-ARG FSDK_RUNNER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:082ee46fa13e794dd3201b92968daf1e370a98aff5be94003d7e050e9ff80703
+ARG FSDK_RUNNER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:8161102cfbe84d51f0ca7d7a8c8b0e6d7ef5f78bd4bb92454da87b74dd0be8ed
 # Kept equal to justfile's hive_commit: host setup and the
 # image runtime use the same contributor relay protocol revision.
 ARG HIVE_COMMIT=fe34da51434ad9b0924eee1492047c3c95c705ff
@@ -216,7 +216,8 @@ RUN set -eu; \
 
 # The maintainer TUI runtime: uv (pinned, checksum-verified) creates a
 # self-contained virtual environment on the base's own CPython and installs
-# Textual from the hash-locked requirements file. uv stays installed at
+# Textual and the optional Countme exporter from the hash-locked requirements
+# file. uv stays installed at
 # /usr/local/bin/uv; the venv lives under /opt/bluefin/tui and is never on
 # PATH, so nothing here shadows base tools.
 ARG UV_VERSION
@@ -262,7 +263,7 @@ RUN set -eu; \
       --python /opt/bluefin/tui/.venv/bin/python \
       --require-hashes --no-deps \
       -r /opt/bluefin/tui/requirements.lock; \
-    /opt/bluefin/tui/.venv/bin/python -c "import textual; print(textual.__version__)"; \
+    /opt/bluefin/tui/.venv/bin/python -c "import opentelemetry.sdk, textual; print(textual.__version__)"; \
     /opt/bluefin/tui/.venv/bin/python -m compileall -q /opt/bluefin/tui/*.py; \
     for tui_module in /opt/bluefin/tui/*.py; do \
       PYTHONPATH=/opt/bluefin/tui:/opt/bluefin /opt/bluefin/tui/.venv/bin/python \
@@ -342,21 +343,25 @@ RUN set -eu; \
 RUN set -eu; \
     mkdir -p /usr/local/etc/hive /etc/hive/restrictions; \
     curl --fail --location --show-error --silent \
-      "https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/bin/contributor-agent.sh" \
+      "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-agent.sh" \
       -o /usr/local/bin/contributor-agent.sh; \
     curl --fail --location --show-error --silent \
-      "https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/bin/contributor-relay.sh" \
+      "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-relay.sh" \
       -o /usr/local/bin/contributor-relay.sh; \
     curl --fail --location --show-error --silent \
-      "https://raw.githubusercontent.com/kubestellar/hive/${HIVE_COMMIT}/config/backends.conf" \
+      "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/pi-backend.js" \
+      -o /usr/local/bin/pi-backend.js; \
+    curl --fail --location --show-error --silent \
+      "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/config/backends.conf" \
       -o /usr/local/etc/hive/backends.conf; \
-    chmod 0755 /usr/local/bin/contributor-agent.sh /usr/local/bin/contributor-relay.sh
+    chmod 0755 /usr/local/bin/contributor-agent.sh /usr/local/bin/contributor-relay.sh; \
+    node -e 'require("/usr/local/bin/pi-backend.js")'
 
 # Create the non-root runtime user expected by the launcher and workflows.
 RUN set -eu; \
     grep -q '^dev:' /etc/group || echo 'dev:x:1000:' >> /etc/group; \
     grep -q '^dev:' /etc/passwd || echo 'dev:x:1000:1000:Developer:/home/dev:/usr/bin/bash' >> /etc/passwd; \
-    mkdir -p /run/hive-metrics /home/dev/Downloads /home/dev/.config/goose /home/dev/.config/gh /home/dev/.codex /home/dev/.agents; \
+    mkdir -p /run/hive-metrics /home/dev/Downloads /home/dev/.config/goose /home/dev/.config/gh /home/dev/.codex /home/dev/.agents /home/dev/.local/state/bluefin-review /home/dev/.local/share; \
     chown -R 1000:1000 /run/hive-metrics /home/dev
 
 # Hive's contributor runtime calls `find` and `cmp` directly: the relay prunes

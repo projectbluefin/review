@@ -1253,22 +1253,20 @@ class EngineContractTests(unittest.TestCase):
             )
             submit_started = threading.Event()
             release_submit = threading.Event()
-            from concurrent.futures import ThreadPoolExecutor
+            from tui.scheduler import scheduler
 
-            original_submit = ThreadPoolExecutor.submit
+            shared_scheduler = scheduler()
+            original_submit = shared_scheduler.submit
 
-            def blocked_submit(pool, function, *args, **kwargs):
+            def blocked_submit(governor, function, *args, **kwargs):
                 submit_started.set()
                 release_submit.wait(timeout=5)
-                return original_submit(pool, function, *args, **kwargs)
+                return original_submit(governor, function, *args, **kwargs)
 
             with patch(
                 "tui.review_engine._prepare_worktree",
                 side_effect=self.prepared_worktree,
-            ), patch(
-                "tui.review_engine.ThreadPoolExecutor.submit",
-                new=blocked_submit,
-            ):
+            ), patch.object(shared_scheduler, "submit", new=blocked_submit):
                 batch = engine.start(
                     BatchSnapshot((selected,), {}),
                     "goose",

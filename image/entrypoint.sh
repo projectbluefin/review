@@ -123,7 +123,7 @@ if [ -z "${GOOSE_MODEL:-}" ]; then
 fi
 export GOOSE_MODEL
 
-export GOOSE_THINKING_EFFORT="${GOOSE_THINKING_EFFORT:-high}"
+export GOOSE_THINKING_EFFORT="${GOOSE_THINKING_EFFORT:-max}"
 
 if [ "$review_dashboard" = true ]; then
   if [ -n "${HIVE_HUB:-}" ]; then

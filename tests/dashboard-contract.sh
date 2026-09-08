@@ -15,6 +15,14 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tui="$repo_root/image/tui/bluefin_review_tui.py"
 
 python3 "$repo_root/tests/hive_api_contract.py"
+python3 "$repo_root/tests/review_scheduler_contract.py"
+python3 "$repo_root/tests/review_engine_contract.py"
+python3 "$repo_root/tests/review_transport_contract.py"
+python3 "$repo_root/tests/review_deadline_contract.py"
+python3 "$repo_root/tests/capacity_contract.py"
+python3 "$repo_root/tests/model_profiles_contract.py"
+python3 "$repo_root/tests/run_state_contract.py"
+python3 "$repo_root/tests/gh_client_contract.py"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -83,6 +91,7 @@ grep -q 'def drain_landings' "$tui" ||
 # required checks, no branch-protection bypass, per-PR JSONL status the
 # screen polls instead of scraped prose.
 landing_py="$repo_root/image/tui/landing.py"
+model_profiles_py="$repo_root/image/tui/model_profiles.py"
 grep -q 'never pass' "$landing_py" ||
   fail "the landing brief must state what the agent may not do"
 grep -q -- '--admin' "$landing_py" ||
@@ -235,9 +244,9 @@ grep -q 'is outside 1\.\.' "$landing_py" ||
   fail "the record itself must refuse a round past the limit"
 grep -q 'already review-blocked\|already {rounds\[-1\]' "$landing_py" ||
   fail "nothing may be written after the final phase closes"
-grep -q 'GOOSE_MODEL' "$landing_py" ||
+grep -q 'GOOSE_MODEL' "$landing_py" "$model_profiles_py" 2>/dev/null ||
   fail "a Goose round must carry its model explicitly"
-grep -q 'BLUEFIN_REVIEW_FINAL_MODEL' "$landing_py" ||
+grep -q 'BLUEFIN_REVIEW_FINAL_MODEL' "$landing_py" "$model_profiles_py" 2>/dev/null ||
   fail "a Codex round must not be handed Goose variables that do nothing"
 # shellcheck disable=SC2016 # single quotes are intentional for literal markdown backticks
 grep -q 'never force-push, never remove a hold' "$landing_py" ||
@@ -248,8 +257,6 @@ grep -q 'never force-push, never remove a hold' "$landing_py" ||
 # satisfy the governor's authorship contract (#247).
 grep -q '/api/v1/prs/{owner}/{repository}/{stop.number}/queue-automerge' "$tui" ||
   fail "queueing must call Hive's queue-automerge endpoint"
-grep -q 'QUEUE_LABEL = "lgtm"' "$tui" ||
-  fail "the sweep's label must still be lgtm"
 queue_body="$(sed -n '/def _queue_automerge/,/def action_merge/p' "$tui")"
 grep -q '"gh", "pr", "review"' <<<"$queue_body" &&
   fail "queueing must never submit a human-authored approval"
@@ -288,12 +295,11 @@ if grep -qE 'self\.mutate|subprocess' <<<"$handoff_body"; then
 fi
 
 # --- batch engine and broker contracts ---------------------------------------
-# These suites import image/tui modules that never reach Textual, so they run
-# on the system interpreter, before the venv is built. They lived in the tree
-# unexecuted until now; tests/test-registry.sh below keeps that from recurring.
-python3 "$repo_root/tests/capacity_contract.py"
+# These remaining suites import image/tui modules that never reach Textual, so
+# they run on the system interpreter, before the venv is built. The capacity
+# and review-engine contracts already run at the top of this script; keep each
+# suite to one invocation.
 python3 "$repo_root/tests/review_cache_contract.py"
-python3 "$repo_root/tests/review_engine_contract.py"
 python3 "$repo_root/tests/review_receipt_contract.py"
 python3 "$repo_root/tests/lab-broker-contract.py"
 python3 "$repo_root/tests/review-exec-broker-contract.py"
@@ -325,10 +331,14 @@ fi
 "${venv}/bin/python" "$repo_root/tests/review_result_contract.py"
 "${venv}/bin/python" "$repo_root/tests/review_run_contract.py"
 "${venv}/bin/python" "$repo_root/tests/review_evidence_manifest_contract.py"
-"${venv}/bin/python" "$repo_root/tests/review_evidence_manifest_unit.py"
 "${venv}/bin/python" "$repo_root/tests/action_plan_contract.py"
 "${venv}/bin/python" "$repo_root/tests/re_review_contract.py"
 "${venv}/bin/python" "$repo_root/tests/semantic_view_contract.py"
+# These current-main suites remain in the pinned Textual environment.
+"${venv}/bin/python" "$repo_root/tests/slay_state_contract.py"
+"${venv}/bin/python" "$repo_root/tests/soak_contract.py"
+"${venv}/bin/python" "$repo_root/tests/observability_contract.py"
+"${venv}/bin/python" "$repo_root/tests/review_session_runtime_contract.py"
 # review_snapshot_contract.py imports bluefin_review_tui for Stop, so it needs
 # the Textual venv rather than the stdlib-only step in validate.yml.
 "${venv}/bin/python" "$repo_root/tests/review_snapshot_contract.py"

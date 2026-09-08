@@ -5,7 +5,7 @@
   ],
   "customManagers": [
     {
-      "description": "Track kubestellar/hive origin/v4 as a pinned commit SHA. The SHA is duplicated in the launcher, the image, and the README, and tests/image-contract.sh plus validate.yml require all three to agree, so one depName keeps every match in a single Renovate branch and PR.",
+      "description": "Track hivecommons/hive origin/v4 as a pinned commit SHA. The SHA is duplicated in the launcher, the image, and the README, and tests/image-contract.sh plus validate.yml require all three to agree, so one depName keeps every match in a single Renovate branch and PR.",
       "customType": "regex",
       "managerFilePatterns": [
         "/^justfile$/",
@@ -18,14 +18,14 @@
         "layers the pinned Hive runtime at `(?<currentDigest>[0-9a-f]{40})`"
       ],
       "currentValueTemplate": "v4",
-      "depNameTemplate": "kubestellar/hive",
-      "packageNameTemplate": "https://github.com/kubestellar/hive",
+      "depNameTemplate": "hivecommons/hive",
+      "packageNameTemplate": "https://github.com/hivecommons/hive",
       "datasourceTemplate": "git-refs"
     }
   ],
   "packageRules": [
     {
-      "description": "Latest upstream is the project posture (AGENTS.md): every update automerges — digest, pin, patch, minor, and major alike. A pin is a checkpoint the automation moves, never a human gate.",
+      "description": "Latest upstream is the project posture (AGENTS.md): every update automerges — digest, pin, patch, minor, and major alike. A pin is a checkpoint the automation moves, never a human gate. automergeType and automergeStrategy are stated rather than inherited: branch-mode automerge cannot land here because branch protection requires a pull request, and squash is the only merge this repository allows.",
       "matchUpdateTypes": [
         "digest",
         "pin",
@@ -37,6 +37,8 @@
         "replacement"
       ],
       "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash",
       "platformAutomerge": true
     },
     {

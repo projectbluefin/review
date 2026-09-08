@@ -52,6 +52,124 @@ def read_mem_available_mb(path: str = "/proc/meminfo") -> int:
     raise CapacityError("MemAvailable is missing")
 
 
+def _read_ppid(pid_dir: str) -> int | None:
+    stat_file = os.path.join(pid_dir, "stat")
+    try:
+        with open(stat_file, "r", encoding="utf-8") as f:
+            content = f.read()
+        idx = content.rfind(")")
+        if idx != -1:
+            return int(content[idx + 2:].split()[1])
+    except (OSError, IndexError, ValueError):
+        pass
+    status_file = os.path.join(pid_dir, "status")
+    try:
+        with open(status_file, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("PPid:"):
+                    return int(line.split()[1])
+    except (OSError, IndexError, ValueError):
+        pass
+    return None
+
+
+def get_descendant_pids(
+    root_pid: int,
+    proc_root: str = "/proc",
+) -> set[int]:
+    """Find root_pid and all its descendant process IDs by scanning proc_root."""
+    parent_map: dict[int, int] = {}
+    try:
+        entries = os.listdir(proc_root)
+    except OSError:
+        return {root_pid}
+
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            pid = int(entry)
+        except ValueError:
+            continue
+        pid_dir = os.path.join(proc_root, entry)
+        ppid = _read_ppid(pid_dir)
+        if ppid is not None:
+            parent_map[pid] = ppid
+
+    children: dict[int, list[int]] = {}
+    for pid, ppid in parent_map.items():
+        children.setdefault(ppid, []).append(pid)
+
+    descendants: set[int] = set()
+    queue = [root_pid]
+    while queue:
+        curr = queue.pop()
+        descendants.add(curr)
+        for child in children.get(curr, ()):
+            if child not in descendants:
+                queue.append(child)
+
+    return descendants
+
+
+def read_proc_rss_kb(
+    pid: int,
+    proc_root: str = "/proc",
+    peak: bool = False,
+) -> int:
+    status_file = os.path.join(proc_root, str(pid), "status")
+    hwm = 0
+    rss = 0
+    try:
+        with open(status_file, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("VmHWM:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        try:
+                            hwm = int(parts[1])
+                        except ValueError:
+                            pass
+                elif line.startswith("VmRSS:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        try:
+                            rss = int(parts[1])
+                        except ValueError:
+                            pass
+    except (OSError, ValueError):
+        return 0
+    if peak:
+        return hwm if hwm > 0 else rss
+    return rss if rss > 0 else hwm
+
+
+def measure_tree_rss_kb(
+    root_pid: int,
+    proc_root: str = "/proc",
+    peak: bool = False,
+) -> int:
+    """Measure resident memory in kB across root_pid and all its descendant processes."""
+    pids = get_descendant_pids(root_pid, proc_root=proc_root)
+    total_kb = 0
+    for pid in pids:
+        total_kb += read_proc_rss_kb(pid, proc_root=proc_root, peak=peak)
+    return total_kb
+
+
+def measure_tree_rss_mb(
+    root_pid: int,
+    proc_root: str = "/proc",
+    peak: bool = False,
+) -> int:
+    """Measure resident memory in MB across root_pid and all its descendant processes."""
+    return measure_tree_rss_kb(root_pid, proc_root=proc_root, peak=peak) // 1024
+
+
+read_process_tree_rss_kb = measure_tree_rss_kb
+read_process_tree_rss_mb = measure_tree_rss_mb
+
+
 @dataclass(frozen=True)
 class CapacityGovernor:
     cap: int | None = None

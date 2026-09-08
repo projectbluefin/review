@@ -1466,22 +1466,18 @@ def main(argv=None) -> int:
     serve_parser.add_argument(
         "--repositories", default="", help="comma separated owner/repo allowlist for this session"
     )
-    serve_parser.add_argument(
-        "--namespace", default=DEFAULT_NAMESPACE, help="namespace holding the workflow templates"
-    )
 
     probe_parser = subcommands.add_parser("probe", help="report whether the host can reach a cluster")
-    probe_parser.add_argument("--timeout", type=int, default=KUBECTL_TIMEOUT_SECONDS)
 
     arguments = parser.parse_args(argv)
     if arguments.command == "probe":
-        return probe(arguments.timeout)
+        return probe(KUBECTL_TIMEOUT_SECONDS)
 
     if not arguments.session.strip():
         raise SystemExit("review-lab-broker: --session must not be empty")
     context = BrokerContext(
         session=arguments.session,
-        namespace=arguments.namespace,
+        namespace=DEFAULT_NAMESPACE,
         repositories=parse_repositories(arguments.repositories),
     )
     return serve(arguments.socket, context)

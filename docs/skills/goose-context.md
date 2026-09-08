@@ -52,8 +52,8 @@ task delivery; use the Hive runtime documentation instead.
    existing `~/.config/goose/config.yaml`; the controlled root still separates
    image policy, data, and state from that runtime-owned file.
 2. Keep the image Copilot-only. `GOOSE_PROVIDER` may be unset or
-   `github_copilot`; the entrypoint supplies `gpt-5.6-luna` and
-   `GOOSE_THINKING_EFFORT=high` when callers do not override them.
+   `github_copilot`; the entrypoint supplies `gemini-3.8-flash` and
+   `GOOSE_THINKING_EFFORT=max` when callers do not override them.
 3. Goose follows the upstream `canary` release. Build it with the required
    `github_token` secret so GitHub CLI can verify signed provenance from the
    official `canary.yml` workflow; never put that token in an image layer.

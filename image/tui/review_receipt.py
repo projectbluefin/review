@@ -5,7 +5,7 @@ import json
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -40,6 +40,20 @@ def _clean_provenance(mapping: Mapping[str, Any]) -> dict[str, Any]:
         for key, value in mapping.items()
         if key not in MUTABLE_PROVENANCE_KEYS
     }
+
+
+def _analysis_only(result: ReviewResult, provenance: Mapping[str, Any]) -> ReviewResult:
+    """Copy a result down to its durable analysis, with live context dropped."""
+    return replace(
+        result,
+        counts=dict(result.counts),
+        findings=[dict(item) for item in result.findings],
+        verification=[dict(item) for item in result.verification],
+        provenance=dict(provenance),
+        overlap={},
+        live={},
+        raw_evidence=[],
+    )
 
 
 def _text(value: object, field: str) -> str:
@@ -180,18 +194,7 @@ class ReviewReceipt:
         identity = ReceiptIdentity.from_run(run, check_scope_version)
         if result.state == "unparsable":
             raise ValueError("an unparsable result cannot become a receipt")
-        analysis = ReviewResult(
-            result.version,
-            result.state,
-            dict(result.counts),
-            [dict(item) for item in result.findings],
-            [dict(item) for item in result.verification],
-            _clean_provenance(result.provenance),
-            {},
-            {},
-            [],
-        )
-        recorded = dict(analysis.provenance)
+        recorded = _clean_provenance(result.provenance)
         recorded.update(_clean_provenance(provenance or {}))
         recorded.update({
             "repository": identity.repository,
@@ -203,17 +206,7 @@ class ReviewReceipt:
             "effort": identity.effort,
             "check_scope_version": identity.check_scope_version,
         })
-        analysis = ReviewResult(
-            analysis.version,
-            analysis.state,
-            analysis.counts,
-            analysis.findings,
-            analysis.verification,
-            dict(recorded),
-            {},
-            {},
-            [],
-        )
+        analysis = _analysis_only(result, recorded)
         return cls(
             RECEIPT_VERSION,
             identity,
@@ -299,24 +292,10 @@ class ReviewReceipt:
     def with_provenance(self, extra: Mapping[str, Any]) -> "ReviewReceipt":
         provenance = dict(self.provenance)
         provenance.update(_clean_provenance(extra))
-        analysis = ReviewResult(
-            self.analysis.version,
-            self.analysis.state,
-            dict(self.analysis.counts),
-            [dict(item) for item in self.analysis.findings],
-            [dict(item) for item in self.analysis.verification],
-            dict(provenance),
-            {},
-            {},
-            [],
-        )
-        return ReviewReceipt(
-            self.version,
-            self.identity,
-            analysis,
-            self.transcript,
-            provenance,
-            self.created_at,
+        return replace(
+            self,
+            analysis=_analysis_only(self.analysis, provenance),
+            provenance=provenance,
         )
 
 

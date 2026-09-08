@@ -36,24 +36,12 @@ class ReviewCache:
             f"{self.prefix(run)}-{self._digest(run, check_scope_version)}.json"
         )
 
-    @staticmethod
-    def run_for_receipt(receipt: ReviewReceipt) -> ReviewRun:
-        identity = receipt.identity
-        return ReviewRun(
-            identity.repository,
-            identity.pull_request,
-            identity.base_sha,
-            identity.head_sha,
-            identity.base_sha[:12] + identity.head_sha[:12],
-            identity.backend,
-            identity.model,
-            identity.effort,
-        )
-
     def path_for_receipt(self, receipt: ReviewReceipt) -> Path:
-        return self.path_for(
-            self.run_for_receipt(receipt),
-            receipt.identity.check_scope_version,
+        identity = receipt.identity
+        owner, repository = identity.repository.split("/", 1)
+        digest = cache_digest(identity.run_identity, identity.check_scope_version)
+        return self.root / (
+            f"{owner}__{repository}__{identity.pull_request}-{digest}.json"
         )
 
     @contextlib.contextmanager

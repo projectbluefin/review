@@ -440,7 +440,6 @@ def main(argv=None) -> int:
     serve_parser.add_argument("--socket", required=True, help="unix socket path to bind")
     serve_parser.add_argument("--session", required=True, help="session id every request must carry")
     serve_parser.add_argument("--image", required=True, help="container image for review jobs")
-    serve_parser.add_argument("--namespace", default=NAMESPACE, help="namespace for jobs")
 
     subcommands.add_parser("probe", help="probe host kubectl reachability")
 
@@ -448,7 +447,7 @@ def main(argv=None) -> int:
     if args.command == "probe":
         return probe()
     if args.command == "serve":
-        context = BrokerContext(session=args.session, image=args.image, namespace=args.namespace)
+        context = BrokerContext(session=args.session, image=args.image)
         return serve(args.socket, context)
     return 1
 

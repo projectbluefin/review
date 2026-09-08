@@ -100,7 +100,7 @@ def discover_all() -> list[HarnessOption]:
     goose = GooseHarness()
     return [
         HarnessOption(goose, Discovery(
-            "goose", "ready", "ready", "ready", "gemini-3.8-flash", "high", goose.availability,
+            "goose", "ready", "ready", "ready", "gemini-3.8-flash", "max", goose.availability,
         )),
         HarnessOption(CodexHarness(), discover()),
     ]
@@ -110,7 +110,7 @@ def choose_option(repository: str, preferences: dict[str, Preference],
                   options: list[HarnessOption], configured: Preference | None = None) -> HarnessOption | None:
     by_id = {option.harness.branding.harness_id: option for option in options}
     candidates = [preferences.get(repository), preferences.get("*"), configured,
-                  Preference("codex", "gemini-3.8-flash", "high")]
+                  Preference("codex", "gemini-3.8-flash", "max")]
     for candidate in candidates[:2]:
         option = by_id.get(candidate.harness_id) if candidate else None
         if option:
@@ -122,25 +122,6 @@ def choose_option(repository: str, preferences: dict[str, Preference],
         if option and option.discovery.availability is Availability.READY:
             return option
     return next((option for option in options if option.discovery.availability is Availability.READY), None)
-
-
-def choose(repository: str, preferences: dict[str, Preference], discovery: Discovery,
-           configured: Preference | None = None) -> Preference | None:
-    candidates = [preferences.get(repository), preferences.get("*"), configured,
-                  Preference("codex", "gemini-3.8-flash", "high")]
-    for candidate in candidates:
-        if candidate and candidate.harness_id == discovery.backend and discovery.availability is Availability.READY:
-            return candidate
-    return None
-
-
-def stale_choice(repository: str, preferences: dict[str, Preference],
-                 discovery: Discovery) -> str | None:
-    remembered = preferences.get(repository) or preferences.get("*")
-    if remembered and discovery.availability is not Availability.READY:
-        return (f"Remembered {remembered.harness_id}/{remembered.model} is "
-                f"{discovery.availability.value}; confirm a replacement.")
-    return None
 
 
 def can_remember(result: ReviewResult, binding: ReviewRequest) -> bool:

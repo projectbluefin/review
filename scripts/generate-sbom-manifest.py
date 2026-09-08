@@ -121,7 +121,7 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
     codex_version = require_non_empty(args.codex_version, "codex version")
     ripgrep_version = require_non_empty(args.ripgrep_version, "ripgrep version")
 
-    hive_raw = f"https://raw.githubusercontent.com/kubestellar/hive/{hive_commit}"
+    hive_raw = f"https://raw.githubusercontent.com/hivecommons/hive/{hive_commit}"
     return [
         package(
             "goose",
@@ -188,7 +188,7 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
             "contributor-agent.sh",
             hive_commit,
             f"{hive_raw}/bin/contributor-agent.sh",
-            f"pkg:github/kubestellar/hive@{hive_commit}",
+            f"pkg:github/hivecommons/hive@{hive_commit}",
             "Hive contributor runtime entrypoint, installed to"
             " /usr/local/bin/contributor-agent.sh at the pinned Hive commit.",
         ),
@@ -196,7 +196,7 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
             "contributor-relay.sh",
             hive_commit,
             f"{hive_raw}/bin/contributor-relay.sh",
-            f"pkg:github/kubestellar/hive@{hive_commit}",
+            f"pkg:github/hivecommons/hive@{hive_commit}",
             "Hive contributor relay, installed to"
             " /usr/local/bin/contributor-relay.sh at the pinned Hive commit.",
         ),
@@ -204,7 +204,7 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
             "backends.conf",
             hive_commit,
             f"{hive_raw}/config/backends.conf",
-            f"pkg:github/kubestellar/hive@{hive_commit}",
+            f"pkg:github/hivecommons/hive@{hive_commit}",
             "Hive backend registry, installed to /usr/local/etc/hive/"
             "backends.conf at the pinned Hive commit.",
         ),

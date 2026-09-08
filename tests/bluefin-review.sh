@@ -26,6 +26,7 @@ expected_banner=$'+------------------------+\n| BLUEFIN REVIEW         |\n| HUMA
 # the projected org skills. The context test further down opts back in.
 export BLUEFIN_REVIEW_SKILLS_ROOT="$scratch/absent"
 export BLUEFIN_REVIEW_REPOSITORY_ROOT="$scratch/absent"
+export BLUEFIN_REVIEW_KNOWLEDGE_FILE="$scratch/absent"
 
 # --- default mode: banner, then hand the range to goose review ---------------
 # 'main...HEAD' is a real 'goose review' argument. An earlier version of this

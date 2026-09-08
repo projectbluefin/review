@@ -13,18 +13,20 @@ from tui.capacity import (
     BLUEFIN_REVIEW_MEM_RESERVE_MB,
     CapacityError,
     CapacityGovernor,
+    get_descendant_pids,
+    measure_tree_rss_kb,
+    measure_tree_rss_mb,
     read_mem_available_mb,
+    read_proc_rss_kb,
 )
 
 
 class CapacityContractTests(unittest.TestCase):
     def test_meminfo_reader_parses_memavailable_kib(self):
-        path = Path("/tmp/capacity-meminfo-test")
-        path.write_text("MemTotal: 8000000 kB\nMemAvailable: 4096000 kB\n")
-        try:
+        with tempfile.TemporaryDirectory(dir=".") as temp_dir:
+            path = Path(temp_dir) / "capacity-meminfo-test"
+            path.write_text("MemTotal: 8000000 kB\nMemAvailable: 4096000 kB\n")
             self.assertEqual(read_mem_available_mb(str(path)), 4000)
-        finally:
-            path.unlink(missing_ok=True)
 
     def test_default_meminfo_reader_reads_host_meminfo_if_present(self):
         if Path("/proc/meminfo").exists():
@@ -76,25 +78,25 @@ class CapacityContractTests(unittest.TestCase):
         with self.assertRaises(CapacityError):
             read_mem_available_mb("/nonexistent/meminfo")
 
-        with tempfile.NamedTemporaryFile("w+", encoding="utf-8") as temp:
+        with tempfile.NamedTemporaryFile("w+", encoding="utf-8", dir=".") as temp:
             temp.write("MemTotal: 8000000 kB\nMemFree: 1000000 kB\n")
             temp.flush()
             with self.assertRaises(CapacityError):
                 read_mem_available_mb(temp.name)
 
-        with tempfile.NamedTemporaryFile("w+", encoding="utf-8") as temp:
+        with tempfile.NamedTemporaryFile("w+", encoding="utf-8", dir=".") as temp:
             temp.write("MemAvailable: not_a_number kB\n")
             temp.flush()
             with self.assertRaises(CapacityError):
                 read_mem_available_mb(temp.name)
 
-        with tempfile.NamedTemporaryFile("w+", encoding="utf-8") as temp:
+        with tempfile.NamedTemporaryFile("w+", encoding="utf-8", dir=".") as temp:
             temp.write("MemAvailable: 4000000 mB\n")
             temp.flush()
             with self.assertRaises(CapacityError):
                 read_mem_available_mb(temp.name)
 
-        with tempfile.NamedTemporaryFile("w+", encoding="utf-8") as temp:
+        with tempfile.NamedTemporaryFile("w+", encoding="utf-8", dir=".") as temp:
             temp.write("MemAvailable: -1024 kB\n")
             temp.flush()
             with self.assertRaises(CapacityError):
@@ -202,6 +204,44 @@ class CapacityContractTests(unittest.TestCase):
             cpu_count=lambda: 2,
         )
         self.assertEqual(governor_dual.total_slots(), 1)
+
+    def test_proc_rss_and_tree_measurement_with_mock_proc(self):
+        with tempfile.TemporaryDirectory(dir=".") as temp_dir:
+            proc_root = Path(temp_dir)
+            # Create process tree:
+            # 100 (parent) -> 101 (child1), 102 (child2)
+            # 101 -> 103 (grandchild)
+            # 200 (unrelated process)
+            procs = [
+                (100, 1, 10000, 8000),   # pid, ppid, hwm, rss
+                (101, 100, 20000, 15000),
+                (102, 100, 5000, 4000),
+                (103, 101, 8000, 7000),
+                (200, 1, 50000, 40000),
+            ]
+            for pid, ppid, hwm, rss in procs:
+                pdir = proc_root / str(pid)
+                pdir.mkdir()
+                (pdir / "stat").write_text(f"{pid} (testproc) S {ppid} {pid} 0 0\n")
+                (pdir / "status").write_text(f"PPid:\t{ppid}\nVmHWM:\t{hwm} kB\nVmRSS:\t{rss} kB\n")
+
+            descendants = get_descendant_pids(100, proc_root=str(proc_root))
+            self.assertEqual(descendants, {100, 101, 102, 103})
+
+            # Check single process RSS
+            self.assertEqual(read_proc_rss_kb(100, proc_root=str(proc_root), peak=False), 8000)
+            self.assertEqual(read_proc_rss_kb(100, proc_root=str(proc_root), peak=True), 10000)
+
+            # Check tree RSS (sum of 100, 101, 102, 103)
+            # rss: 8000 + 15000 + 4000 + 7000 = 34000 kB
+            # hwm: 10000 + 20000 + 5000 + 8000 = 43000 kB
+            self.assertEqual(measure_tree_rss_kb(100, proc_root=str(proc_root), peak=False), 34000)
+            self.assertEqual(measure_tree_rss_kb(100, proc_root=str(proc_root), peak=True), 43000)
+            self.assertEqual(measure_tree_rss_mb(100, proc_root=str(proc_root), peak=True), 43000 // 1024)
+
+    def test_read_process_tree_rss_current_process(self):
+        rss = measure_tree_rss_kb(os.getpid())
+        self.assertGreater(rss, 0)
 
 
 if __name__ == "__main__":
