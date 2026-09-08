@@ -7670,12 +7670,6 @@ class ReviewDashboard(App):
         if stop.is_issue:
             self.notify("CI failure logs apply to pull requests only", severity="warning")
             return
-        failures = ci_failure_evidence(
-            stop.live, repository=stop.repository, number=stop.number
-        )
-        if failures:
-            self.push_screen(CIFailureScreen(stop, failures[0]))
-            return
         expected_head = stop.head_identity
         self.notify("loading current-head CI failure evidence…")
         self.load_ci_failure_evidence(stop, expected_head)

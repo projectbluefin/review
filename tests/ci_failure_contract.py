@@ -278,6 +278,67 @@ class CIFailureEvidenceContractTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_failure_action_revalidates_cached_failure_before_display(self) -> None:
+        class Dashboard(tui.ReviewDashboard):
+            def load_queue(self, *args, **kwargs):
+                return None
+
+            def load_hive(self, *args, **kwargs):
+                return None
+
+            def discover_harness(self, *args, **kwargs):
+                return None
+
+            def show_evidence(self, *args, **kwargs):
+                return None
+
+        cached = {
+            "repository": "acme/widgets",
+            "number": 42,
+            "headRefOid": HEAD,
+            "statusCheckRollup": [{
+                "name": "linux",
+                "conclusion": "FAILURE",
+                "runId": 9001,
+                "headSha": HEAD,
+            }],
+        }
+        current = {
+            **cached,
+            "statusCheckRollup": [{
+                "name": "linux",
+                "conclusion": "FAILURE",
+                "runId": 9002,
+                "headSha": HEAD,
+            }],
+        }
+        stop = tui.Stop(
+            "acme/widgets", 42, "fix-ci", "failing check", check_state="failure",
+            head_sha=HEAD,
+            live=cached,
+        )
+        calls = []
+
+        async def exercise():
+            app = Dashboard()
+
+            def fetch_live_pr(repository, number, force=False):
+                calls.append(force)
+                return current
+
+            app.fetch_live_pr = fetch_live_pr
+            async with app.run_test(size=(80, 24)) as pilot:
+                app.stops = [stop]
+                app.populate(app.stops)
+                app.open_ci_failure_logs(stop)
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                self.assertEqual(calls, [True])
+                self.assertIsInstance(app.screen, tui.CIFailureScreen)
+                self.assertEqual(app.screen.evidence["run_id"], 9002)
+
+        asyncio.run(exercise())
+
     def test_late_ci_results_cannot_cross_selection_head_or_cancel(self) -> None:
         self.assertTrue(tui.ci_result_is_current("acme/widgets", 42, HEAD, 7, False,
                                                   "acme/widgets", 42, HEAD, 7))
@@ -337,7 +398,9 @@ class CIFailurePilotContractTests(unittest.TestCase):
                 async with PilotDashboard(tui.QueueFilters()).run_test() as pilot:
                     await pilot.pause()
                     pilot.app._queue().index = 0
+                    pilot.app.fetch_live_pr = lambda *args, **kwargs: dict(stop.live)
                     await pilot.press("i")
+                    await pilot.app.workers.wait_for_complete()
                     await pilot.pause()
                     self.assertIsInstance(pilot.app.screen, tui.CIFailureScreen)
                     await pilot.press("i")
