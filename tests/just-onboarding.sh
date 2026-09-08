@@ -70,6 +70,13 @@ for executable in /usr/bin/* /bin/*; do
   ln -s "$executable" "$system_bin/$name"
 done
 [[ -n "$real_just" && -x "$real_just" ]] && ln -sf "$real_just" "$system_bin/just"
+test_python="${REVIEW_TEST_PYTHON:-}"
+if [[ -z "$test_python" ]]; then
+  test_python="$(command -v python3 || command -v python || true)"
+fi
+if [[ -n "$test_python" && -x "$test_python" ]]; then
+  ln -sf "$test_python" "$system_bin/python3"
+fi
 
 # ── failure reporting ─────────────────────────────────────────────────────
 scenario="<startup>"
