@@ -31,11 +31,11 @@ os.environ["BLUEFIN_REVIEW_MAX_TRIAGE"] = "50"
 os.environ["BLUEFIN_REVIEW_MAX_MERGE_RIGHTS"] = "25"
 os.environ["BLUEFIN_REVIEW_MAX_LANDING_QUEUE"] = "20"
 
-TUI_ROOT = Path(__file__).resolve().parents[1] / "image" / "tui"
+TUI_ROOT = Path(__file__).resolve().parents[1] / "image"
 if str(TUI_ROOT) not in sys.path:
     sys.path.insert(0, str(TUI_ROOT))
 
-import bluefin_review_tui as tui  # noqa: E402
+import tui.bluefin_review_tui as tui  # noqa: E402
 
 CYCLES = 2000
 
