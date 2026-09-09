@@ -7,8 +7,8 @@ broker that reached for a real binary would find nothing at all — the test
 cannot accidentally talk to a maintainer's cluster, and a request that
 escapes the protocol shows up as a line in a stub's log instead of as a
 deleted namespace. HOME, XDG_STATE_HOME and XDG_RUNTIME_DIR are redirected
-into this repository's git-ignored `.cache`, and the anonymous ghcr resolver
-is pointed at a loopback HTTP server.
+into a private short-lived `/tmp` root, and the anonymous ghcr resolver is
+pointed at a loopback HTTP server.
 
 Each scenario is its own broker process with its own stubs, fixtures and
 state, because the interesting behaviour is what the broker does when a host
@@ -29,6 +29,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -36,9 +37,10 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 BROKER = REPO / "scripts" / "review-lab-broker.py"
-# AF_UNIX paths are capped near 108 bytes, so scenario directories are
-# short: the descriptive name lives in the check text, not in the path.
-WORK = REPO / ".cache" / "lab-broker"
+# AF_UNIX paths are capped near 108 bytes. Keep the scenario root independent
+# of the checkout depth: the descriptive name lives in the check text, not in
+# the path.
+WORK = Path(tempfile.mkdtemp(prefix="bluefin-lab-", dir="/tmp"))
 
 SESSION = "review-lab-session-1"
 HEAD_PUBLISHED = "a" * 40

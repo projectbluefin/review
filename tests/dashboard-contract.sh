@@ -11,6 +11,10 @@
 # dashboard must never have cannot be proven missing by exercising it.
 set -euo pipefail
 
+# The pilot's default-color assertions must not depend on the caller's shell;
+# its focused responsive contract exercises NO_COLOR explicitly.
+unset NO_COLOR
+
 # Keep import-time landing/TUI state private to this contract run (#424).
 dashboard_state_root="$(mktemp -d /tmp/bluefin-dashboard-contract.XXXXXXXXXX)"
 cleanup_dashboard_state() {
