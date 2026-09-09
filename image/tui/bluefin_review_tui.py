@@ -4932,25 +4932,50 @@ class ReviewDashboard(App):
 
     def harness_loaded(self, options: list[HarnessOption]) -> None:
         self.harness_options = options
-        result = next((option.discovery for option in options if option.harness.branding.harness_id == ACTIVE_BACKEND), options[0].discovery)
-        self.harness_state = result.availability.value
+        selected = next(
+            (
+                option
+                for option in options
+                if option.harness.branding.harness_id == ACTIVE_BACKEND
+            ),
+            None,
+        )
         try:
             label = self.query_one("#harness-status", Static)
-        except NoMatches:
+        except (NoMatches, ScreenStackError):
             # The asynchronous probe can finish after Textual has torn down
             # this dashboard. State remains useful for a live screen, but an
             # unmounted screen has nowhere safe to render it.
             return
-        if result.availability is Availability.READY:
+        if selected is None:
+            self.harness_state = "UNAVAILABLE"
             label.update(
-                "Harness Autopilot — READY · Codex / gemini-3.8-flash · "
-                "reason: max · Start requires Enter/click"
+                "Harness Autopilot — unavailable · backend unknown / model unknown · "
+                "effort: unknown · [Diagnostics] [Retry] · no fallback"
             )
         else:
-            label.update(
-                f"Harness Autopilot — {result.availability.value} · "
-                "[Diagnostics] [Sign in] [Install] [Retry] · no fallback"
-            )
+            result = selected.discovery
+            self.harness_state = result.availability.value
+            backend = str(result.backend or ACTIVE_BACKEND or "unknown").strip()
+            backend = backend.title() if backend != "unknown" else backend
+            if result.availability is Availability.READY:
+                model = str(getattr(selected.harness, "model", "") or result.model or "").strip()
+                effort = str(getattr(selected.harness, "effort", "") or "").strip()
+                if selected.harness.branding.harness_id == "goose":
+                    model = os.environ.get("GOOSE_MODEL", model).strip()
+                    effort = os.environ.get("GOOSE_THINKING_EFFORT", effort).strip()
+                model = model or "unknown"
+                effort = effort if effort in {"low", "medium", "high", "max"} else "unknown"
+                label.update(
+                    f"Harness Autopilot — READY · {backend} / {model} · "
+                    f"effort: {effort} · Start requires Enter/click"
+                )
+            else:
+                label.update(
+                    f"Harness Autopilot — {result.availability.value} · "
+                    f"{backend} / model unknown · effort: unknown · "
+                    "[Diagnostics] [Sign in] [Install] [Retry] · no fallback"
+                )
         try:
             self.refresh_rows()
         except Exception:

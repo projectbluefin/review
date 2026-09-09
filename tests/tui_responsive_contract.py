@@ -22,6 +22,9 @@ sys.path.insert(0, str(ROOT / "image"))
 
 from tui import bluefin_review_tui as tui  # noqa: E402
 from tui import worker_status  # noqa: E402
+from harness.autopilot import Discovery, HarnessOption  # noqa: E402
+from harness.codex import CodexHarness  # noqa: E402
+from harness.goose import GooseHarness  # noqa: E402
 from tui.display_brand import display_brand, display_title  # noqa: E402
 import tui.display_brand as display_brand_module  # noqa: E402
 
@@ -71,6 +74,56 @@ def review_stop() -> tui.Stop:
 
 
 class ResponsiveTuiContractTests(unittest.TestCase):
+    def test_harness_banner_uses_selected_backend_model_and_effort(self):
+        app = tui.ReviewDashboard.__new__(tui.ReviewDashboard)
+        label = mock.MagicMock()
+        app.query_one = lambda *_args, **_kwargs: label
+        app.refresh_rows = lambda: None
+        goose = HarnessOption(
+            GooseHarness(model="gpt-5.6-sol", effort="high"),
+            Discovery("goose", "ready", "ready", "ready", "gpt-5.6-sol", "high", tui.Availability.READY),
+        )
+        codex = HarnessOption(
+            CodexHarness(model="claude-opus-5", effort="medium", availability=tui.Availability.READY),
+            Discovery("codex", "ready", "ready", "ready", "claude-opus-5", "medium", tui.Availability.READY),
+        )
+        with mock.patch.object(tui, "ACTIVE_BACKEND", "goose"), mock.patch.dict(
+            os.environ,
+            {"GOOSE_MODEL": "gpt-5.6-sol", "GOOSE_THINKING_EFFORT": "high"},
+            clear=False,
+        ):
+            app.harness_loaded([goose, codex])
+        self.assertIn("Goose / gpt-5.6-sol", label.update.call_args.args[0])
+        self.assertIn("effort: high", label.update.call_args.args[0])
+
+        label.reset_mock()
+        with mock.patch.object(tui, "ACTIVE_BACKEND", "codex"):
+            app.harness_loaded([goose, codex])
+        self.assertIn("Codex / claude-opus-5", label.update.call_args.args[0])
+        self.assertIn("effort: medium", label.update.call_args.args[0])
+
+    def test_harness_banner_reports_unknown_selection_without_fallback(self):
+        app = tui.ReviewDashboard.__new__(tui.ReviewDashboard)
+        label = mock.MagicMock()
+        app.query_one = lambda *_args, **_kwargs: label
+        app.refresh_rows = lambda: None
+        unavailable = HarnessOption(
+            CodexHarness(model="", effort="", availability=tui.Availability.UNAVAILABLE_BINARY),
+            Discovery("codex", "missing", "missing", "unavailable", "", "", tui.Availability.UNAVAILABLE_BINARY),
+        )
+        with mock.patch.object(tui, "ACTIVE_BACKEND", "codex"):
+            app.harness_loaded([unavailable])
+        text = label.update.call_args.args[0]
+        self.assertIn("Codex / model unknown", text)
+        self.assertIn("effort: unknown", text)
+        self.assertNotIn("gemini-3.8-flash", text)
+
+        label.reset_mock()
+        app.harness_loaded([])
+        text = label.update.call_args.args[0]
+        self.assertIn("backend unknown / model unknown", text)
+        self.assertIn("effort: unknown", text)
+
     def test_display_brand_is_shared_configurable_and_markup_safe(self):
         with tempfile.TemporaryDirectory() as root:
             missing = Path(root) / "missing-brand"
