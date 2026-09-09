@@ -4819,18 +4819,6 @@ class ReviewDashboard(App):
                     yield Static("", id="details")
                 with ScrollableContainer(id="context-pane"):
                     yield Static("", id="context")
-                with ScrollableContainer(id="details-pane"):
-                    yield Static("", id="details")
-                with ScrollableContainer(id="context-pane"):
-                    yield Static("", id="context")
-        with Horizontal(id="landing-row"):
-            yield Static("AGENT ACTIVITY\nSnapshot: unavailable", id="activity")
-            with Vertical(id="landing-control"):
-                yield Static("LANDING QUEUE\nNo batches dispatched.", id="landing-control-status")
-                with Horizontal(id="landing-control-buttons"):
-                    yield Button("-", id="landing-concurrency-down")
-                    yield Button("+", id="landing-concurrency-up")
-                    yield Button("Pause", id="landing-pause")
         yield Input(
             placeholder=STEER_PLACEHOLDER,
             id="steer",
@@ -4895,6 +4883,10 @@ class ReviewDashboard(App):
             )
         self.refresh_status()
         self.load_queue()
+        pending_population = getattr(self, "_pending_population", None)
+        if pending_population is not None:
+            self._pending_population = None
+            self.call_after_refresh(self.populate, *pending_population)
         self.load_issues()
         self.load_hive()
         self.discover_harness()
@@ -6594,6 +6586,9 @@ class ReviewDashboard(App):
         try:
             queue = self.query_one("#queue", ListView)
         except (NoMatches, ScreenStackError):
+            return
+        if not queue.is_attached:
+            self._pending_population = (list(stops), record_snapshot)
             return
         queue.clear()
         if not stops:
