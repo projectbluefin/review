@@ -123,6 +123,24 @@ class ResponsiveTuiContractTests(unittest.TestCase):
             self.assertEqual(tui.ui_glyph("▶", ">"), ">")
             self.assertEqual(tui.ui_style("bold cyan"), "")
 
+    def test_dashboard_no_color_removes_theme_colors_from_rendered_widgets(self):
+        with mock.patch.dict(os.environ, {"NO_COLOR": ""}, clear=False):
+            app = tui.ReviewDashboard()
+            app.load_queue = lambda: None
+            app.load_hive = lambda: None
+            app.discover_harness = lambda: None
+
+            async def exercise():
+                async with app.run_test(size=(80, 24)) as pilot:
+                    await pilot.pause()
+                    self.assertIn("no-color", app.classes)
+                    for selector in ("#status-bar", "#activity", "#keys-acting"):
+                        widget = app.query_one(selector)
+                        self.assertEqual(widget.styles.color.ansi, -1)
+                        self.assertEqual(widget.styles.background.ansi, -1)
+
+            asyncio.run(exercise())
+
     def test_slow_draft_accepts_editor_input_and_rejects_changed_head(self):
         started = threading.Event()
         release = threading.Event()

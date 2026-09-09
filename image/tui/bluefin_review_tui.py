@@ -4110,6 +4110,33 @@ class ReviewDashboard(App):
     #ci-log { border: solid $secondary; height: 1fr; }
     #keys-reading, #keys-acting { overflow: hidden; }
     ToastRack { margin-bottom: 9; }
+    App.no-color Screen { color: ansi_default; background: ansi_default; }
+    App.no-color Screen * { color: ansi_default; background: ansi_default; }
+    App.no-color Screen #status-bar,
+    App.no-color Screen #activity,
+    App.no-color Screen #harness-status,
+    App.no-color Screen #keys-reading,
+    App.no-color Screen #keys-acting,
+    App.no-color Screen #review-status,
+    App.no-color Screen #diff-header,
+    App.no-color Screen #comments-header,
+    App.no-color Screen #review-card,
+    App.no-color Screen #ci-log-state,
+    App.no-color Screen #brand,
+    App.no-color Screen #state-badge { color: ansi_default; background: ansi_default; }
+    App.no-color Screen #activity,
+    App.no-color Screen #queue-pane,
+    App.no-color Screen #details-pane,
+    App.no-color Screen #context-pane,
+    App.no-color Screen #steer,
+    App.no-color Screen #review-status,
+    App.no-color Screen #review-log,
+    App.no-color Screen #confirm-box,
+    App.no-color Screen #takeoff-box,
+    App.no-color Screen #help-box,
+    App.no-color Screen #ci-failure-box,
+    App.no-color Screen #ci-failure-evidence-scroll,
+    App.no-color Screen #ci-log { border: solid ansi_default; }
     """
 
     BINDINGS = bindings_for("dashboard")
@@ -4122,6 +4149,8 @@ class ReviewDashboard(App):
         gh_client: GhClient | None = None,
     ) -> None:
         super().__init__()
+        if no_color_requested():
+            self.add_class("no-color")
         self.title = display_title("DASHBOARD")
         self.filters = filters or QueueFilters()
         self.run_store = run_store or RunStateStore()
