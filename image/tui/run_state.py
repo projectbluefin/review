@@ -147,6 +147,13 @@ _TRANSITIONS: dict[RunState, frozenset[RunState]] = {
     }),
 }
 
+REVIEW_PROVIDER_TERMINALS = frozenset({
+    RunState.REVIEW_FAILED,
+    RunState.REVIEW_MISSING,
+    RunState.REVIEW_INCOMPLETE,
+    RunState.REVIEW_UNPARSABLE,
+})
+
 _LOCKS_GUARD = threading.Lock()
 _LOCKS: dict[Path, threading.RLock] = {}
 
@@ -391,6 +398,12 @@ class RunStateStore:
             records, _next_sequence = self._load()
             return sorted(records.values(), key=lambda record: record.sequence)
 
+    def snapshot(self) -> dict[str, RunRecord]:
+        """A single locked read returning all records indexed by cache_identity."""
+        with self._locked():
+            records, _next_sequence = self._load()
+            return dict(records)
+
     def active_records(self) -> list[RunRecord]:
         with self._locked():
             records, _next_sequence = self._load()
@@ -433,15 +446,19 @@ class RunStateStore:
         reason: str = "",
         retry_at: str = "",
         low_risk: bool = False,
+        retry: bool = False,
     ) -> RunRecord:
         """Transition a run to a target state.
 
-        Terminal states cannot be transitioned out of. Once a run identity has
-        reached a terminal state (such as COMPLETED, REVIEW_MISSING, REVIEW_FAILED,
-        MUTATION_FAILED, or HEAD_CHANGED), calling transition() raises
-        IllegalRunTransition. Callers (e.g. slay-state-machine) attempting to
-        re-slay a pull request at the same head must check `record.is_terminal`
-        first; a new run requires advancing to a new head SHA.
+        Terminal states cannot be transitioned out of in normal execution.
+        The sole exception is explicit `retry=True`, which allows transitioning
+        from review-provider terminal states (`REVIEW_PROVIDER_TERMINALS`:
+        `REVIEW_FAILED`, `REVIEW_MISSING`, `REVIEW_INCOMPLETE`, `REVIEW_UNPARSABLE`)
+        back to `REVIEWING` (via `retry_review()`) for durable provider failures
+        at the same head. All other terminal state transitions remain strictly
+        forbidden and raise `IllegalRunTransition`. Once a run reaches any other
+        terminal state (such as COMPLETED, MUTATION_FAILED, or HEAD_CHANGED),
+        a new run requires advancing to a new head SHA.
 
         A run in BLOCKED or RETRY_AT remembers the non-terminal state it paused
         from in `resume_state`. Leaving BLOCKED or RETRY_AT is permitted only
@@ -456,10 +473,14 @@ class RunStateStore:
             if record is None:
                 raise KeyError(f"unknown run {run_id}")
             if record.is_terminal:
-                raise IllegalRunTransition(
-                    f"cannot transition from terminal state {record.state.value} to {target.value}"
-                )
-            allowed = set(_TRANSITIONS.get(record.state, frozenset()))
+                if retry and record.state in REVIEW_PROVIDER_TERMINALS and target == RunState.REVIEWING:
+                    allowed = {RunState.REVIEWING}
+                else:
+                    raise IllegalRunTransition(
+                        f"cannot transition from terminal state {record.state.value} to {target.value}"
+                    )
+            else:
+                allowed = set(_TRANSITIONS.get(record.state, frozenset()))
             if record.state in {RunState.BLOCKED, RunState.RETRY_AT} and record.resume_state:
                 allowed.add(record.resume_state)
             if target not in allowed:
@@ -496,6 +517,10 @@ class RunStateStore:
             records[run_id] = updated
             self._write(records, next_sequence + 1)
             return updated
+
+    def retry_review(self, identity: RunIdentity) -> RunRecord:
+        """Permit same-head retry for durable review-provider failures."""
+        return self.transition(identity, RunState.REVIEWING, retry=True)
 
     def revalidate_head(
         self, identity: RunIdentity, live_head_sha: str, *, fixer_advanced: bool = False

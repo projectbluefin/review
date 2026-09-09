@@ -16,9 +16,9 @@ dashboard. Pick the launch path that matches what you want to do:
 | Review pull requests as a maintainer | Maintainer dashboard | `just review-queue` |
 | Review while scaling contributor throughput | Turbo dashboard + workers | `just turbo-review` |
 | Donate an agent to Hive | Contributor worker | `just review-container` |
-| Donate an agent while away | Detached contributor worker | `just contribute` |
+| Start a foreground contributor worker | Contributor worker | `just contribute` |
 | Check whether this machine is ready | Diagnostics | `just review-doctor` |
-| Stop a detached worker | Lifecycle | `just review-stop` |
+| Stop cluster contributor workers | Lifecycle | `just review-stop` |
 
 ### One-time base setup
 
@@ -74,7 +74,7 @@ BLUEFIN_REVIEW_BACKEND=codex just review-queue
 # Default Hive contributor worker: Goose + GitHub Copilot.
 just review-container
 
-# Detached Hive contributor worker for an unattended run.
+# Foreground Hive contributor worker.
 just contribute
 
 # Hive contributor worker with Codex.
@@ -86,10 +86,8 @@ TOOL=pi just review-container
 # Optional Goose profile and effort.
 just review-container opus5 high
 
-# Deliberately detached contributor worker.
-REVIEW_DETACH=1 just review-container
-
-# Stop the default detached worker.
+# Detached contributor containers are not supported (REVIEW_DETACH=1 is rejected).
+# Stop cluster contributor workers (or explicitly: just review-stop cluster).
 just review-stop
 
 # Scale out contributor workers across a reachable Kubernetes cluster.
@@ -168,8 +166,8 @@ silently create a second workflow, authority path, or task queue.
 
 1. **Headless queue worker** (`review-container`): ingests
    Hive tasks, donates inference, and produces structured pre-review
-   feedback. `REVIEW_DETACH=1` runs it detached, with `just review-stop` as
-   its lifecycle verb.
+   feedback. Contributor containers run in the foreground; Ctrl-C stops
+   them. `just review-stop` is the lifecycle verb for cluster workers.
 2. **Interactive maintainer dashboard** (`review-queue`): the review surface.
    Goose or an explicitly selected Codex harness reviews a pull request in
    place and streams its verdict, alongside
@@ -219,18 +217,17 @@ six public recipes:
 
 | Command | Purpose |
 |---|---|
-| `just contribute [profile] [effort]` | Run an unattended local worker; it is detached by default. `just contribute cluster [N]` uses the existing Kubernetes scale-out path. |
+| `just contribute [profile] [effort]` | Start a foreground Hive contributor worker. |
 | `just review-container [profile] [effort]` | Run the Hive queue worker locally in Podman (or `just review-container cluster [N]` to scale out across Kubernetes). |
-| `just review-stop [name]` | Stop a detached worker (`just review-stop cluster` stops cluster workers). |
+| `just review-stop [target]` | Stop cluster contributor workers (`just review-stop cluster`). Refuses attended runs. |
 | `just review-queue [profile] [effort] [flags…]` | Walk the Bluefin PR queue interactively in the contributor container. |
 | `just turbo-review *args` | Scale three cluster contributor workers by default, then forward the optional profile, effort, repository, and dashboard flags to the foreground `review-queue`. Set `REVIEW_SCALE` to change the worker count. |
 | `just review-doctor` | Check launch readiness. Starts no agent. |
 
 Interactive runs remain attached to their originating terminal, and Ctrl-C or
-closing that terminal stops them. A detached worker (`REVIEW_DETACH=1`) is
-the deliberate exception: it carries a `review.owner=detached` label, logs
-through `podman logs -f`, is never silently reclaimed by a later launch, and
-stops only through `just review-stop`.
+closing that terminal stops them. Detached contributor containers are not
+supported; `REVIEW_DETACH=1` is rejected. Cluster workers run in Kubernetes
+and are stopped with `just review-stop` (or `just review-stop cluster`).
 Detaching tmux (`prefix`, then `d`) detaches the view only—the originating
 terminal remains responsible for the run.
 
@@ -303,7 +300,10 @@ Ctrl-C in one terminal stops only that agent. The name must match podman's own
 rule, `[a-zA-Z0-9][a-zA-Z0-9_.-]*`; anything else is rejected before launch.
 Both instances mount the same Hive contributor credentials and are fed
 independent assignments by Hive, which remains the sole authority for task
-selection.
+selection. When using an SSH-backed default Podman connection, the launcher
+stages the selected Hive registration to a unique per-run private `0700`
+directory on the remote engine host and cleans it up on exit, without altering
+or deleting remote canonical configuration.
 
 The container recipe inherits the Copilot and GitHub tokens by environment
 variable name, so token values are not placed on Podman's command line. The
@@ -943,7 +943,7 @@ Use an immutable `sha-<commit>` tag or digest with
 ## Image and context
 
 The image derives from the digest-pinned Project Bluefin FSDK lab runner and
-layers the pinned Hive runtime at `11bee81280861d03416a0c6278da35c9778cbdee`,
+layers the pinned Hive runtime at `c7a88b8518abf1163e13803b2094f2262605490b`,
 the current Goose canary snapshot, the pinned official Codex CLI, GitHub CLI,
 tmux, uv with the Textual
 dashboard runtime, hooks, and generated

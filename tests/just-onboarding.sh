@@ -46,6 +46,8 @@ gum_log="$scratch/gum.log"
 runner_log="$scratch/runner.log"
 image_log="$scratch/image.log"
 credential_log="$scratch/credentials.log"
+remote_log="$scratch/remote.log"
+fake_remote_root="$scratch/remote"
 kubectl_log="$scratch/kubectl.log"
 kubernetes_manifest_log="$scratch/kubernetes-manifest.json"
 
@@ -58,7 +60,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$fake_bin" "$system_bin" "$tmp_root" \
+mkdir -p "$fake_bin" "$system_bin" "$tmp_root" "$fake_remote_root" \
   "$home/.config/goose" "$home/.config/hive" "$cfg_dir" "$state_dir"
 
 # Preserve the launcher's normal system tools without allowing a host kubectl
@@ -196,6 +198,37 @@ set -euo pipefail
 # so the 'exactly one foreground run' assertions stay meaningful, and it
 # fails on demand so the missing-tag path can be exercised.
 case "${1:-}" in
+  system)
+    if [[ "${2:-}" == "connection" && "${3:-}" == "list" ]]; then
+      if [[ " $* " == *"json"* ]]; then
+        printf '%s\n' "${FAKE_PODMAN_CONNECTIONS:-[]}"
+        exit 0
+      fi
+      if [[ " $* " == *'.Name'* ]]; then
+        if [[ "${FAKE_PODMAN_CONNECTIONS:-}" == \[* ]]; then
+          /usr/bin/jq -r '.[] | [.Name, .URI, .Identity, (.Default | tostring)] | @tsv' \
+            <<<"$FAKE_PODMAN_CONNECTIONS"
+        else
+          awk -F'\t' '{printf "%s\t%s\t\t%s\n", $1, $2, $3}' \
+            <<<"${FAKE_PODMAN_CONNECTIONS:-}"
+        fi
+        exit 0
+      fi
+      if [[ -n "${FAKE_PODMAN_CONNECTIONS:-}" && "${FAKE_PODMAN_CONNECTIONS:-}" != "[]" ]]; then
+        uri=""
+        identity=""
+        if [[ "${FAKE_PODMAN_CONNECTIONS}" =~ \"URI\":\"([^\"]+)\" ]]; then
+          uri="${BASH_REMATCH[1]}"
+        fi
+        if [[ "${FAKE_PODMAN_CONNECTIONS}" =~ \"Identity\":\"([^\"]+)\" ]]; then
+          identity="${BASH_REMATCH[1]}"
+        fi
+        printf '%s\t%s\n' "$uri" "$identity"
+        exit 0
+      fi
+      exit 0
+    fi
+    ;;
   info)
     # The launcher asks which OCI runtime podman is configured with, because
     # runsc is the only one that takes --runtime-flag=host-uds=open.
@@ -305,6 +338,130 @@ if [[ "${FAKE_PODMAN_DETACH_SUCCESS:-0}" == 1 && "${detached:-false}" == true ]]
 fi
 exit 97
 EOF
+cat >"$fake_bin/ssh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'ssh %s\n' "$*" >> "${REMOTE_LOG:?}"
+
+target=""
+cmd=""
+while (($#)); do
+  case "$1" in
+    -o|-i|-p) shift 2 ;;
+    -*) shift ;;
+    *)
+      if [[ -z "$target" ]]; then
+        target="$1"
+      else
+        cmd="${cmd:+$cmd }$1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+remote_root="${FAKE_REMOTE_ROOT:-}"
+if [[ -n "$remote_root" ]]; then
+  if [[ "${FAKE_SSH_FAIL:-0}" == 1 ]]; then
+    exit 1
+  fi
+  if [[ "${FAKE_SSH_CHMOD_FAIL:-0}" == 1 && "$cmd" == *"chmod 0600"* ]]; then
+    exit 1
+  fi
+  # If the launcher targets the old canonical path:
+  if [[ "$cmd" == *"mkdir -p \"\$HOME/.config/hive\""* || "$cmd" == *'mkdir -p "$HOME/.config/hive"'* || "$cmd" == *"mkdir -p \$HOME/.config/hive"* ]]; then
+    mkdir -p "$remote_root/home/dev/.config/hive"
+    chmod 0700 "$remote_root/home/dev/.config/hive"
+    printf '%s\n' "$remote_root/home/dev/.config/hive"
+    exit 0
+  fi
+  # If the launcher creates a unique private staging directory:
+  if [[ "$cmd" == *"review-hive-registration"* && "$cmd" == *"mktemp -d"* ]]; then
+    stage_id="${FAKE_STAGE_ID:-a1b2c3}"
+    stage_path="/tmp/review-hive-registration.${stage_id}"
+    mkdir -m 0700 -p "${remote_root}${stage_path}"
+    printf '%s\n' "$stage_path"
+    exit 0
+  fi
+  if [[ "$cmd" == *"chmod 0600"* ]]; then
+    for part in $cmd; do
+      if [[ "$part" == /tmp/review-hive-registration* || "$part" == /home/dev/.config/hive* ]]; then
+        if [[ -e "${remote_root}${part}" ]]; then
+          chmod 0600 "${remote_root}${part}"
+        fi
+      fi
+    done
+    exit 0
+  fi
+  if [[ "$cmd" == *"rm "* || "$cmd" == *"rmdir "* ]]; then
+    for part in $cmd; do
+      part="${part#\"}"
+      part="${part%\"}"
+      part="${part#\'}"
+      part="${part%\'}"
+      part="${part%;}"
+      if [[ "$part" == /tmp/review-hive-registration* || "$part" == /home/dev/.config/hive* ]]; then
+        if [[ -e "${remote_root}${part}" ]]; then
+          rm -rf "${remote_root}${part}" 2>/dev/null || true
+        fi
+      fi
+    done
+    exit 0
+  fi
+fi
+
+printf '%s\n' "/remote/home/.config/hive"
+EOF
+cat >"$fake_bin/scp" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'scp %s\n' "$*" >> "${REMOTE_LOG:?}"
+
+if [[ "${FAKE_SCP_FAIL:-0}" == 1 ]]; then
+  exit 1
+fi
+
+remote_root="${FAKE_REMOTE_ROOT:-}"
+if [[ -n "$remote_root" ]]; then
+  src=""
+  dest=""
+  while (($#)); do
+    case "$1" in
+      -o|-i|-P) shift 2 ;;
+      -*) shift ;;
+      *)
+        if [[ -z "$src" ]]; then
+          src="$1"
+        else
+          dest="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
+  if [[ -n "$src" && -n "$dest" && "$dest" == *:* ]]; then
+    remote_path="${dest#*:}"
+    if [[ "$remote_path" == /tmp/review-hive-registration* || "$remote_path" == /home/dev/.config/hive* || "$remote_path" == /remote/home/* ]]; then
+      if [[ "$remote_path" == "/remote/home/"* ]]; then
+        local_target="${remote_root}/home/dev/${remote_path#/remote/home/}"
+      else
+        local_target="${remote_root}${remote_path}"
+      fi
+      mkdir -p "$(dirname "$local_target")"
+      cp -p "$src" "$local_target"
+    fi
+  fi
+fi
+EOF
+cat >"$fake_bin/jq" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${FAKE_JQ_UNAVAILABLE:-0}" == 1 ]]; then
+  echo "jq: command not found" >&2
+  exit 127
+fi
+exec /usr/bin/jq "$@"
+EOF
 chmod +x "$fake_bin"/*
 
 # ── fixtures ──────────────────────────────────────────────────────────────
@@ -330,6 +487,7 @@ reset_logs() {
   : >"$runner_log"
   : >"$image_log"
   : >"$credential_log"
+  : >"$remote_log"
   : >"$kubectl_log"
   : >"$kubernetes_manifest_log"
   RECIPE_ARGS=()
@@ -358,6 +516,9 @@ run_recipe() {
       -u REVIEW_CONTAINER_NAME -u REVIEW_DETACH \
       -u REVIEW_HIVE -u REVIEW_CONTRIBUTOR_IMAGE \
       -u REVIEW_QUEUE_NAME -u REVIEW_SCALE -u XDG_STATE_HOME -u FAKE_GIT_TOPLEVEL \
+      -u FAKE_PODMAN_CONNECTIONS \
+      -u FAKE_JQ_UNAVAILABLE \
+      -u FAKE_SCP_FAIL -u FAKE_SSH_CHMOD_FAIL -u FAKE_STAGE_ID \
       -u REVIEW_RUNTIME -u FAKE_KUBECTL_DASHBOARD_API_UNAVAILABLE \
       -u FAKE_KUBECTL_DASHBOARD_PVC_MISSING -u FAKE_KUBECTL_DASHBOARD_PVC_FORBIDDEN \
       -u OTEL_EXPORTER_OTLP_ENDPOINT -u OTEL_EXPORTER_OTLP_HEADERS \
@@ -376,6 +537,8 @@ run_recipe() {
       GUM_LOG="$gum_log" RUNNER_LOG="$runner_log" \
       IMAGE_LOG="$image_log" \
       CREDENTIAL_LOG="$credential_log" \
+      REMOTE_LOG="$remote_log" \
+      FAKE_REMOTE_ROOT="$fake_remote_root" \
       KUBECTL_LOG="$kubectl_log" \
       KUBERNETES_MANIFEST_LOG="$kubernetes_manifest_log" \
       "$@" \
@@ -1383,148 +1546,126 @@ assert_file_not_contains "super-secret-registration-token" "$runner_log"
 # keeps running whatever copy they first pulled.
 assert_file_contains "pull ghcr.io/projectbluefin/review:stable" "$image_log"
 
-begin "review-container: REVIEW_DETACH=1 launches the marked worker"
-reset_logs
-run_recipe review-container GH_READY=1 REVIEW_DETACH=1
-assert_nonzero_status "$STATUS" "the fake podman always exits non-zero"
-assert_file_contains "run --rm --detach --replace --name review-container" "$runner_log"
-assert_file_contains "--label review.owner=detached" "$runner_log"
-assert_file_not_contains "--interactive" "$runner_log"
-assert_file_not_contains "--tty" "$runner_log"
-assert_contains "just review-stop review-container" "$OUT"
-assert_contains "podman logs -f review-container" "$OUT"
-
-begin "contribute: launches the marked worker detached"
+begin "contribute: launches the worker in the foreground"
 reset_logs
 run_recipe contribute GH_READY=1
 assert_nonzero_status "$STATUS" "the fake podman always exits non-zero"
-assert_file_contains "run --rm --detach --replace --name review-container" "$runner_log"
-assert_file_contains "--label review.owner=detached" "$runner_log"
-assert_file_not_contains "--interactive" "$runner_log"
+assert_file_contains "run --rm --interactive --tty --replace --name review-container" "$runner_log"
+assert_file_not_contains "--detach" "$runner_log"
 
-begin "review-container: detached Codex auth survives until review-stop"
+begin "review-container: REVIEW_DETACH=1 is rejected"
 reset_logs
-mkdir -p "$home/.codex"
-printf '{"tokens":{"access_token":"codex-test-secret"}}\n' >"$home/.codex/auth.json"
-chmod 0400 "$home/.codex/auth.json"
-run_recipe review-container GH_READY=1 TOOL=codex REVIEW_DETACH=1 FAKE_PODMAN_DETACH_SUCCESS=1
-codex_auth_mount="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "$credential_log")"
-assert_file_exists "$codex_auth_mount"
-assert_file_contains "--label review.codex-auth=" "$runner_log"
-auth_label="$(sed -n 's/.*--label review.codex-auth=\([^ ]*\).*/\1/p' "$runner_log")"
-run_recipe review-stop FAKE_PODMAN_RUNNING=1 FAKE_PODMAN_OWNER_LABEL=detached \
-  FAKE_PODMAN_CODEX_AUTH_LABEL="$auth_label" XDG_RUNTIME_DIR= TMPDIR=/tmp
-assert_file_not_exists "$codex_auth_mount"
-rm -f "$home/.codex/auth.json"
-rmdir "$home/.codex"
+run_recipe review-container GH_READY=1 REVIEW_DETACH=1
+assert_nonzero_status "$STATUS" "detached launches must fail"
+assert_contains "detached contributor containers are not supported" "$OUT"
+assert_eq "$(wc -c <"$runner_log")" 0 "a detached launch must not reach Podman"
 
-begin "review-container: stale Codex auth cleanup survives runtime drift"
+begin "review-container: missing jq does not affect a local connection"
 reset_logs
-mkdir -p "$home/.codex"
-printf '{"tokens":{"access_token":"codex-test-secret"}}\n' >"$home/.codex/auth.json"
-chmod 0400 "$home/.codex/auth.json"
-run_recipe review-container GH_READY=1 TOOL=codex REVIEW_DETACH=1 \
-  FAKE_PODMAN_DETACH_SUCCESS=1
-codex_auth_mount="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "$credential_log")"
-assert_file_exists "$codex_auth_mount"
-auth_label="$(sed -n 's/.*--label review.codex-auth=\([^ ]*\).*/\1/p' "$runner_log")"
-run_recipe review-container GH_READY=1 TOOL=codex FAKE_PODMAN_RUNNING=1 \
-  FAKE_PODMAN_CODEX_AUTH_LABEL="$auth_label" XDG_RUNTIME_DIR= TMPDIR=/tmp
-assert_file_not_exists "$codex_auth_mount"
-rm -f "$home/.codex/auth.json"
-rmdir "$home/.codex"
+run_recipe review-container GH_READY=1 FAKE_JQ_UNAVAILABLE=1
+assert_nonzero_status "$STATUS" "the fake podman always exits non-zero"
+assert_file_contains "run --rm --interactive --tty --replace --name review-container" "$runner_log"
 
-begin "review-container: failed detached Codex launch removes staged auth"
+begin "review-container: a remote Podman engine receives the selected Hive registration"
 reset_logs
-mkdir -p "$home/.codex"
-printf '{"tokens":{"access_token":"codex-test-secret"}}\n' >"$home/.codex/auth.json"
-chmod 0400 "$home/.codex/auth.json"
-run_recipe review-container GH_READY=1 TOOL=codex REVIEW_DETACH=1
-codex_auth_mount="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "$credential_log")"
-assert_nonzero_status "$STATUS" "failed detached launch must fail"
-assert_file_not_exists "$codex_auth_mount"
-rm -f "$home/.codex/auth.json"
-rmdir "$home/.codex"
+remote_canonical_dir="$fake_remote_root/home/dev/.config/hive"
+mkdir -p "$remote_canonical_dir"
+printf 'HIVE_REGISTRATION_TOKEN=remote-canonical-token-preserve-me\n' >"$remote_canonical_dir/contributor.env"
+chmod 0755 "$remote_canonical_dir"
+chmod 0600 "$remote_canonical_dir/contributor.env"
 
-begin "review-stop: ignores unsafe Codex auth labels"
-reset_logs
-outside_dir="$scratch/outside-review-codex-auth.ABCDEF"
-mkdir -p "$outside_dir"
-printf secret >"$outside_dir/auth.json"
-for unsafe_label in \
-  "$outside_dir" \
-  "/tmp/review-codex-auth.ABCDE" \
-  "/tmp/review-codex-auth.ABCDEFG" \
-  "/tmp/review-codex-auth.ABCDEF/../outside-review-codex-auth.ABCDEF"; do
-  run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
-    FAKE_PODMAN_OWNER_LABEL=detached FAKE_PODMAN_CODEX_AUTH_LABEL="$unsafe_label"
-  assert_zero_status "$STATUS" "unsafe auth label must not make review-stop fail"
-  assert_file_exists "$outside_dir/auth.json"
-done
-symlink_stage="/tmp/review-codex-auth.SYMLNK"
-ln -s "$outside_dir" "$symlink_stage"
-run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
-  FAKE_PODMAN_OWNER_LABEL=detached FAKE_PODMAN_CODEX_AUTH_LABEL="$symlink_stage"
-assert_file_exists "$outside_dir/auth.json"
-rm -f "$symlink_stage"
-extra_stage="/tmp/review-codex-auth.EXTRA1"
-mkdir -p "$extra_stage"
-printf secret >"$extra_stage/auth.json"
-printf extra >"$extra_stage/extra"
-run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
-  FAKE_PODMAN_OWNER_LABEL=detached FAKE_PODMAN_CODEX_AUTH_LABEL="$extra_stage"
-assert_file_exists "$extra_stage/auth.json"
-rm -f "$extra_stage/auth.json" "$extra_stage/extra"
-rmdir "$extra_stage"
-rm -f "$outside_dir/auth.json"
-rmdir "$outside_dir"
-
-begin "review-stop: valid Codex auth label requires a private exact staging directory"
-reset_logs
-valid_stage="/tmp/review-codex-auth.ABCDEF"
-mkdir -p "$valid_stage"
-printf secret >"$valid_stage/auth.json"
-chmod 0700 "$valid_stage"
-chmod 0600 "$valid_stage/auth.json"
-run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
-  FAKE_PODMAN_OWNER_LABEL=detached FAKE_PODMAN_CODEX_AUTH_LABEL="$valid_stage"
-assert_zero_status "$STATUS" "valid auth label cleanup must succeed"
-assert_file_not_exists "$valid_stage"
-
-begin "review-stop: public Codex auth staging remains untouched"
-reset_logs
-public_dir="/tmp/review-codex-auth.ABCDEF"
-mkdir -p "$public_dir"
-printf secret >"$public_dir/auth.json"
-chmod 0755 "$public_dir"
-chmod 0644 "$public_dir/auth.json"
-run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
-  FAKE_PODMAN_OWNER_LABEL=detached FAKE_PODMAN_CODEX_AUTH_LABEL="$public_dir"
-assert_zero_status "$STATUS" "public auth staging must not make review-stop fail"
-assert_file_exists "$public_dir/auth.json"
-assert_eq "755" "$(stat -c '%a' "$public_dir")" "public staging directory mode changed"
-assert_eq "644" "$(stat -c '%a' "$public_dir/auth.json")" "public auth file mode changed"
-rm -f "$public_dir/auth.json"
-rmdir "$public_dir"
-
-begin "review-container: a running detached worker is never reclaimed"
-reset_logs
 run_recipe review-container GH_READY=1 \
-  FAKE_PODMAN_RUNNING=1 FAKE_PODMAN_OWNER_LABEL=detached
-assert_nonzero_status "$STATUS" "a live detached worker must refuse a second launch"
-assert_contains "already running as a detached worker" "$OUT"
-assert_contains "just review-stop review-container" "$OUT"
-assert_eq "$(wc -c <"$runner_log")" 0 "nothing may launch over a live detached worker"
+  'FAKE_PODMAN_CONNECTIONS=[{"Name":"engine","URI":"ssh://dev@engine:2222/run/user/1000/podman/podman.sock","Identity":"/fake/key","Default":true,"ReadWrite":true}]'
+assert_nonzero_status "$STATUS" "the fake podman always exits non-zero"
+# Canonical remote registration must be preserved: neither overwritten nor deleted!
+assert_file_exists "$remote_canonical_dir/contributor.env"
+assert_file_contains "remote-canonical-token-preserve-me" "$remote_canonical_dir/contributor.env"
+assert_eq "755" "$(stat -c '%a' "$remote_canonical_dir")" "canonical remote directory mode must be preserved"
+# It must NOT target canonical .config/hive
+assert_file_not_contains "mkdir -p \"\$HOME/.config/hive\"" "$remote_log"
+assert_file_not_contains "chmod 0700 \"\$HOME/.config/hive\"" "$remote_log"
+assert_file_contains "ssh -o BatchMode=yes -i /fake/key -p 2222 dev@engine" "$remote_log"
+assert_file_contains "mktemp -d /tmp/review-hive-registration.XXXXXX" "$remote_log"
+assert_file_contains "scp -o BatchMode=yes -i /fake/key -P 2222 -p ${home}/.config/hive/contributor.env dev@engine:/tmp/review-hive-registration.a1b2c3/contributor.env" "$remote_log"
+assert_file_contains "--volume /tmp/review-hive-registration.a1b2c3/contributor.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
+assert_contains "Hive contributor registration staged on remote Podman engine (0600, removed on exit; endpoint and secret not shown)." "$OUT"
+assert_not_contains "dev@engine" "$OUT"
+assert_not_contains "super-secret-registration-token" "$OUT"
+assert_file_contains "ssh -o BatchMode=yes -i /fake/key -p 2222 dev@engine chmod 0600 /tmp/review-hive-registration.a1b2c3/contributor.env" "$remote_log"
+assert_file_contains "rm -f -- /tmp/review-hive-registration.a1b2c3/contributor.env; rmdir -- /tmp/review-hive-registration.a1b2c3" "$remote_log"
+assert_file_not_exists "$fake_remote_root/tmp/review-hive-registration.a1b2c3"
 
-begin "review-stop: stops a detached worker politely"
+begin "review-container: explicitly selected remote engine stages Hive registration"
 reset_logs
-run_recipe review-stop FAKE_PODMAN_RUNNING=1 FAKE_PODMAN_OWNER_LABEL=detached
-assert_zero_status "$STATUS" "stopping a detached worker must succeed"
-assert_file_contains "stop review-container" "$runner_log"
-assert_contains "stopped the detached worker" "$OUT"
+run_recipe review-container GH_READY=1 CONTAINER_CONNECTION=remote \
+  'FAKE_PODMAN_CONNECTIONS=[{"Name":"local","URI":"unix:///run/user/1000/podman/podman.sock","Identity":"","Default":true},{"Name":"remote","URI":"ssh://dev@engine:2222/run/user/1000/podman/podman.sock","Identity":"/fake/key","Default":false}]'
+assert_nonzero_status "$STATUS" "the fake podman always exits non-zero"
+assert_file_contains "ssh -o BatchMode=yes -i /fake/key -p 2222 dev@engine" "$remote_log"
+assert_file_contains "--volume /tmp/review-hive-registration.a1b2c3/contributor.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
+assert_file_not_exists "$fake_remote_root/tmp/review-hive-registration.a1b2c3"
+
+begin "review-container: remote Podman cleans up private staging directory when scp fails"
+reset_logs
+remote_canonical_dir="$fake_remote_root/home/dev/.config/hive"
+mkdir -p "$remote_canonical_dir"
+printf 'HIVE_REGISTRATION_TOKEN=remote-canonical-token-preserve-me\n' >"$remote_canonical_dir/contributor.env"
+chmod 0755 "$remote_canonical_dir"
+chmod 0600 "$remote_canonical_dir/contributor.env"
+
+run_recipe review-container GH_READY=1 FAKE_SCP_FAIL=1 \
+  'FAKE_PODMAN_CONNECTIONS=[{"Name":"engine","URI":"ssh://dev@engine:2222/run/user/1000/podman/podman.sock","Identity":"/fake/key","Default":true,"ReadWrite":true}]'
+assert_nonzero_status "$STATUS" "scp failure must fail the recipe"
+assert_file_exists "$remote_canonical_dir/contributor.env"
+assert_file_contains "remote-canonical-token-preserve-me" "$remote_canonical_dir/contributor.env"
+assert_file_not_exists "$fake_remote_root/tmp/review-hive-registration.a1b2c3"
+
+begin "review-container: remote Podman cleans up private staging directory when chmod fails"
+reset_logs
+remote_canonical_dir="$fake_remote_root/home/dev/.config/hive"
+mkdir -p "$remote_canonical_dir"
+printf 'HIVE_REGISTRATION_TOKEN=remote-canonical-token-preserve-me\n' >"$remote_canonical_dir/contributor.env"
+chmod 0755 "$remote_canonical_dir"
+chmod 0600 "$remote_canonical_dir/contributor.env"
+
+run_recipe review-container GH_READY=1 FAKE_SSH_CHMOD_FAIL=1 \
+  'FAKE_PODMAN_CONNECTIONS=[{"Name":"engine","URI":"ssh://dev@engine:2222/run/user/1000/podman/podman.sock","Identity":"/fake/key","Default":true,"ReadWrite":true}]'
+assert_nonzero_status "$STATUS" "chmod failure must fail the recipe"
+assert_file_exists "$remote_canonical_dir/contributor.env"
+assert_file_contains "remote-canonical-token-preserve-me" "$remote_canonical_dir/contributor.env"
+assert_file_not_exists "$fake_remote_root/tmp/review-hive-registration.a1b2c3"
+
+begin "review-container: failed foreground Codex launch removes staged auth"
+reset_logs
+mkdir -p "$home/.codex"
+printf '{"tokens":{"access_token":"codex-test-secret"}}\n' >"$home/.codex/auth.json"
+chmod 0400 "$home/.codex/auth.json"
+run_recipe review-container GH_READY=1 TOOL=codex
+codex_auth_mount="$(sed -n 's/^CODEX_AUTH_MOUNT://p' "$credential_log")"
+assert_nonzero_status "$STATUS" "failed foreground launch must fail"
+assert_file_not_exists "$codex_auth_mount"
+rm -f "$home/.codex/auth.json"
+rmdir "$home/.codex"
+
+begin "review-stop: stops cluster workers by default"
+reset_logs
+install_fake_kubectl
+run_recipe review-stop
+assert_zero_status "$STATUS" "stopping cluster workers must succeed"
+assert_file_contains "scale deployment/review-contributor -n bluefin-system --replicas=0" "$kubectl_log"
+assert_contains "stopped all cluster contributor workers (scaled to 0 in bluefin-system)." "$OUT"
+
+begin "review-stop: stops cluster workers when explicitly named"
+reset_logs
+RECIPE_ARGS=(cluster)
+run_recipe review-stop
+assert_zero_status "$STATUS" "stopping cluster workers must succeed"
+assert_file_contains "scale deployment/review-contributor -n bluefin-system --replicas=0" "$kubectl_log"
+assert_contains "stopped all cluster contributor workers (scaled to 0 in bluefin-system)." "$OUT"
+remove_fake_kubectl
 
 begin "review-stop: refuses an attended run and names Ctrl-C"
 reset_logs
+RECIPE_ARGS=(review-container)
 run_recipe review-stop FAKE_PODMAN_RUNNING=1 \
   FAKE_PODMAN_OWNER_LABEL="boot-id:12345"
 assert_nonzero_status "$STATUS" "an attended run is not review-stop's to end"
@@ -1533,9 +1674,17 @@ assert_eq "$(wc -c <"$runner_log")" 0 "review-stop must not stop an attended run
 
 begin "review-stop: an absent container is a clean no-op"
 reset_logs
+RECIPE_ARGS=(review-container)
 run_recipe review-stop
 assert_zero_status "$STATUS" "nothing to stop is success, not an error"
-assert_contains "no container named review-container" "$OUT"
+assert_contains "no container named review-container is running" "$OUT"
+
+begin "review-stop: refuses a container not started by this launcher"
+reset_logs
+RECIPE_ARGS=(foreign-container)
+run_recipe review-stop FAKE_PODMAN_RUNNING=1
+assert_nonzero_status "$STATUS" "foreign container must be refused"
+assert_contains "foreign-container was not started by this launcher" "$OUT"
 
 begin "hive selection: the current repository's registration wins when it exists"
 reset_logs
@@ -1969,18 +2118,11 @@ begin "static: an interactive launch can never background the container"
 code="$scratch/justfile-code"
 sed -E 's/^[[:space:]]*#.*$//' "$justfile" >"$code"
 
-# Exactly one permitted detach site exists: the deliberate worker launch,
-# which pairs --detach with the 'detached' owner label so a later launch
-# refuses to reclaim it and review-stop can stop it. Any other detach is a
-# hole.
-assert_eq "$(grep -cE 'podman run --rm --detach --replace --name' "$code")" 1 \
-  "expected exactly one detached launch site (the marked worker)"
-assert_eq "$(grep -c 'review.owner=detached' "$code")" 1 \
-  "the detached label is stamped at exactly one launch site"
-assert_eq "$(grep -c '"detached"' "$code")" 2 \
-  "both the ownership check and review-stop must honor the detached marker"
-if grep -nE 'podman run' "$code" | grep -vE -- '--detach|--interactive --tty'; then
-  fail "every podman run is either the marked detached worker or interactive"
+# Every launch is attached to the invoking terminal.
+assert_eq "$(grep -cE 'podman run --rm --detach --replace --name' "$code")" 0 \
+  "no launch may detach"
+if grep -nE 'podman run' "$code" | grep -vE -- '--interactive --tty'; then
+  fail "every podman run must be interactive"
 fi
 # A lone trailing '&' backgrounds the launch; '&&' and '2>&1' must not match.
 if grep -nE '(podman run).*[^&>]&[[:space:]]*$' "$code"; then
@@ -2008,15 +2150,13 @@ joined="$scratch/justfile-code-joined"
 sed -e :a -e '/\\$/N; s/\\\n//; ta' "$code" >"$joined"
 # Everything that contributes arguments to a real launch: both podman
 # argument arrays (opened as CONTAINER_ARGS=( and appended to with +=), and
-# any bare 'podman run'/'podman create'. The one permitted detach line —
-# the marked worker launch asserted above — is excluded so everything else
-# stays under the strict scan.
+# any bare 'podman run'/'podman create'.
 launch_args="$scratch/justfile-launch-args"
 awk '
   /CONTAINER_ARGS\+?=\(/           { inargs = 1 }
   inargs                           { print; if ($0 ~ /\)[[:space:]]*$/) inargs = 0; next }
   /podman[[:space:]]+(run|create)/ { print }
-' "$joined" | grep -vE 'podman run --rm --detach --replace --name' >"$launch_args"
+' "$joined" >"$launch_args"
 # 'podman run --detach-keys' is a foreground detach *sequence*, not
 # backgrounding, so the character after '--detach' has to be checked.
 if grep -nE -- '--detach([^-]|$)' "$launch_args"; then
@@ -2082,19 +2222,24 @@ fi
 grep -q 'ghcr.io/projectbluefin/review:stable' "$code" ||
   fail "the default contributor image must be the published ':stable' tag"
 
-begin "static: the lifecycle verb is scoped to detached workers"
-# review-stop exists for exactly one thing: stopping a deliberately detached
-# worker. It must refuse attended runs (Ctrl-C owns those), refuse containers
-# this launcher did not label, and never force anything.
+begin "static: the lifecycle verb stops cluster workers and refuses attended runs"
+# review-stop stops cluster contributor workers. It refuses attended runs
+# (Ctrl-C owns those), refuses containers this launcher did not label, and
+# never force-removes anything.
 grep -qE '^review-stop' "$code" ||
-  fail "review-stop must exist as the detached worker's lifecycle verb"
+  fail "review-stop must exist as the cluster workers' lifecycle verb"
 stop_body="$(sed -n '/^review-stop/,/^[a-z]/p' "$code")"
+grep -q 'stop_cluster_contributors' <<<"$stop_body" ||
+  fail "review-stop must stop cluster contributors"
 grep -q 'review.owner' <<<"$stop_body" ||
   fail "review-stop must check the owner label before touching anything"
 grep -q 'Ctrl-C' <<<"$stop_body" ||
   fail "review-stop must route attended runs back to Ctrl-C"
 if grep -nE 'podman (rm|kill)|--force|stop -f' <<<"$stop_body"; then
   fail "review-stop must stop politely, never force-remove"
+fi
+if grep -nE 'review\.owner=detached' "$code"; then
+  fail "stale detached owner label found in justfile code"
 fi
 if grep -nE '^review-(start|restart|kill|clean|down|up)[ :]' "$code"; then
   fail "no resurrection or force verbs: stop is the only lifecycle command"
@@ -2183,6 +2328,22 @@ if ! grep -A1 '^          image: ghcr.io/projectbluefin/review:stable$' \
   grep -Fxq '          imagePullPolicy: Always'; then
   fail "the stable contributor deployment must always pull the published image"
 fi
+
+begin "static: remote Hive staging never alters canonical paths and validates cleanup"
+stage_func="$(sed -n '/^stage_hive_registration_for_remote_podman()/,/^}/p' "$code")"
+cleanup_func="$(sed -n '/^cleanup_remote_hive_registration()/,/^}/p' "$code")"
+if grep -q "\$HOME/\.config/hive" <<<"$stage_func"; then
+  fail "remote Hive staging must not target remote canonical \$HOME/.config/hive"
+fi
+grep -q 'mktemp -d /tmp/review-hive-registration' <<<"$stage_func" ||
+  fail "remote Hive staging must use a unique private directory under /tmp/review-hive-registration.XXXXXX"
+grep -q 'review-hive-registration' <<<"$cleanup_func" ||
+  fail "remote Hive cleanup must validate the private staging path before removal"
+if grep -nE 'rm -rf|rm -r' <<<"$cleanup_func"; then
+  fail "remote Hive cleanup must not use broad recursive deletion"
+fi
+grep -q 'rmdir' <<<"$cleanup_func" ||
+  fail "remote Hive cleanup must use rmdir for the private directory"
 
 begin "static: turbo-review initializes models and forwards arguments through positional parameters"
 turbo_body="$(sed -n '/^turbo-review \*args:/,/^# Preflight check:/p' "$code")"

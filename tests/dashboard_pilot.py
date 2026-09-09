@@ -191,6 +191,20 @@ async def main() -> int:
     org_issues_file = workdir / "org-issues.json"
     issue_view_file = workdir / "issue-view.json"
 
+    def set_org_issues(items: list[dict]) -> None:
+        org_issues_file.write_text(
+            json.dumps([
+                {
+                    "data": {
+                        "search": {
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            "nodes": items,
+                        }
+                    }
+                }
+            ])
+        )
+
     issue_node = {
         "number": 42,
         "title": "bug: test issue",
@@ -202,18 +216,7 @@ async def main() -> int:
         "comments": {"totalCount": 1},
         "body": "Issue description test body",
     }
-    org_issues_file.write_text(
-        json.dumps([
-            {
-                "data": {
-                    "search": {
-                        "pageInfo": {"hasNextPage": False, "endCursor": None},
-                        "nodes": [issue_node],
-                    }
-                }
-            }
-        ])
-    )
+    set_org_issues([])
 
     issue_view_file.write_text(
         json.dumps({
@@ -238,7 +241,8 @@ async def main() -> int:
         'if [ "$1 $2" = "api graphql" ]; then\n'
         '  if [ -n "${ORG_GH_ERROR-}" ]; then printf "%s\\n" "$ORG_GH_ERROR" >&2; exit 1; fi\n'
         '  case "$*" in *"is:issue"*) '
-        f'cat "{org_issues_file}"; exit 0 ;; esac\n'
+        '  if [ -n "${ORG_ISSUES_FAIL-}" ]; then echo "GraphQL 502 issue search failed" >&2; exit 1; fi\n'
+        f'  cat "{org_issues_file}"; exit 0 ;; esac\n'
         f'  if [ -f "{delay_queue_refresh}" ]; then\n'
         f'    printf "request\\n" >>"{queue_refresh_log}"\n'
         '    sleep 0.45\n'
@@ -284,6 +288,7 @@ async def main() -> int:
         "fi\n"
         'if [ "$1" = "api" ] && [ "$2" = "--paginate" ]; then\n'
         '  if [ -n "${LIVE_GH_ERROR-}" ]; then printf "%s\\n" "$LIVE_GH_ERROR" >&2; exit 1; fi\n'
+        '  case "$*" in *"/issues"*) if [ -n "${LIVE_ISSUES_FILE-}" ]; then cat "$LIVE_ISSUES_FILE"; else echo "[]"; fi; exit 0 ;; esac\n'
         '  if [ -n "${LIVE_PAGES-}" ]; then cat "$LIVE_QUEUE_FILE"; else printf "[%s]" "$(cat "$LIVE_QUEUE_FILE")"; fi; exit 0\n'
         'fi\n'
         'if [ "$1 $2" = "pr list" ]; then\n'
@@ -322,6 +327,8 @@ async def main() -> int:
     review_stub(0, "a finding")
 
     import tui.bluefin_review_tui as tui
+    tui.TRACE_PATH = str(Path(os.environ["XDG_STATE_HOME"]) / "bluefin-review" / "trace.jsonl")
+    tui._TRACE_LOGGER = None
     reconciliation_request = tui.ReviewDashboard._request_reconciliation
     # Most fixtures below drive an isolated landing/report state machine while
     # deliberately reusing one temporary landing directory. Keep those tests
@@ -478,7 +485,7 @@ async def main() -> int:
     os.environ.pop("ORG_GH_ERROR", None)
 
     org_queue_file.write_text("{}")
-    org_malformed_app = tui.ReviewDashboard(tui.QueueFilters())
+    org_malformed_app = tui.ReviewDashboard(tui.QueueFilters(kind="prs"))
     async with org_malformed_app.run_test() as pilot:
         for _ in range(600):
             if org_malformed_app.source_state == "malformed":
@@ -523,10 +530,68 @@ async def main() -> int:
                 return
             await pilot.pause(0.05)
 
+    async def wait_for_rendered_rows(app, pilot) -> None:
+        for _ in range(600):
+            queue = app.query_one("#queue", tui.ListView)
+            if (
+                len(queue.children) == len(app.stops)
+                and all(
+                    (
+                        labels := list(item.query(tui.Label))
+                    )
+                    and stop.key in str(labels[0].render())
+                    and (
+                        stop.is_issue
+                        or {
+                            "blocked": "BLOCKED",
+                            "failed": "FAILED",
+                            "in progress": "IN PROGRESS",
+                            "queued": "QUEUED",
+                            "ready": "READY",
+                            "done": "DONE",
+                        }[app._queue_state(stop)] in str(labels[0].render())
+                    )
+                    for item, stop in zip(queue.children, app.stops)
+                )
+            ):
+                return
+            await pilot.pause(0.05)
+
+    def rendered_row(app, stop) -> str:
+        index = next(
+            index
+            for index, candidate in enumerate(app.stops)
+            if candidate is stop
+        )
+        return str(
+            app._queue().children[index].query(tui.Label).first().render()
+        )
+
+    retry = tui.Stop("projectbluefin/review", 1, "review", "retry")
+    retry.failure = "review dispatch failed: connection reset"
+    retry.failure_command = "gh pr view"
+    retry.failure_checks = "unknown"
+    retry.review_failure = "connection reset"
+    tui.clear_review_failure_mark(retry)
+    check(
+        retry.failure == ""
+        and retry.failure_command == "gh pr view"
+        and retry.failure_checks == "unknown"
+        and retry.review_failure == "",
+        "a fresh review must keep diagnostic metadata while clearing its review failure",
+    )
+    retry.failure = "landing refused: no human review on GitHub"
+    tui.clear_review_failure_mark(retry)
+    check(
+        retry.failure == "landing refused: no human review on GitHub",
+        "a fresh review must preserve an unrelated landing failure mark",
+    )
+
     # ── batch-review selection, triage navigation, and verdict badges ───
     app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await wait_for_live_rows(app, pilot, "ready", 2)
+        await settle_evidence(app, pilot)
         await pilot.press("B")
         check(
             all(stop.selected for stop in app.stops),
@@ -718,13 +783,13 @@ async def main() -> int:
             )
         )
         await pilot.pause()
-        row = str(
-            app._queue().children[0].query(tui.Label).first().render()
-        )
+        await wait_for_rendered_rows(app, pilot)
+        row = rendered_row(app, first)
         check(
             first.review_result is not None
             and first.review_result.live.get("headRefOid") == head_sha
             and "✗" in row
+            and "DONE" in row
             and "cached" in row,
             "review events must merge receipt analysis with live evidence and repaint the verdict badge",
         )
@@ -744,14 +809,13 @@ async def main() -> int:
             )
         )
         await pilot.pause()
-        row = str(
-            app._queue().children[0].query(tui.Label).first().render()
-        )
+        await wait_for_rendered_rows(app, pilot)
+        row = rendered_row(app, first)
         status = str(app.query_one("#status-bar", tui.Static).render())
         check(
             first.review_result is None
             and first.review_failure == "provider failed"
-            and "? failed" in row
+            and "✗ FAILED" in row
             and "review failed" in status,
             "failed batch events must replace stale verdicts with a persistent failure",
         )
@@ -780,11 +844,10 @@ async def main() -> int:
         first.review_status = "failed"
         first.cached_age = ""
         app.refresh_rows()
-        row = str(
-            app._queue().children[0].query(tui.Label).first().render()
-        )
+        await wait_for_rendered_rows(app, pilot)
+        row = rendered_row(app, first)
         check(
-            "?" in row,
+            "✗ FAILED" in row,
             "failed or incomplete review results must carry the investigate badge",
         )
     app.review_cache.remove_if_matches(receipt)
@@ -1365,6 +1428,7 @@ async def main() -> int:
     )
     back_projection = {
         tui.BatchPlanScreen: "dismiss(False)",
+        tui.SlayConfirmScreen: "dismiss(False)",
         tui.LandingScreen: "dismiss(None)",
         tui.DiffScreen: "dismiss",
         tui.CommentsScreen: "dismiss",
@@ -1505,7 +1569,7 @@ async def main() -> int:
             )
         binding_keys = {binding.key for binding in tui.ReviewDashboard.BINDINGS}
         check(
-            "l" not in binding_keys and "p" not in binding_keys,
+            "l" not in binding_keys,
             f"terminal-dispatched pane navigation must not collide with a binding, got {sorted(binding_keys)}",
         )
         review = [b for b in tui.ReviewDashboard.BINDINGS if b.action == "review"]
@@ -1515,8 +1579,8 @@ async def main() -> int:
             f"review must be on 'r', got {[b.key for b in review]}",
         )
         check(
-            "[b]l[/b]" not in tui.KEYS_ACTING and "[b]p[/b]" not in tui.KEYS_ACTING,
-            f"the acting key line must not advertise label or priority, got {tui.KEYS_ACTING!r}",
+            "[b]l[/b]" not in tui.KEYS_ACTING,
+            f"the acting key line must not advertise label actions, got {tui.KEYS_ACTING!r}",
         )
         root_screen = app.screen
         await pilot.press("ctrl+p")
@@ -1812,9 +1876,11 @@ async def main() -> int:
                 f"the plan must cover the whole selection, got {gate.plan.keys}",
             )
             await pilot.press("enter")
+            await pilot.pause()
             check(
-                not isinstance(app.screen, tui.LandingScreen),
-                f"dispatch must return to the review queue, got {type(app.screen).__name__}",
+                not isinstance(app.screen, tui.LandingScreen)
+                and not isinstance(app.screen, tui.BatchPlanScreen),
+                f"dispatch must return to review queue, got {type(app.screen).__name__}",
             )
             task = gate.plan
             for _ in range(400):
@@ -1869,31 +1935,23 @@ async def main() -> int:
                 not any(s.selected for s in app.stops),
                 "landed pull requests must leave the batch",
             )
-            await pilot.press("w")
-            await pilot.pause()
-            screen = app.screen
-            if isinstance(screen, tui.LandingScreen):
-                screen.poll()
-                rows = str(screen.query_one("#landing-rows", tui.Static).render())
-                check(
-                    "projectbluefin/bluefinctl#31  ✓ merged" in rows
-                    and "projectbluefin/common#7  ✓ merged" in rows,
-                    f"the queue must show each landed PR, got {rows!r}",
-                )
-                check(
-                    "all landed" in rows,
-                    f"the queue must show the batch summary, got {rows!r}",
-                )
             status = str(app.query_one("#status-bar", tui.Static).render())
             check(
                 "agents:" in status,
                 f"the status bar must report the batch queue, got {status!r}",
             )
-            await pilot.press("escape")
+            await pilot.press("w")
             await pilot.pause()
             check(
-                not isinstance(app.screen, tui.LandingScreen),
-                "escape must return from the deliberate landing view",
+                app.query_one("#landing-pause", tui.Button).has_focus,
+                "[w] must focus the persistent live batch queue",
+            )
+            rows = str(
+                app.query_one("#landing-control-status", tui.Static).render()
+            )
+            check(
+                rows.count("merged") == 2,
+                f"the persistent queue must show each landed PR, got {rows!r}",
             )
     del os.environ["BLUEFIN_REVIEW_INSTANCE"]
 
@@ -1938,6 +1996,57 @@ async def main() -> int:
         return predicate()
 
     os.environ["BLUEFIN_REVIEW_INSTANCE"] = "pilot-concurrency"
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("p")
+        paused_started = workdir / "paused.started"
+        paused_release = workdir / "paused.release"
+        paused_task = blocking_task(
+            "acme/paused", 1, paused_started, paused_release
+        )
+        app.landing_queue.append(paused_task)
+        app.refresh_status()
+        app.drain_landings()
+        await pilot.pause(0.1)
+        check(
+            app.landing_paused and not paused_started.exists(),
+            "pausing must hold pending landing work without starting its agent",
+        )
+        control_rows = str(
+            app.query_one("#landing-control-status", tui.Static).render()
+        )
+        check(
+            "PAUSED · agents 0/6 · 1 queued" in control_rows,
+            f"the persistent panel must show queue pause and counts, got {control_rows!r}",
+        )
+        await pilot.press("-")
+        await pilot.press("+")
+        check(
+            app.landing_concurrency == 6,
+            "the +/- controls must update the session concurrency limit",
+        )
+        await pilot.press("p")
+        started = await wait_until(lambda: paused_task.running, pilot)
+        check(started, "resuming must release pending landing work")
+        paused_release.touch()
+        finished = await wait_until(lambda: paused_task.returncode is not None, pilot)
+        check(finished, "a resumed landing worker must finish cleanly")
+        final_round = blocking_task(
+            "acme/final", 2, workdir / "final.started", workdir / "final.release"
+        )
+        final_round.phase = "final-review"
+        final_round.process = object()
+        app.landing_queue.append(final_round)
+        app.refresh_status()
+        control_rows = str(
+            app.query_one("#landing-control-status", tui.Static).render()
+        )
+        check(
+            "agents 1/6" in control_rows,
+            f"phase rounds must consume displayed landing capacity, got {control_rows!r}",
+        )
+
     app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -2145,6 +2254,24 @@ async def main() -> int:
             top_edge.startswith("╭") and "BATCHES" in top_edge,
             f"the batch list must render a framed title edge, got {top_edge!r}",
         )
+        await pilot.press("escape")
+        await pilot.pause()
+        app.refresh_status()
+        control_rows = str(
+            app.query_one("#landing-control-status", tui.Static).render()
+        )
+        for expected in (
+            "LANDING QUEUE",
+            "agents 1/6",
+            "projectbluefin/bluefinctl#31 — merged · gemini-3.8-flash",
+            "projectbluefin/common#7 — failed · gemini-3.8-flash",
+            "projectbluefin/dakota#12 — awaiting-stable · gemini-3.8-flash",
+            "projectbluefin/bluefin#99 — reviewing · gemini-3.8-flash",
+        ):
+            check(
+                expected in control_rows,
+                f"the persistent queue must show {expected!r}, got {control_rows!r}",
+            )
     for artifact in (
         Path(colour_task.prompt_path),
         Path(colour_task.status_path),
@@ -2530,6 +2657,7 @@ async def main() -> int:
         "fi\n"
         'if [ "$1" = "api" ] && [ "$2" = "--paginate" ]; then\n'
         '  if [ -n "${LIVE_GH_ERROR-}" ]; then printf "%s\\n" "$LIVE_GH_ERROR" >&2; exit 1; fi\n'
+        '  case "$*" in *"/issues"*) if [ -n "${LIVE_ISSUES_FILE-}" ]; then cat "$LIVE_ISSUES_FILE"; else echo "[]"; fi; exit 0 ;; esac\n'
         '  if [ -n "${LIVE_PAGES-}" ]; then cat "$LIVE_QUEUE_FILE"; else printf "[%s]" "$(cat "$LIVE_QUEUE_FILE")"; fi; exit 0\n'
         'fi\n'
         'if [ "$1 $2" = "pr list" ]; then\n'
@@ -2613,12 +2741,67 @@ async def main() -> int:
     tui.landing.record_event(
         "projectbluefin/bluefinctl#31", "merged", "merged directly by @tester"
     )
+    with (landings_dir / "manual.jsonl").open("a") as handle:
+        for number in range(32, 36):
+            handle.write(
+                json.dumps(
+                    {
+                        "pr": f"projectbluefin/bluefinctl#{number}",
+                        "state": "merged",
+                        "ts": int(now) + (34 if number == 35 else number),
+                    }
+                )
+                + "\n"
+            )
+        handle.write(
+            json.dumps(
+                {
+                    "pr": "projectbluefin/bluefinctl#32",
+                    "state": "merged",
+                    "ts": int(now) + 34,
+                }
+            )
+            + "\n"
+        )
+        handle.write(
+            json.dumps(
+                {
+                    "pr": "mame/_#99",
+                    "state": "merged",
+                    "ts": int(now) + 99,
+                }
+            )
+            + "\n"
+        )
+        handle.write(
+            json.dumps(
+                {
+                    "pr": "projectbluefin/[bold]repo#99",
+                    "state": "merged",
+                    "ts": int(now) + 99,
+                }
+            )
+            + "\n"
+        )
     restored = tui.landing.persisted_events()
     check(
         restored["projectbluefin/bluefinctl#31"]["state"] == "merged",
         "a manual success must supersede the persisted failure, "
         f"got {restored['projectbluefin/bluefinctl#31']!r}",
     )
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    async with app.run_test() as pilot:
+        await wait_for_live_rows(app, pilot, "ready", 2)
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check(
+            (
+                "last merged: mame/_#99, projectbluefin/bluefinctl#32, "
+                "projectbluefin/bluefinctl#35"
+            ) in status
+            and "projectbluefin/bluefinctl#31" not in status
+            and "projectbluefin/[bold]repo#99" not in status,
+            "a relaunch must show only safe, newest merged pull requests",
+        )
     ancient = landings_dir / "20260103-000000-review-queue.jsonl"
     ancient.write_text(
         '{"pr": "projectbluefin/bluefinctl#31", "state": "failed", "note": "ancient"}\n'
@@ -2717,7 +2900,31 @@ async def main() -> int:
         # left: capture both reference backgrounds first.
         cursor_bg = queue.children[0].styles.background
         plain_bg = queue.children[1].styles.background
+
+        class CountingRunStore:
+            def __init__(self) -> None:
+                self.snapshot_calls = 0
+                self.get_calls = 0
+
+            def snapshot(self) -> dict[str, object]:
+                self.snapshot_calls += 1
+                return {}
+
+            def get(self, _identity) -> None:
+                self.get_calls += 1
+                return None
+
+        run_store = CountingRunStore()
+        app.run_store = run_store
         await pilot.press("b")
+        check(
+            run_store.snapshot_calls == 1,
+            "batch selection must read run state once for the whole visible queue",
+        )
+        check(
+            run_store.get_calls == 0,
+            "batch selection must not read run state separately for each row",
+        )
         await pilot.press("down")
         await pilot.pause()
         check(
@@ -2803,7 +3010,39 @@ async def main() -> int:
         check(
             not app.landing_queue and landing_log.read_text() == "",
             "escape from the [A] gate must dispatch nothing",
-)
+        )
+        await pilot.press("A")
+        await pilot.pause()
+        check(
+            isinstance(app.screen, tui.BatchPlanScreen),
+            "reopening [A] must present the batch plan gate",
+        )
+        await pilot.press("enter")
+        for _ in range(50):
+            if len(app.landing_queue) == 1:
+                break
+            await pilot.pause(0.05)
+        check(
+            not isinstance(app.screen, tui.LandingScreen)
+            and not isinstance(app.screen, tui.BatchPlanScreen),
+            f"confirming A batch dispatch must return to canonical review queue, got {type(app.screen).__name__}",
+        )
+        check(
+            len([t for t in app.landing_queue if not t.phase]) == 1,
+            "confirming A batch dispatch must enqueue the landing task",
+        )
+        await pilot.press("w")
+        await pilot.pause()
+        check(
+            app.query_one("#landing-pause", tui.Button).has_focus,
+            "[w] must focus persistent queue controls instead of opening a second view",
+        )
+        await pilot.press("escape")
+        await pilot.pause()
+        check(
+            app.query_one("#queue", tui.ListView).has_focus,
+            "Escape from queue controls must return to the item list, not exit the dashboard",
+        )
     gh_log.write_text("")
 
     # ── a finished batch tells the maintainer ──────────────────────────
@@ -2822,6 +3061,7 @@ async def main() -> int:
         'printf "{\\"state\\": \\"done\\", \\"note\\": \\"one landed, one refused\\"}\\n" >>"$status"\n',
     )
     os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{mixed_stub} @PROMPT"
+
     app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -2867,15 +3107,17 @@ async def main() -> int:
             f"got {notices}",
         )
         for _ in range(200):
-            if not app.stops[0].selected and app.stops[1].selected:
+            if not any(s.selected for s in app.stops):
                 break
             await pilot.pause(0.05)
+        merged_stop = next(s for s in app.stops if s.key == "projectbluefin/bluefinctl#31")
+        failed_stop = next(s for s in app.stops if s.key == "projectbluefin/common#7")
         check(
-            not app.stops[0].selected and not app.stops[0].failure,
+            not merged_stop.selected and not merged_stop.failure,
             "a merged pull request leaves the batch",
         )
         check(
-            not app.stops[1].selected and "failed" in app.stops[1].failure,
+            not failed_stop.selected and "failed" in failed_stop.failure,
             "a failed pull request keeps its reason without automatic "
             "reselection",
         )
@@ -3041,14 +3283,15 @@ async def main() -> int:
             "a batch that wrote done must not be reported as a dead agent, "
             f"got {notices}",
         )
+        gap_stop = next((s for s in app.stops if s.key == "projectbluefin/common#7"), app.stops[1])
         for _ in range(200):
-            if app.stops[1].failure:
+            if gap_stop.failure:
                 break
             await pilot.pause(0.05)
         check(
-            app.stops[1].failure.startswith("no outcome reported"),
+            gap_stop.failure.startswith("no outcome reported"),
             "the out-of-report pull request must be marked as a reporting "
-            f"gap, got {app.stops[1].failure!r}",
+            f"gap, got {gap_stop.failure!r}",
         )
         check(
             all("died mid-batch" not in s.failure for s in app.stops),
@@ -3056,7 +3299,7 @@ async def main() -> int:
             f"got {[s.failure for s in app.stops]}",
         )
         check(
-            not app.stops[1].selected,
+            not gap_stop.selected,
             "an out-of-report pull request must require explicit reselection",
         )
     gh_log.write_text("")
@@ -3135,42 +3378,45 @@ async def main() -> int:
         'done\n'
         'printf "{\\"state\\": \\"done\\", \\"note\\": \\"all blocked\\"}\\n" >>"$status"\n',
     )
-    os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{blocked_stub} @PROMPT"
-    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        for _ in range(200):
-            if len(app.stops) == 2:
-                break
-            await pilot.pause(0.05)
-        app.self_login = "castrojo"
-        notices = []
-        real_notify = app.notify
+    try:
+        os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{blocked_stub} @PROMPT"
+        app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for _ in range(200):
+                if len(app.stops) == 2:
+                    break
+                await pilot.pause(0.05)
+            app.self_login = "castrojo"
+            notices = []
+            real_notify = app.notify
 
-        def record(message, *args, **kwargs):
-            notices.append((str(message), kwargs.get("severity", "information")))
-            real_notify(message, *args, **kwargs)
+            def record(message, *args, **kwargs):
+                notices.append((str(message), kwargs.get("severity", "information")))
+                real_notify(message, *args, **kwargs)
 
-        app.notify = record
-        for stop in app.stops:
-            stop.selected = True
-        app.action_land_batch()
-        await pilot.pause()
-        gate = app.screen
-        await pilot.press("enter")
-        task = gate.plan
-        expected = f"batch {task.task_id} finished: 2 blocked"
-        for _ in range(400):
-            if task.returncode is not None and any(
-                f"batch {task.task_id}" in message for message, _ in notices
-            ):
-                break
-            await pilot.pause(0.05)
-        check(
-            any(expected in message for message, _ in notices),
-            f"an all-blocked batch must say exactly that, want {expected!r} "
-            f"in {notices}",
-        )
+            app.notify = record
+            for stop in app.stops:
+                stop.selected = True
+            app.action_land_batch()
+            await pilot.pause()
+            gate = app.screen
+            await pilot.press("enter")
+            task = gate.plan
+            expected = f"batch {task.task_id} finished: 2 blocked"
+            for _ in range(400):
+                if task.returncode is not None and any(
+                    f"batch {task.task_id}" in message for message, _ in notices
+                ):
+                    break
+                await pilot.pause(0.05)
+            check(
+                any(expected in message for message, _ in notices),
+                f"an all-blocked batch must say exactly that, want {expected!r} "
+                f"in {notices}",
+            )
+    finally:
+        os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{landing_stub} @PROMPT"
     gh_log.write_text("")
     # ── the landing brief covers repositories with no image pipeline ────
     # "Done is :stable" can never resolve where nothing publishes an image
@@ -4336,7 +4582,14 @@ async def main() -> int:
         def __call__(self, path):
             with open(hive_calls, "a") as sink:
                 sink.write(path + "\n")
-            data = self.status if path.endswith("status") else self.contributors
+            if path.endswith("status"):
+                data = self.status
+            elif path.endswith("queue"):
+                data = {"queue": []}
+            elif path.endswith("triage"):
+                data = {"groups": []}
+            else:
+                data = self.contributors
             return tui.hive_api.Result(True, "ok", "online", data)
 
     class FlappingHive(FakeHive):
@@ -4428,16 +4681,19 @@ async def main() -> int:
                 len(app.hive_workers) == 1,
                 f"only in-flight tasks count as working, got {app.hive_workers}",
             )
-            stop = app.stops[0]
+            stop = next((s for s in app.stops if s.key == "projectbluefin/bluefinctl#31"), app.stops[0])
+            other_stop = next((s for s in app.stops if s.key != "projectbluefin/bluefinctl#31"), app.stops[1])
             worker = app.hive_worker_for(stop)
             check(
                 worker is not None and worker["login"] == "someone-else",
                 f"a stop Hive is working on must be identified, got {worker}",
             )
             check(
-                app.hive_worker_for(app.stops[1]) is None,
+                app.hive_worker_for(other_stop) is None,
                 "a stop nobody is working on must not claim a worker",
             )
+            app._queue().index = app.stops.index(stop)
+            app.render_context(stop)
             for _ in range(200):
                 if "is working on THIS" in str(
                     app.query_one("#context", tui.Static).render()
@@ -4508,6 +4764,9 @@ async def main() -> int:
                 and "last-known assignments retained" in status,
                 f"status must explain the outage without hiding retained evidence: {status!r}",
             )
+            stop_assigned = next((s for s in stale_app.stops if s.key == "projectbluefin/bluefinctl#31"), stale_app.stops[0])
+            stale_app._queue().index = stale_app.stops.index(stop_assigned)
+            stale_app.render_context(stop_assigned)
             for _ in range(200):
                 context = str(stale_app.query_one("#context", tui.Static).render())
                 if "last known Hive assignment" in context:
@@ -4518,7 +4777,7 @@ async def main() -> int:
                 and "current assignment is unknown" in context,
                 f"context must mark stale Hive evidence explicitly: {context!r}",
             )
-            stop = stale_app.stops[0]
+            stop = stop_assigned
             stop.live = {
                 "isDraft": False,
                 "mergeable": "MERGEABLE",
@@ -5098,7 +5357,7 @@ async def main() -> int:
                     if app.stops:
                         break
                     await pilot.pause(0.05)
-                stop = app.stops[0]
+                stop = next((s for s in app.stops if s.key == "projectbluefin/bluefinctl#31"), app.stops[0])
                 stop.live.update({"baseRefOid": "a" * 40, "headRefOid": "b" * 40})
                 stop.review_result = tui.ReviewResult(
                     1, "complete" if verdict == "approve" else "findings",
@@ -5229,12 +5488,10 @@ async def main() -> int:
     try:
         app = tui.ReviewDashboard(tui.QueueFilters(action=""))
         async with app.run_test() as pilot:
-            await pilot.pause()
-            for _ in range(200):
-                if app.stops:
-                    break
-                await pilot.pause(0.05)
-            stop = app.stops[0]
+            await wait_for_live_rows(app, pilot, "ready", 2)
+            stop = next((s for s in app.stops if s.key == "projectbluefin/bluefinctl#31"), app.stops[0])
+            app._queue().index = app.stops.index(stop)
+            await settle_evidence(app, pilot)
             stop.live.update({"baseRefOid": "a" * 40, "headRefOid": "b" * 40})
             stop.review_result = tui.ReviewResult(
                 1, "findings", findings=({"severity": "high", "title": "blocker"},),
@@ -5457,7 +5714,9 @@ async def main() -> int:
             if app.stops:
                 break
             await pilot.pause(0.05)
-        stop = app.stops[0]
+        stop = next((s for s in app.stops if s.key == "projectbluefin/bluefinctl#31"), app.stops[0])
+        app._queue().index = app.stops.index(stop)
+        app.render_evidence(stop)
         stop.live = {
             "isDraft": False,
             "mergeable": "MERGEABLE",
@@ -5539,7 +5798,8 @@ async def main() -> int:
                 break
             await pilot.pause(0.05)
         app.self_login = "castrojo"
-        stop = app.stops[0]
+        stop = next((s for s in app.stops if s.key == "projectbluefin/bluefinctl#31"), app.stops[0])
+        app._queue().index = app.stops.index(stop)
         stop.live = {"isDraft": False}
         gh_log.write_text("")
         curl_log.write_text("")
@@ -5579,8 +5839,8 @@ async def main() -> int:
         "a conflicted pull request must be red whatever else is true of it",
     )
     check(
-        tui.stop_style("review", "clean", "failure", "unknown") == "yellow",
-        "failing checks must be yellow",
+        tui.stop_style("review", "clean", "failure", "unknown") == "red",
+        "failing checks must be red",
     )
     check(
         tui.stop_style("ready-for-human-merge", "clean", "success", "approved")
@@ -6105,7 +6365,8 @@ async def main() -> int:
             if app.stops:
                 break
             await pilot.pause(0.05)
-        stop = app.stops[0]
+        stop = next((s for s in app.stops if s.key == "projectbluefin/bluefinctl#31"), app.stops[0])
+        app._queue().index = app.stops.index(stop)
         stop.live = {"isDraft": False}
         dupes, _ = app.cluster(stop)
         check(
@@ -6223,11 +6484,12 @@ async def main() -> int:
             not any(s.repository == "projectbluefin/review" for s in app.stops),
             "own work must still be absent from the stops",
         )
-        stop = app.stops[0]
+        stop = next((s for s in app.stops if s.key == "projectbluefin/bluefinctl#31"), app.stops[0])
+        app._queue().index = app.stops.index(stop)
         stop.live = {"isDraft": False}
         app.render_evidence(stop)
         for _ in range(200):
-            if "merge queue" in str(app.query_one("#context", tui.Static).render()):
+            if "projectbluefin/bluefinctl" in str(app.query_one("#context", tui.Static).render()):
                 break
             await pilot.pause(0.05)
         context = str(app.query_one("#context", tui.Static).render())
@@ -6340,6 +6602,16 @@ async def main() -> int:
                 True, "ok", "online",
                 {"hub": "online", "actionable_items": 2},
             )
+        if path == "/api/contribute/queue":
+            return tui.hive_api.Result(
+                True, "ok", "online",
+                {"queue": []},
+            )
+        if path == "/api/contribute/triage":
+            return tui.hive_api.Result(
+                True, "ok", "online",
+                {"groups": []},
+            )
         return tui.hive_api.Result(
             True, "ok", "online",
             {"contributors": []},
@@ -6409,16 +6681,17 @@ async def main() -> int:
             app.stops[0].selected = True
             app.stops[1].selected = True
             app.self_login = "castrojo"
-            app.stops[1].review_status = "complete"
+            app.stops[1].review_status = "cached"
             app.stops[1].review_result = tui.ReviewResult(
                 1,
                 "complete",
                 {"critical": 0, "high": 0, "medium": 0, "low": 0},
             )
-            app.stops[1].live["reviews"] = [{
-                "author": {"login": "castrojo"},
-                "state": "APPROVED",
-            }]
+            app.stops[1].live["reviews"] = [
+                {"author": {"login": "castrojo"}, "state": "APPROVED"},
+                {"author": {"login": "castrojo"}, "state": "PENDING"},
+                {"author": {"login": "castrojo"}, "state": "CHANGES_REQUESTED"},
+            ]
             app.review_engine = SimpleNamespace(
                 effective_review_cap=lambda: 6,
                 active_review_slots=lambda: 2,
@@ -6451,7 +6724,7 @@ async def main() -> int:
                 "Hive @hive-contributor — projectbluefin/dakota#88",
                 "Remote analysis: projectbluefin/bluefinctl#31",
                 "Local draft: projectbluefin/common#7 (clean)",
-                "GitHub review: projectbluefin/common#7 (APPROVED)",
+                "GitHub review: projectbluefin/common#7 (CHANGES_REQUESTED)",
                 "Snapshot: current",
                 "1m ago",
             ):
@@ -6460,6 +6733,17 @@ async def main() -> int:
                     "the normal dashboard activity surface must render "
                     f"{expected!r}, got {activity_text!r}",
                 )
+            app.stops[1].live["reviews"] = [
+                {"author": {"login": "castrojo"}, "state": "PENDING"},
+                {"author": {"login": "castrojo"}, "state": "DISMISSED"},
+            ]
+            app.refresh_activity()
+            activity_text = str(activity.first().render()) if activity else ""
+            check(
+                "GitHub review:" not in activity_text,
+                "draft and dismissed GitHub reviews must not be reported as submitted, "
+                f"got {activity_text!r}",
+            )
 
             # The active fixture is display-only. Keep the real landing
             # completion focused on reconciliation rather than leaving a
@@ -7225,10 +7509,27 @@ async def main() -> int:
 
         # ── [f] on ReviewScreen dispatches an auto-fix & land agent in background ──
         fix_stop = app.stops[0]
-        fix_stop.review_result = tui.ReviewResult(1, "findings", findings=({"severity": "high", "title": "fix me"},), provenance={})
+        fix_stop.live = {
+            "isDraft": False,
+            "baseRefOid": "fedcba9876543210fedcba9876543210fedcba98",
+            "headRefOid": "0123456789abcdef0123456789abcdef01234567",
+        }
+        fix_stop.review_result = tui.ReviewResult(
+            1,
+            "findings",
+            findings=({"severity": "high", "title": "fix me"},),
+            provenance={
+                "base_sha": "fedcba9876543210fedcba9876543210fedcba98",
+                "head_sha": "0123456789abcdef0123456789abcdef01234567",
+            },
+        )
         fix_screen = tui.ReviewScreen(fix_stop)
         fix_screen.finished = True
         app.push_screen(fix_screen)
+        for _ in range(400):
+            if all(w.is_finished for w in fix_screen.workers):
+                break
+            await pilot.pause(0.05)
         await pilot.pause()
         check(isinstance(app.screen, tui.ReviewScreen), "ReviewScreen must be active")
         await pilot.press("f")
@@ -7388,6 +7689,7 @@ async def main() -> int:
                 if app.stops:
                     break
                 await pilot.pause(0.05)
+            await settle_evidence(app, pilot)
             app.stops[0].live = {
                 "isDraft": False,
                 "baseRefOid": "fedcba9876543210fedcba9876543210fedcba98",
@@ -7422,7 +7724,8 @@ async def main() -> int:
                     break
                 await pilot.pause(0.05)
             await settle_evidence(app, pilot)
-            app.stops[0].live = {
+            stop_target = next((s for s in app.stops if s.key == "projectbluefin/bluefinctl#31"), app.stops[0])
+            stop_target.live = {
                 "isDraft": False,
                 "baseRefOid": "fedcba9876543210fedcba9876543210fedcba98",
                 "headRefOid": "0123456789abcdef0123456789abcdef01234567",
@@ -7432,8 +7735,8 @@ async def main() -> int:
                 "mergeable": "MERGEABLE",
                 "mergeStateStatus": "CLEAN",
             }
-            app.stops[0].overlap = {"duplicates": [1], "overlaps": [2]}
-            app.start_review(app.stops[0], "focus on exact-head evidence")
+            stop_target.overlap = {"duplicates": [1], "overlaps": [2]}
+            app.start_review(stop_target, "focus on exact-head evidence")
             await pilot.press("tab", "enter")
             for _ in range(200):
                 if isinstance(app.screen, tui.ReviewScreen) and app.screen.finished:
@@ -7534,20 +7837,79 @@ async def main() -> int:
         f"every review must be traced with its outcome, got {outcomes}",
     )
 
-    # ── issues view: toggling, triage details, and mutations ─────────────
+    # ── mixed workboard: toggling, triage details, and mutations ─────────
     gh_log.write_text("")
     os.environ["GH_TOKEN"] = "dashboard-pilot-token"
     set_org_queue(SNAPSHOT["items"])
+    set_org_issues([issue_node])
     app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
-        await wait_for_live_rows(app, pilot, "ready", 2)
-        check(app.view_mode == "prs", "dashboard must start in prs view_mode")
+        await wait_for_live_rows(app, pilot, "ready", 3)
+        check(app.view_mode == "prs", "dashboard must start in PR view_mode")
+        check(
+            app.stops and all(not s.is_issue for s in app.stops),
+            "default PR view must contain only pull requests",
+        )
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check(
+            "[I] PR view" in status and "Queue: 2 PRs" in status,
+            f"status bar must reflect PR lens, got {status!r}",
+        )
 
-        # Press tab: verify view_mode == "issues"
         await pilot.press("tab")
-        check(app.view_mode == "issues", "Tab must switch view_mode to issues")
+        await pilot.pause()
+        check(
+            app.view_mode == "prs",
+            "Tab must retain Textual's focus traversal instead of changing views",
+        )
+        app.query_one("#queue", tui.ListView).focus()
 
-        # Wait for issue rows to settle/populate
+        # Reach the optional mixed workboard for shared PR/issue selection.
+        await pilot.press("I")
+        await pilot.press("I")
+        for _ in range(200):
+            if (
+                app.view_mode == "mixed"
+                and any(not s.is_issue for s in app.stops)
+                and any(s.is_issue for s in app.stops)
+            ):
+                break
+            await pilot.pause(0.05)
+        check(
+            app.view_mode == "mixed"
+            and any(not s.is_issue for s in app.stops)
+            and any(s.is_issue for s in app.stops),
+            "mixed view must contain both PRs and issues",
+        )
+
+        # Shared selection across PRs and issues
+        app.stops[0].selected = True
+        app.stops[2].selected = True
+        app.refresh_rows()
+        await wait_for_rendered_rows(app, pilot)
+        check(
+            any(s.is_issue and s.selected for s in app.stops)
+            and any(not s.is_issue and s.selected for s in app.stops),
+            f"selection must cover both PR and issue rows, got {[(s.key, s.selected) for s in app.stops]}",
+        )
+
+        # Press I: verify view_mode == "prs"
+        await pilot.press("I")
+        check(app.view_mode == "prs", "I must switch view_mode from mixed to prs")
+        for _ in range(200):
+            if app.stops and all(not s.is_issue for s in app.stops):
+                break
+            await pilot.pause(0.05)
+        check(
+            len(app.stops) == 2 and all(not s.is_issue for s in app.stops),
+            f"prs view must contain only PRs, got {app.stops}",
+        )
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check("[I] PR view" in status, f"status bar must reflect PR lens, got {status!r}")
+
+        # Press I again: verify view_mode == "issues"
+        await pilot.press("I")
+        check(app.view_mode == "issues", "I must switch view_mode from prs to issues")
         for _ in range(200):
             if app.stops and app.stops[0].is_issue and len(app._queue().children) > 0:
                 break
@@ -7556,6 +7918,9 @@ async def main() -> int:
             len(app.stops) > 0 and app.stops[0].is_issue is True,
             f"issues view must populate stops with is_issue=True, got {app.stops}",
         )
+        status = str(app.query_one("#status-bar", tui.Static).render())
+        check("[I] Issues view" in status, f"status bar must reflect issues lens, got {status!r}")
+
         first_item = app._queue().children[0]
         check(
             isinstance(first_item, tui.ListItem),
@@ -7579,6 +7944,13 @@ async def main() -> int:
             f"highlighted issue must render details with title and body, got {details!r}",
         )
 
+        # Steering on an issue must not focus the steer box or open ReviewScreen
+        await pilot.press("slash")
+        await pilot.pause()
+        box = app.query_one("#steer", tui.Input)
+        check(app.focused is not box, "'/' on an issue must not focus the steer box")
+        check(not isinstance(app.screen, tui.ReviewScreen), "steering on an issue must not open ReviewScreen")
+
         # Test c: comment on issue
         gh_log.write_text("")
         await pilot.press("c")
@@ -7596,14 +7968,18 @@ async def main() -> int:
             if isinstance(app.screen, tui.CommentPreview):
                 break
             await pilot.pause(0.05)
+        preview = app.screen
         check(
-            isinstance(app.screen, tui.CommentPreview),
-            f"submitting comment body must open CommentPreview, got {type(app.screen).__name__}",
+            isinstance(preview, tui.CommentPreview),
+            f"submitting comment body must open CommentPreview, got {type(preview).__name__}",
         )
-        check(
-            "triage comment on issue" in app.screen.body,
-            "CommentPreview must show comment text",
-        )
+        if isinstance(preview, tui.CommentPreview):
+            check(
+                "triage comment on issue" in preview.body,
+                "CommentPreview must show comment text",
+            )
+        else:
+            failures.append("CommentPreview must show comment text")
         await pilot.click("#comment-preview-submit")
         for _ in range(50):
             if isinstance(app.screen, tui.ConfirmMutation):
@@ -7663,17 +8039,41 @@ async def main() -> int:
         await app.workers.wait_for_complete()
         await pilot.pause()
 
-        # Press tab again: verify view_mode == "prs" and PR stops restored
-        await pilot.press("tab")
-        check(app.view_mode == "prs", "pressing tab again must switch view_mode back to prs")
+        # Press I again: verify cycling back to mixed
+        await pilot.press("I")
+        check(app.view_mode == "mixed", "pressing I again must switch view_mode back to mixed")
         for _ in range(200):
-            if app.stops and not app.stops[0].is_issue:
+            if len(app.stops) == 2:
                 break
             await pilot.pause(0.05)
         check(
-            len(app.stops) > 0 and app.stops[0].is_issue is False,
-            f"switching back to PRs view must restore PR stops, got {app.stops}",
+            len(app.stops) == 2 and all(not s.is_issue for s in app.stops),
+            f"switching back to mixed view must restore remaining open stops, got {app.stops}",
         )
+    gh_log.write_text("")
+    set_org_issues([])
+
+    # Independent error modeling: failing issue search must not overwrite usable PR source state
+    os.environ["ORG_ISSUES_FAIL"] = "1"
+    issue_err_app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    async with issue_err_app.run_test() as pilot:
+        for _ in range(200):
+            if issue_err_app.stops and issue_err_app.pr_source_state == "ready":
+                break
+            await pilot.pause(0.05)
+        check(
+            issue_err_app.pr_source_state == "ready",
+            "failing issue fetch must not overwrite usable PR source state",
+        )
+        check(
+            issue_err_app.issues_source_state == "error",
+            "failing issue fetch must record issue source state as error",
+        )
+        check(
+            len(issue_err_app.stops) == 2,
+            "usable PR stops must remain rendered even when issue search fails",
+        )
+    os.environ.pop("ORG_ISSUES_FAIL", None)
     gh_log.write_text("")
 
     # ── multi-repo selection partitions into concurrent landing tasks (#399) ──
@@ -7702,12 +8102,15 @@ async def main() -> int:
         await pilot.press("enter")
         await pilot.pause()
         check(
-            not isinstance(app.screen, tui.BatchPlanScreen),
-            "confirming partitioned batch must return to the review queue",
+            not isinstance(app.screen, tui.LandingScreen)
+            and not isinstance(app.screen, tui.BatchPlanScreen),
+            "confirming partitioned batch must return to review queue",
         )
+        await pilot.press("w")
+        await pilot.pause()
         check(
-            sum(1 for task in app.landing_queue if not task.phase) == 2,
-            "confirming partitioned batch must enqueue both landing tasks",
+            app.query_one("#landing-pause", tui.Button).has_focus,
+            "[w] must focus persistent queue controls after partitioned batch dispatch",
         )
     os.environ["BLUEFIN_REVIEW_PARTITION_BATCH"] = "0"
     gh_log.write_text("")
@@ -7735,6 +8138,7 @@ async def main() -> int:
         return dict(candidate.live)
 
     app.fetch_live_pr = fixture_live
+    app.show_evidence = lambda *a, **kw: None
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
@@ -7743,9 +8147,18 @@ async def main() -> int:
             await pilot.pause(0.05)
         stop = app.stops[0]
 
+        async def slay_and_confirm() -> None:
+            await pilot.press("$")
+            await pilot.pause()
+            if isinstance(app.screen, tui.SlayConfirmScreen):
+                await pilot.press(*app.screen.expected)
+                await pilot.press("enter")
+                await pilot.pause()
+
         # Test 1: Slay on low-risk clean PR dispatches landing task immediately (#411 low-risk skip class)
         stop.title = "chore(deps): update pin"
         stop.head_sha = "a1" + "0" * 38
+        stop.live["baseRefOid"] = "a" * 40
         stop.live["headRefOid"] = stop.head_sha
         stop.review_status = "complete"
         stop.review_result = None
@@ -7755,6 +8168,18 @@ async def main() -> int:
         initial_landings = len(app.landing_queue)
         await pilot.press("$")
         await pilot.pause()
+        check(
+            isinstance(app.screen, tui.SlayConfirmScreen),
+            "$ must push SlayConfirmScreen gate",
+        )
+        if isinstance(app.screen, tui.SlayConfirmScreen):
+            check(
+                app.screen.targets == [stop] and app.screen.expected == str(stop.number),
+                "$ gate must show exact target PR and expected number",
+            )
+            await pilot.press(*app.screen.expected)
+            await pilot.press("enter")
+            await pilot.pause()
         task = next((t for t in app.landing_queue[initial_landings:] if not t.phase), None)
         check(
             task is not None,
@@ -7769,6 +8194,7 @@ async def main() -> int:
         # Test 1b: Cheap clean verdict on non-low-risk PR cannot authorise merge; triggers escalation (#411)
         stop.title = "fix: core memory leak"
         stop.head_sha = "e1" + "0" * 38
+        stop.live["baseRefOid"] = "a" * 40
         stop.live["headRefOid"] = stop.head_sha
         stop.review_status = "complete"
         stop.review_result = None
@@ -7778,10 +8204,17 @@ async def main() -> int:
         app.run_store.transition(cheap_id, tui.RunState.REVIEW_CLEAN)
         initial_landings = len(app.landing_queue)
         app.review_pending_keys.add(stop.key)
-        await pilot.press("$")
-        await pilot.pause()
+        await slay_and_confirm()
+        candidate_landing = next(
+            (
+                t
+                for t in app.landing_queue[initial_landings:]
+                if not t.phase and any(s.key == stop.key for s in getattr(t, "stops", []))
+            ),
+            None,
+        )
         check(
-            len(app.landing_queue) == initial_landings,
+            candidate_landing is None,
             "cheap clean verdict on non-low-risk PR must not land without escalation",
         )
         cheap_rec = app.run_store.get(cheap_id)
@@ -7830,6 +8263,7 @@ async def main() -> int:
             findings = [{"rule": "test-finding", "message": "issue found"}]
 
         stop.head_sha = "a2" + "0" * 38
+        stop.live["baseRefOid"] = "a" * 40
         stop.live["headRefOid"] = stop.head_sha
         stop.review_status = "findings"
         stop.review_result = MockResult()
@@ -7837,13 +8271,17 @@ async def main() -> int:
             {"author": {"login": "human-reviewer"}, "state": "APPROVED", "authorAssociation": "MEMBER"}
         ]
         initial_landings = len(app.landing_queue)
-        await pilot.press("$")
-        await pilot.pause()
+        await slay_and_confirm()
         fix_task = next((t for t in app.landing_queue[initial_landings:] if "-fix" in t.task_id and not t.phase), None)
         check(
             fix_task is not None,
             f"slay on PR with findings must enqueue fix task, queue={app.landing_queue[initial_landings:]}",
         )
+        if fix_task:
+            for _ in range(200):
+                if fix_task.returncode is not None:
+                    break
+                await pilot.pause(0.05)
 
         # Test 2b: Head produced by fixer is independently reviewed before landing (#411)
         fixed_head = "b2" + "0" * 38
@@ -7854,6 +8292,7 @@ async def main() -> int:
         )
         # Slay when head was advanced by fixer
         stop.head_sha = "a2" + "0" * 38
+        stop.live["baseRefOid"] = "a" * 40
         stop.live["headRefOid"] = fixed_head
         stop.review_status = "complete"
         stop.review_result = None
@@ -7907,6 +8346,7 @@ async def main() -> int:
         # Test 3: Slay on unreviewed low-risk PR registers in run_store and triggers on event
         stop.title = "chore(deps): bump deps"
         stop.head_sha = "a3" + "0" * 38
+        stop.live["baseRefOid"] = "a" * 40
         stop.live["headRefOid"] = stop.head_sha
         stop.review_status = "unreviewed"
         stop.review_result = None
@@ -7916,8 +8356,7 @@ async def main() -> int:
         ]
         stop_identity = app.run_identity(stop)
         app.review_pending_keys.add(stop.key)  # avoid network dispatch in pilot
-        await pilot.press("$")
-        await pilot.pause()
+        await slay_and_confirm()
         record_in_flight = app.run_store.get(stop_identity)
         check(
             record_in_flight is not None and record_in_flight.in_flight and record_in_flight.state == tui.RunState.REVIEWING,
@@ -7947,6 +8386,16 @@ async def main() -> int:
         )
 
         # Test 4: Slay guarded in issues view
+        if slay_task:
+            for _ in range(400):
+                if (
+                    slay_task.returncode is not None
+                    and any(t.phase for t in app.landing_queue[initial_landings:])
+                    and all(t.returncode is not None for t in app.landing_queue[initial_landings:])
+                    and not any(app._landing_task_active(t) for t in app.landing_queue)
+                ):
+                    break
+                await pilot.pause(0.05)
         app.view_mode = "issues"
         initial_landings = len(app.landing_queue)
         await pilot.press("$")
@@ -7958,16 +8407,26 @@ async def main() -> int:
         app.view_mode = "prs"
 
         # ── #414: Slay refuses PR with no human review at landing gate ──
+        stop.repository = "projectbluefin/common"
         stop.review_status = "complete"
         stop.review_result = None
         stop.live["reviews"] = []  # No human review on GitHub!
         # Head must advance to re-slay
         stop.head_sha = "1" * 40
+        stop.live["baseRefOid"] = "a" * 40
         stop.live["headRefOid"] = stop.head_sha
         no_human_identity = app.run_identity(stop)
         initial_landings = len(app.landing_queue)
-        await pilot.press("$")
-        await pilot.pause()
+        notices: list[str] = []
+        real_notify = app.notify
+
+        def record_notice(message, *args, **kwargs):
+            notices.append(message)
+            real_notify(message, *args, **kwargs)
+
+        app.notify = record_notice
+        await slay_and_confirm()
+        app.notify = real_notify
         check(
             len(app.landing_queue) == initial_landings,
             "slay must refuse to land PR with no human review",
@@ -7982,16 +8441,28 @@ async def main() -> int:
             "no human review" in (stop.failure or "").lower(),
             f"stop failure must record missing human review, got {stop.failure!r}",
         )
+        check(
+            f"[$] {stop.key}: landing blocked — GitHub has no qualifying human review. "
+            f"{stop.repository} requires a human review; leave one with [L], "
+            "then re-run [$]; no merge was attempted."
+            in notices,
+            "missing human review must explain the qualifying action and safe retry",
+        )
+        stop.repository = "projectbluefin/bluefinctl"
 
         # ── #410: Head change between review and mutation refuses landing ──
         stop.review_status = "complete"
         stop.review_result = None
         stop.head_sha = "2" * 40
+        stop.live["baseRefOid"] = "a" * 40
         stop.live["headRefOid"] = stop.head_sha
         stop.live["reviews"] = [
             {"author": {"login": "human-reviewer"}, "state": "APPROVED", "authorAssociation": "MEMBER"}
         ]
         head_change_identity = app.run_identity(stop)
+        app.run_store.create(head_change_identity)
+        app.run_store.transition(head_change_identity, tui.RunState.REVIEWING)
+        app.run_store.transition(head_change_identity, tui.RunState.REVIEW_CLEAN)
         # Advance live head to simulate head mutation on GitHub before landing
         os.environ["PR_VIEW_JSON"] = json.dumps({
             "headRefOid": "3" * 40,
@@ -8005,7 +8476,7 @@ async def main() -> int:
             "statusCheckRollup": [],
         })
         initial_landings = len(app.landing_queue)
-        await pilot.press("$")
+        app._dispatch_slay_landing(stop, identity=head_change_identity)
         await pilot.pause()
         os.environ.pop("PR_VIEW_JSON", None)
         check(
@@ -8031,6 +8502,7 @@ async def main() -> int:
         ]
         for idx, (status_val, expected_state, expected_outcome) in enumerate(untrustworthy_cases, start=4):
             stop.head_sha = f"{idx:040x}"
+            stop.live["baseRefOid"] = "a" * 40
             stop.live["headRefOid"] = stop.head_sha
             stop.review_status = "unreviewed"
             stop.review_result = None
@@ -8039,8 +8511,7 @@ async def main() -> int:
             ]
             case_identity = app.run_identity(stop)
             app.review_pending_keys.add(stop.key)
-            await pilot.press("$")
-            await pilot.pause()
+            await slay_and_confirm()
             initial_landings = len(app.landing_queue)
             app.apply_review_event(
                 tui.ReviewEvent(
@@ -8074,18 +8545,20 @@ async def main() -> int:
             )
 
         # ── Re-slaying an already-terminal record at same head gives clear message ──
-        # stop is currently at case_identity which is terminal
-        terminal_record = app.run_store.get(case_identity)
-        check(terminal_record is not None and terminal_record.is_terminal, "case_record must be terminal")
+        stop.head_sha = "1" * 40
+        stop.live["baseRefOid"] = "a" * 40
+        stop.live["headRefOid"] = stop.head_sha
+        stop.live["reviews"] = []
+        terminal_record = app.run_store.get(no_human_identity)
+        check(terminal_record is not None and terminal_record.is_terminal, "terminal_record must be terminal")
         initial_landings = len(app.landing_queue)
-        await pilot.press("$")
-        await pilot.pause()
+        await slay_and_confirm()
         check(
             len(app.landing_queue) == initial_landings,
             "re-slaying terminal record at same head must not dispatch landing",
         )
         check(
-            app.run_store.get(case_identity).state == terminal_record.state,
+            app.run_store.get(no_human_identity).state == terminal_record.state,
             "terminal state must remain unchanged after re-slay attempt",
         )
 

@@ -70,8 +70,8 @@ and every selected pull request has a terminal outcome.
 
 ## `[$]` is a state machine
 
-`[$]` takes one exact-list confirmation and then mutates pull requests without
-further human input. Everything it does afterwards is therefore a safety
+`[$]` takes one typed `slay` confirmation for a batch (or the pull request
+number for one pull request) and then mutates pull requests without further human input. Everything it does afterwards is therefore a safety
 property, and safety properties cannot live in membership sets scattered across
 the dashboard: a key added to one set and dropped on an early return is a pull
 request that is permanently stuck or, worse, permanently in flight.
@@ -104,11 +104,13 @@ A cheap first pass may triage and may seed a fixer; it may not authorise a
 merge. Escalation is skippable only for an explicit, deterministic, low-risk
 class, never because the weak model was satisfied.
 
-**Human review is enforced at the gate.** A pull request lacking a human review
-is stopped at the landing gate, using live GitHub reviewer evidence. Sorting
-such pull requests to the top of the queue is prioritisation, not enforcement;
-`[$]`'s own review-state fields describe machine reviews and say nothing about
-who approved.
+**Human review is enforced at the gate for protected repositories.**
+`projectbluefin/common`, `projectbluefin/bluefin`,
+`projectbluefin/bluefin-lts`, and `projectbluefin/dakota` stop a pull request
+lacking a human GitHub review. Other repositories may land from the slay
+pipeline's automated evidence. Sorting protected pull requests to the top of
+the queue is prioritisation, not enforcement; `[$]`'s own review-state fields
+describe machine reviews and say nothing about who approved.
 
 Missing, failed, incomplete, or unparsable review results are terminal for that
 run. They never fall through to landing.

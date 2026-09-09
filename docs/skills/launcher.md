@@ -40,27 +40,26 @@ Goose, or image build skill documents.
 
    | Recipe | Purpose |
    |---|---|
-   | `contribute` | Start a detached contributor worker for unattended runs; `contribute cluster N` uses the existing cluster scale-out path. |
-   | `review-container` | Run the Hive queue worker: the contributor container that receives assigned tasks. `REVIEW_DETACH=1` runs it detached. |
-   | `review-stop` | Stop a detached worker; refuses attended runs and unlabeled containers. |
+   | `contribute` | Start a foreground Hive contributor worker. |
+   | `review-container` | Run the Hive queue worker: the contributor container that receives assigned tasks. Foreground only; Ctrl-C stops it. |
+   | `review-stop` | Stop cluster contributor workers; refuses attended runs and unlabeled containers. |
    | `review-doctor` | Perform read-only preflight checks. |
    | `review-queue` | Walk the live PR queue in the container; no Hive registration is mounted, but the selected hub URL is passed when configured. |
    | `turbo-review` | Scale three cluster contributor workers by default, then forward its arguments to the foreground `review-queue` dashboard. |
 
    `just` reads only this directory's justfile; use a `~/.local/bin` shim elsewhere.
 
-2. Interactive paths stay foreground; Ctrl-C stops them. `contribute` and
-   `REVIEW_DETACH=1` start a labeled worker detached; its only lifecycle verb
-   is polite `review-stop`. The launcher owns its Hive checkout and Podman
-   dashboard state. An attended contributor run starts a passive Textual
-   worker-status companion after Hive has created `contributor`. It reads only
-   the authenticated `/api/v1/status`, `/api/v1/me`, and
-   `/api/v1/contributors` endpoints, refreshes in-process with one bounded
-   in-flight read, and shows the exact command
+2. Interactive paths stay foreground; Ctrl-C stops them. Detached contributor
+   containers are not supported; `REVIEW_DETACH=1` is rejected. Cluster workers
+   run in Kubernetes and stop with `just review-stop cluster` (or `just review-stop`).
+   The launcher owns its Hive checkout and Podman dashboard state. An attended
+   contributor run starts a passive Textual worker-status companion after Hive
+   has created `contributor`. It reads only the authenticated `/api/v1/status`,
+   `/api/v1/me`, and `/api/v1/contributors` endpoints, refreshes in-process
+   with one bounded in-flight read, and shows the exact command
    `podman exec -it <container> tmux attach -t contributor`. It never selects,
    injects, captures, or retries assignments; it never restarts or completes
-   work.
-   The image-owned `/opt/bluefin/config/display-brand` file supplies the
+   work. The image-owned `/opt/bluefin/config/display-brand` file supplies the
    display name shared by the dashboard and worker companion; a missing file
    uses the generic `Review` fallback and does not affect routing or access.
 3. Mount only read-only Hive contributor configuration. `review-queue` gets
@@ -151,6 +150,14 @@ acknowledge it, and diagnostics redact URI userinfo. `REVIEW_RUNTIME=k8s`
 uses its Kubernetes route and does not infer cluster runtime isolation from
 this local Podman check.
 
+When an operator configures an SSH-backed default Podman system connection, the
+launcher stages the selected `0600` Hive contributor registration to a unique
+per-run private `0700` directory on the remote engine host for the duration of the
+container run, and removes only that private staging path on exit. Remote canonical
+configuration (`~/.config/hive` and `contributor.env`) is never altered or deleted.
+Operator control remains explicit through Podman connection configuration; no
+credential values, SSH targets, or endpoints are printed or committed.
+
 A locally built image has no registry behind it and is not a moving tag.
 Build local images under the `sha-<commit>` tag CI mints for that commit.
 Absent from local storage is the final answer for a `localhost/` ref:
@@ -185,8 +192,9 @@ broker is offered only to the local Podman dashboard.
 
 ## Red Flags
 
-- An undocumented public recipe, or an implicit background launch with no
-  matching lifecycle verb.
+- An undocumented public recipe, or a detached/background contributor launch.
+- Altering a remote canonical configuration directory or file during remote
+  staging, or broad deletion on cleanup.
 - An interactive launch path whose final process is neither `exec`'d nor the
   last foreground command whose status propagates (`nohup`, `setsid`).
   Background jobs the shell `wait`s on and reaps by trap are allowed for signals.
