@@ -1,23 +1,25 @@
 <p align="center">
-  <img src="docs/images/logo.png" alt="Bluefin Review — a Bluefin-referenced raptor mark" width="240">
+  <img src="docs/images/logo.png" alt="Bluefin Review" width="360">
 </p>
 
 # Bluefin Review
 
 enslaving the oppressors since 2026
 
-**A live pull-request dashboard for maintainers, and a Hive worker for the toil.**
-Inspect changes, CI and review evidence in one terminal, then choose what to
-review and what to land. Powered by [Hive](https://hive.hivecommons.dev/),
-Goose and the bundled Codex CLI. Humans retain review and merge authority;
-Hive assigns contributor work.
+**Review pull requests, inspect CI failures, and land changes from your terminal.**
+Bluefin Review brings the evidence and actions into one dashboard. You choose
+what to review and what to merge; GitHub permissions and branch protections
+still apply.
 
-[Quick start](#quick-start) · [Dashboard tour](#inspect-then-review) · [Guides](#learn-more)
+[Quick start](#quick-start) · [Using the dashboard](#using-the-dashboard) · [Run a worker](#run-a-worker) · [Guides](#guides)
 
 ## Quick start
 
-Run these commands on your Linux host, from the checkout root. You need
-Git, `just`, rootless Podman and the GitHub CLI (`gh`).
+You need **Linux, rootless Podman, Git, `just`, and GitHub CLI (`gh`)**.
+Goose and Codex are bundled in the container; model authentication is a
+separate, one-time setup on your host.
+
+### 1. Get the launcher and sign in to GitHub
 
 ```bash
 git clone https://github.com/projectbluefin/review.git
@@ -25,112 +27,104 @@ cd review
 gh auth login --web --hostname github.com --scopes repo,read:org
 ```
 
-Choose your review backend before launching:
+### 2. Choose one review backend
 
-| Backend | One-time model authentication | Launch from the checkout |
-| --- | --- | --- |
-| Goose + GitHub Copilot (default) | Install Goose, run `goose configure`, choose GitHub Copilot and complete its device flow. | `just review-queue` |
-| Codex subscription | Run `codex login` with file credential storage so the launcher can read `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`). | `BLUEFIN_REVIEW_BACKEND=codex just review-queue` |
+**Goose + GitHub Copilot — the default**
 
-GitHub login and model login are separate: a GitHub CLI token does not
-authenticate Copilot inference. Goose launches refuse missing Copilot credentials
-rather than dispatch agents that cannot start. Explicit Codex selection needs no host Goose
-or Copilot credential.
+If you have not configured it, install Goose on your host and run
+`goose configure`, selecting GitHub Copilot. Then launch:
 
 ```bash
-just review-doctor
 just review-queue
 ```
 
-Doctor checks readiness without starting an agent. The default launch pulls
-`ghcr.io/projectbluefin/review:stable` and opens the maintainer dashboard.
-For one repository, use `just review-queue projectbluefin/review`.
-See the [launcher guide](docs/skills/launcher.md) for model profiles,
-credential handoff, remote Podman and Kubernetes sessions.
+**Codex subscription — an alternative**
 
-## Inspect, then review
+Complete `codex login` on your host using file credential storage, then launch:
 
-[![Wide live dashboard with numbered regions for activity, queue and selected PR evidence](docs/images/dashboard-overview.png)](docs/images/dashboard-overview.png)
+```bash
+BLUEFIN_REVIEW_BACKEND=codex just review-queue
+```
 
-*Real dashboard rendered from exact local image `sha-dfaa27e544a1ed6f21c7e98dce418a7dbddb5bac`
-(image ID `adbc75a71c2d…`) at 170 columns × 44 rows, using live GitHub queue data.
-The numbered annotations are outside the terminal pixels; open the image at full size.*
+Codex selection does not require Goose or a Copilot credential on the host.
+A GitHub CLI login alone does **not** authenticate either review backend.
+See the [launcher guide](docs/skills/launcher.md) for authentication setup,
+model profiles, and troubleshooting. For the default Goose setup,
+`just review-doctor` checks readiness without starting an agent.
 
-`review` comes with Goose and the official Codex CLI prebundled and
-passes through only the credential each selected client needs.
+### 3. Start with one repository, or browse the organization
 
-1. **Check activity and freshness.** The top panels show review workers and
-   landing work. An idle session is normal; opening the dashboard starts no review.
-2. **Choose a pull request.** Use `j` / `k` to move, `f` to cycle the action
-   filter, and `R` to refresh. The capture shows Bluefin LTS with all action types; launch defaults
-   to the whole organization. `Tab` moves focus between panes.
-3. **Read the evidence.** Inspect the selected PR's checks, merge state and
-   context. `Enter` opens its diff, or existing review evidence when available.
-   `v` opens the diff, `C` comments, and `o` the GitHub page.
+The commands above open the whole Project Bluefin queue. To narrow it, append
+a repository—for example, `just review-queue projectbluefin/review`.
+The launcher pulls `ghcr.io/projectbluefin/review:stable`; no local image build
+is required. Opening the dashboard does not start a review.
 
-Use `$` to slay selected PRs through the gated review/fix/land flow. For issues,
-it dispatches a fixer that opens a PR under your account or files an evidenced
-finding; it never merges the resulting PR itself.
+## Using the dashboard
 
-4. **Start a review when ready.** Press `r`; use `/` to steer the review or
-   `y` to hand its context to your own client. `?` shows current key help and
-   `Ctrl-p` opens the command palette. `Esc` returns from an inspection view;
-   at the dashboard it exits.
+[![Review dashboard overview with a numbered guide to its panes](docs/images/dashboard-overview.png)](docs/images/dashboard-overview.png)
 
-![Selected pull request evidence at readable detail size](docs/images/dashboard-evidence.png)
+*An example session using real GitHub data. Open the image for full resolution;
+its counts are a captured moment, not a live status report.*
 
-A review draft is evidence for your decision. Review submission, approve-and-queue,
-merge and fix-and-land are distinct actions with side effects; inspect their
-confirmation before proceeding. GitHub permissions and branch protections still
-apply. See [review controls](docs/skills/review-dashboard.md) and
-[batch landing](docs/skills/landing-batches.md) before using batch actions.
+1. **Check activity.** See running reviews, landing work, and data freshness.
+2. **Choose a PR.** Move with `j` / `k`; `f` changes the action filter and `R`
+   refreshes the queue. Use `Tab` to move between panes.
+3. **Inspect before acting.** Read the selected PR's checks, merge state, and
+   related changes. `v` opens the diff; `C` opens the conversation.
+4. **Review, then decide.** `r` starts a review. `/` adds instructions, and `y`
+   hands the context to your own client. `?` lists the available controls.
 
-## Put a worker to work
+Review submission, queueing, and merging are distinct actions. Read the
+confirmation before authorizing a change; a clean review is not permission
+to merge. The [dashboard guide](docs/skills/review-dashboard.md) explains the
+complete keyboard and mouse workflow.
 
-| Goal | Command |
-| --- | --- |
-| Donate a foreground Goose worker to Hive | `just contribute` |
-| Select Codex for a contributor worker | `TOOL=codex just review-container` |
-| Scale three cluster workers, then open the dashboard | `just turbo-review` |
-| Stop cluster workers | `just review-stop cluster` |
+For batches, `$` follows the gated review/fix/land flow. On selected issues it
+opens a PR or files an evidenced finding, rather than merging its own work.
+The landing controls `+` / `−` change concurrency and Pause suspends new
+dispatches—not agents already running. See [batch landing](docs/skills/landing-batches.md).
 
-Workers use your GitHub identity and receive their assignments from Hive.
-The attended launcher runs Hive setup if its registration is missing.
-`BLUEFIN_REVIEW_BACKEND` selects the dashboard backend; `TOOL` selects the
-contributor backend (`TOOL=goose` by default). Turbo requires a usable Kubernetes cluster; start with
-[cluster workers](docs/skills/cluster-workers.md) before scaling out.
+## Run a worker
 
-Interactive runs stay attached to the launching terminal; **Ctrl-C stops them**.
-Detached contributor containers are unsupported (`REVIEW_DETACH=1` is rejected). Cluster workers have a separate
-lifecycle and stop with `just review-stop`. Agents can use the permissions on
-their GitHub token: scope credentials to the work, and never loosen Hive
-registration permissions. Optional dashboard cluster access requires an explicit
-session opt-in; declining it leaves registry-based review available.
+This is a separate mode: **Hive assigns contributor work; the dashboard is for
+human review.** Choose one worker backend:
 
-## Learn more
+```bash
+just contribute                         # default Goose worker (TOOL=goose)
+TOOL=codex just review-container         # Codex contributor worker
+```
 
-| I want to… | Read |
-| --- | --- |
-| Understand roles, authority and architecture | [Agentic model](docs/factory/agentic-model.md) |
-| Configure authentication, profiles or launch modes | [Launcher](docs/skills/launcher.md) |
-| Inspect reviews and use dashboard controls | [Dashboard](docs/skills/review-dashboard.md) |
-| Manage a batch and inspect landing results | [Landing batches](docs/skills/landing-batches.md) |
-| Monitor workers or diagnose an assignment | [Monitoring](docs/skills/review-monitoring.md) · [Hive triage](docs/skills/hive-triage.md) |
-| Run contributors on Kubernetes | [Cluster workers](docs/skills/cluster-workers.md) |
-| Understand optional cluster verification | [Lab broker](docs/skills/lab-broker.md) |
-| Understand specialized review checks | [Review checks](docs/skills/review-checks.md) |
-| Build, validate or audit the image | [Image and development](docs/image-and-development.md) · [Image audit](docs/skills/image-audit.md) |
-| Contribute a small, evidenced change | [Contribution culture](docs/skills/contribution-culture.md) · [Agent contract](AGENTS.md) |
-| Find another task-specific guide | [Documentation index](docs/SKILL.md) |
+Keep the launching terminal open. **Ctrl-C stops the attended worker.**
+Detached contributor containers are unsupported (`REVIEW_DETACH=1` is rejected).
+
+Kubernetes users can scale workers with `just turbo-review` and stop them with
+`just review-stop cluster`. Start with the [cluster guide](docs/skills/cluster-workers.md);
+a cluster is not required for the ordinary dashboard.
+
+## Guides
+
+- **Setup, credentials, models, remote runtimes:** [Launcher](docs/skills/launcher.md)
+- **Review controls and evidence:** [Dashboard](docs/skills/review-dashboard.md)
+- **Batch progress and failures:** [Landing batches](docs/skills/landing-batches.md)
+- **Worker status and troubleshooting:** [Monitoring](docs/skills/review-monitoring.md) · [Hive triage](docs/skills/hive-triage.md)
+- **Build and verify the image:** [Image and development](docs/image-and-development.md) · [Image audit](docs/skills/image-audit.md)
+- **Architecture and authority boundaries:** [Agentic model](docs/factory/agentic-model.md)
+- **Contribute:** [Contribution culture](docs/skills/contribution-culture.md) · [Agent contract](AGENTS.md)
+- **All documentation:** [Documentation index](docs/SKILL.md)
 
 ## What this is for
 
-The appliance reduces maintainer toil: broken builds, stale pins, drifted docs
-and unreproduced reports. Its next steps include agent-assisted documentation
-([#134](https://github.com/projectbluefin/review/issues/134)) and the watcher
-feedback loop ([#135](https://github.com/projectbluefin/review/issues/135)).
+Reduce maintainer toil: broken builds, stale pins, drifted documentation, and
+unreproduced reports. Planned documentation assistance is tracked in
+[#134](https://github.com/projectbluefin/review/issues/134); the feedback loop
+is tracked in [#135](https://github.com/projectbluefin/review/issues/135).
 
-The image layers the pinned Hive runtime at `c7a88b8518abf1163e13803b2094f2262605490b`;
-see [image architecture and validation](docs/image-and-development.md).
+<details>
+<summary>Image provenance</summary>
+
+The image layers the pinned Hive runtime at `c7a88b8518abf1163e13803b2094f2262605490b`.
+See [image architecture and validation](docs/image-and-development.md).
+
+</details>
 
 Licensed under [Apache 2.0](LICENSE). [Visual credits](docs/images/README.md).
