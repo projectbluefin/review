@@ -1163,6 +1163,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
             queue_mock = mock.MagicMock()
             queue_mock.children = []
             queue_mock.index = 0
+            queue_mock.content_region.width = 80
             app.query_one = lambda id, *args, **kwargs: queue_mock if id == "#queue" else mock.MagicMock()
 
             load_count = 0
@@ -1214,6 +1215,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
             queue_mock = mock.MagicMock()
             queue_mock.children = []
             queue_mock.index = 0
+            queue_mock.content_region.width = 80
             app.query_one = lambda id, *args, **kwargs: queue_mock if id == "#queue" else mock.MagicMock()
 
             load_count = 0
@@ -1405,6 +1407,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
             queue_mock = mock.MagicMock()
             queue_mock.children = []
             queue_mock.index = 0
+            queue_mock.content_region.width = 80
             app.query_one = lambda id, *args, **kwargs: queue_mock if id == "#queue" else mock.MagicMock()
 
             discover_calls = 0

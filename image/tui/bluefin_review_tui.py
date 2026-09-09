@@ -6518,7 +6518,9 @@ class ReviewDashboard(App):
             visible_suffix = Text.from_markup(suffix).plain
         except MarkupError:
             visible_suffix = suffix
-        available = max(1, width - len(prefix) - len(visible_suffix))
+        # ListView may consume its edge column for the scrollbar after the
+        # label is measured; reserve it so the action/CI suffix remains visible.
+        available = max(1, width - 1 - len(prefix) - len(visible_suffix))
         if len(stop.title) <= available:
             return stop.title
         if available == 1:

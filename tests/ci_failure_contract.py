@@ -190,7 +190,10 @@ class CIFailureEvidenceContractTests(unittest.TestCase):
                 app.populate(app.stops)
                 app.open_ci_failure_logs(stop)
                 await app.workers.wait_for_complete()
-                await pilot.pause()
+                for _ in range(100):
+                    if isinstance(app.screen, tui.CIFailureScreen):
+                        break
+                    await pilot.pause()
                 self.assertIsInstance(app.screen, tui.CIFailureScreen)
                 self.assertEqual(stop.live.get("headRefOid"), HEAD)
 

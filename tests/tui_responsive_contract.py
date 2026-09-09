@@ -609,6 +609,37 @@ class ResponsiveTuiContractTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_compact_queue_keeps_ci_and_action_suffix_visible(self):
+        async def exercise():
+            app = tui.ReviewDashboard()
+            app.load_queue = lambda: None
+            app.load_hive = lambda: None
+            app.discover_harness = lambda: None
+            app.load_issues = lambda: None
+            async with app.run_test(size=(80, 24)) as pilot:
+                stop = tui.Stop(
+                    "projectbluefin/review",
+                    102,
+                    "fix-ci",
+                    "fix: failed CI fixture",
+                    check_state="failure",
+                    live={"headRefOid": "2" * 40},
+                )
+                app.stops = [stop]
+                app.populate(app.stops)
+                await pilot.pause()
+                label = app.query_one("#queue Label")
+                visible = "".join(segment.text for segment in label.render_line(0))
+                self.assertLess(
+                    len(visible),
+                    app.query_one("#queue").content_region.width,
+                    "queue rows must reserve the ListView edge gutter",
+                )
+                self.assertIn("CI FAILED", visible)
+                self.assertIn("[fix-ci]", visible)
+
+        asyncio.run(exercise())
+
     def test_compact_activity_and_controls_keep_active_landing_context(self):
         with tempfile.TemporaryDirectory() as root:
             task = tui.landing.LandingTask(
