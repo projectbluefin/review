@@ -50,6 +50,8 @@ class Projection:
     contributors: str = UNKNOWN
     freshness: str = UNKNOWN
     attach: str = ""
+    read_state: str = "current"
+    read_error: str = ""
 
 
 def _freshness(value) -> str:
@@ -87,6 +89,7 @@ def project_status(payload: dict) -> Projection:
         actionable=_value(status, "actionable_items"),
         contributors=_value(status, "active_contributors"),
         freshness=_freshness(_value(status, "updated_at", "generated_at", "timestamp")),
+        read_state="current",
     )
 
 
@@ -96,7 +99,32 @@ def attach_command() -> str:
 
 
 def unavailable_projection() -> Projection:
-    return Projection(connection="unavailable", state="disconnected", attach=attach_command())
+    return Projection(
+        connection="unavailable",
+        state="disconnected",
+        attach=attach_command(),
+        read_state="unavailable",
+        read_error="hub read unavailable",
+    )
+
+
+def stale_projection(
+    projection: Projection, age_seconds: float | None, error: str = "read failed"
+) -> Projection:
+    """Keep the last worker facts while making a failed read and its age explicit."""
+    if age_seconds is None:
+        age = "age unknown"
+    else:
+        seconds = max(0, int(age_seconds))
+        age = f"{seconds}s" if seconds < 60 else f"{seconds // 60}m"
+    return Projection(
+        **{
+            **projection.__dict__,
+            "freshness": f"stale · {age}",
+            "read_state": "stale",
+            "read_error": str(error or "read failed"),
+        }
+    )
 
 
 def render_text(projection: Projection) -> str:
@@ -117,6 +145,10 @@ def _escape(value) -> str:
 
 
 def _state_presentation(projection: Projection) -> tuple[str, str, str]:
+    if projection.read_state == "stale":
+        return "⚠", f"LAST KNOWN · {str(projection.state or UNKNOWN).upper()}", "warning"
+    if projection.read_state == "unavailable":
+        return "✗", "HUB UNAVAILABLE", "error"
     state = str(projection.state or UNKNOWN).lower()
     if state == "working":
         return "●", "WORKING", "active"
@@ -155,19 +187,30 @@ def _connection_style(value: str) -> str:
 
 def _freshness_style(value: str) -> str:
     text = str(value)
-    if text == UNKNOWN or text.endswith("m ago"):
+    if text == UNKNOWN or text.startswith("stale") or text.endswith("m ago"):
         return "bold yellow"
     return "cyan"
 
 
+def _read_style(projection: Projection) -> str:
+    if projection.read_state == "stale":
+        return "bold yellow"
+    if projection.read_state == "unavailable":
+        return "bold red"
+    return "cyan"
+
+
 def _section(title: str, rows: list[tuple[str, str, str]], *, color: bool) -> str:
+    label_width = max(14, *(len(label) for label, _, _ in rows))
     if not color:
-        return "\n".join([title, *(f"{label:<14} {value}" for label, value, _ in rows)])
+        return "\n".join(
+            [title, *(f"{label:<{label_width}} {value}" for label, value, _ in rows)]
+        )
     return "\n".join(
         [
             f"[bold cyan]{title}[/]",
             *(
-                f"[dim]{label:<14}[/] [{style}]{_escape(value)}[/]"
+                f"[dim]{label:<{label_width}}[/] [{style}]{_escape(value)}[/]"
                 for label, value, style in rows
             ),
         ]
@@ -191,6 +234,15 @@ def render_sections(projection: Projection, *, color: bool = True) -> dict[str, 
             [
                 ("Hub", str(projection.connection), _connection_style(projection.connection)),
                 ("Identity", str(projection.identity), value_style),
+                (
+                    "Read",
+                    " ".join(
+                        part
+                        for part in (projection.read_state, projection.read_error)
+                        if part
+                    ),
+                    _read_style(projection),
+                ),
                 ("Freshness", str(projection.freshness), _freshness_style(projection.freshness)),
             ],
             color=color,
@@ -199,8 +251,8 @@ def render_sections(projection: Projection, *, color: bool = True) -> dict[str, 
             "WORKER",
             [
                 ("State", str(projection.state).upper(), state_style),
-                ("Actionable", str(projection.actionable), value_style),
-                ("Contributors", str(projection.contributors), value_style),
+                ("Hub actionable", str(projection.actionable), value_style),
+                ("Hub contributors", str(projection.contributors), value_style),
             ],
             color=color,
         ),
@@ -250,9 +302,9 @@ class RefreshController:
     async def _read(self):
         try:
             result = await self.reader()
-        except Exception:
+        except Exception as error:
             self._record_failure()
-            return False
+            return {"ok": False, "category": "read", "message": type(error).__name__}
         if result is False or (isinstance(result, dict) and result.get("ok") is False):
             self._record_failure()
             return result
@@ -307,6 +359,7 @@ if Static is not None:
             self.reader = reader
             self.controller = RefreshController(reader)
             self.projection = Projection(connection="starting", state="starting", attach=attach_command())
+            self.last_success_at: float | None = None
             self.use_color = "NO_COLOR" not in os.environ
             if not self.use_color:
                 self.add_class("no-color")
@@ -342,13 +395,28 @@ if Static is not None:
 
         def _show(self, result) -> None:
             if result is False:
+                if self.last_success_at is not None:
+                    self.projection = stale_projection(
+                        self.projection,
+                        time.monotonic() - self.last_success_at,
+                        "read backoff",
+                    )
+                    self._render_projection()
                 return
             payload = result if isinstance(result, dict) else {}
             if not payload.get("ok", True):
-                self.projection = unavailable_projection()
+                if self.last_success_at is None:
+                    self.projection = unavailable_projection()
+                else:
+                    self.projection = stale_projection(
+                        self.projection,
+                        time.monotonic() - self.last_success_at,
+                        payload.get("message") or payload.get("category") or "read failed",
+                    )
             else:
                 self.projection = project_status(payload)
                 self.projection = Projection(**{**self.projection.__dict__, "attach": attach_command()})
+                self.last_success_at = time.monotonic()
             self._render_projection()
 
         def _render_projection(self) -> None:

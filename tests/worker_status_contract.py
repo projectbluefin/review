@@ -5,6 +5,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -138,6 +139,33 @@ class WorkerStatusContract(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_refresh_exception_is_a_bounded_read_failure_with_backoff(self):
+        calls = []
+        now = [100.0]
+
+        async def read():
+            calls.append(now[0])
+            if len(calls) == 1:
+                return {"ok": True}
+            raise RuntimeError("reader failed")
+
+        async def scenario():
+            controller = worker_status.RefreshController(
+                read, clock=lambda: now[0], base_delay=5, max_delay=60
+            )
+            self.assertEqual((await controller.refresh())["ok"], True)
+            now[0] = 101.0
+            failed = await controller.refresh()
+            self.assertEqual(failed["ok"], False)
+            self.assertEqual(failed["category"], "read")
+            self.assertEqual(controller.next_allowed, 106.0)
+            now[0] = 102.0
+            backoff = await controller.refresh()
+            self.assertFalse(backoff)
+            self.assertEqual(calls, [100.0, 101.0])
+
+        asyncio.run(scenario())
+
     def test_attach_command_uses_the_selected_named_container(self):
         with patch.dict(os.environ, {"REVIEW_CONTAINER_NAME": "review-2"}, clear=False):
             self.assertEqual(
@@ -174,6 +202,70 @@ class WorkerStatusContract(unittest.TestCase):
         self.assertIn("ASSIGNMENT", sections["assignment"])
         self.assertIn("ATTACH", sections["attach"])
         self.assertIn("unknown", sections["connection"])
+        self.assertIn("Hub actionable", sections["worker"])
+        self.assertIn("Hub contributors", sections["worker"])
+
+    def test_stale_projection_preserves_worker_facts_and_marks_read_failure(self):
+        projection = worker_status.Projection(
+            connection="online", identity="worker-7", state="working",
+            repository="projectbluefin/review", issue="151", title="Worker status",
+            actionable="4", contributors="2", freshness="<1m ago",
+            attach="podman exec -it review-container tmux attach -t contributor",
+        )
+        stale = worker_status.stale_projection(
+            projection, age_seconds=61, error="RuntimeError"
+        )
+        self.assertEqual(stale.state, "working")
+        self.assertEqual(stale.read_state, "stale")
+        self.assertEqual(stale.read_error, "RuntimeError")
+        self.assertIn("stale", stale.freshness)
+        self.assertIn("LAST KNOWN", worker_status.render_state_badge(stale, color=False))
+        self.assertIn("Read", worker_status.render_sections(stale, color=False)["connection"])
+
+    def test_app_marks_last_known_worker_stale_after_a_failed_read(self):
+        if worker_status.Static is None:
+            self.skipTest("Textual is unavailable")
+
+        payload = {
+            "ok": True,
+            "data": {
+                "status": {"hub": "online", "actionable_items": 4, "active_contributors": 2},
+                "me": {
+                    "github_username": "worker-7",
+                    "active": True,
+                    "current_task": {
+                        "repo": "projectbluefin/review",
+                        "number": 151,
+                        "title": "Worker status",
+                    },
+                },
+            },
+        }
+
+        async def reader():
+            return payload
+
+        async def exercise():
+            app = worker_status.WorkerStatusApp(reader)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause()
+                app._show(payload)
+                app.last_success_at = time.monotonic() - 61
+                app._show({"ok": False, "category": "read", "message": "RuntimeError"})
+                self.assertEqual(app.projection.state, "working")
+                self.assertEqual(app.projection.read_state, "stale")
+                self.assertIn("LAST KNOWN", str(app.query_one("#state-badge").render()))
+                self.assertIn("stale", str(app.query_one("#connection-section Static").render()))
+
+        asyncio.run(exercise())
+
+    def test_hub_counts_are_labeled_as_hub_scope(self):
+        sections = worker_status.render_sections(
+            worker_status.Projection(actionable="4", contributors="2"),
+            color=False,
+        )
+        self.assertIn("Hub actionable", sections["worker"])
+        self.assertIn("Hub contributors", sections["worker"])
 
     def test_state_badge_does_not_equate_working_with_success(self):
         projection = worker_status.Projection(state="working")
