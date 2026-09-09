@@ -6700,7 +6700,7 @@ class ReviewDashboard(App):
                 if counts.get(key)
             )
             lines.append(
-                f"[b]merge queue[/b]  {escape(stop.repository)} — {total} open"
+                f"[b]merge queue[/b] · {escape(stop.repository)} — {total} open"
             )
             lines.append(f"  {meter_bar(counts)}")
             lines.append(f"  {summary}")
