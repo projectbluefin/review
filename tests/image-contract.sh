@@ -43,7 +43,6 @@ require image/Containerfile \
   'ARG TMUX_VERSION=' \
   'ARG CODEX_VERSION=' \
   'ARG GOOSE_CHANNEL=canary' \
-  'ARG PI_VERSION=' \
   'COPY package.json package-lock.json /opt/hive/' \
   'COPY --chmod=0755 image/bin/bluefin-review /usr/local/bin/bluefin-review' \
   'COPY --chmod=0755 image/entrypoint.sh /usr/local/bin/review-entrypoint' \
@@ -51,12 +50,10 @@ require image/Containerfile \
   'COPY image/tmux.conf /etc/tmux.conf' \
   'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-agent.sh' \
   'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-relay.sh' \
-  'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/pi-backend.js' \
   'https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/config/backends.conf' \
   '/usr/local/bin/goose --version' \
   'tmux -V' \
   'codex --version' \
-  'pi --version' \
   'ARG REVIEW_REVISION=unknown' \
   'COPY --chmod=0755 scripts/generate-sbom-manifest.py /usr/local/libexec/review-sbom-manifest' \
   'rm -f /usr/local/libexec/review-sbom-manifest;' \
@@ -66,6 +63,9 @@ require image/Containerfile \
   'ENTRYPOINT ["/usr/local/bin/review-entrypoint"]'
 
 forbid image/Containerfile \
+  'PI_VERSION' \
+  'PI_SHA512' \
+  'pi-coding-agent' \
   'LAB_SKILLS_COMMIT' \
   'projectbluefin/lab/' \
   'apt-get' \

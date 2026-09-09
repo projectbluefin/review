@@ -66,8 +66,7 @@
 # from the repository root. Persistent state is limited to launcher
 # configuration; the container receives credentials by environment and the
 # read-only ~/.config/hive mount, never a workspace or host home mount.
-# Goose is the default agent backend; Pi is the explicitly selected executable
-# backend. Hive remains the sole assignment authority and there is no local
+# Goose is the default agent backend. Hive remains the sole assignment authority and there is no local
 # inference, model catalogue, or multi-CLI auto-detection.
 #
 # TOOL is read from the environment so 'TOOL=goose just review-container'
@@ -147,9 +146,9 @@ require_copilot_provider() {
 }
 require_goose_backend() {
   local requested="${1:-}"
-  [[ -z "$requested" || "$requested" == goose || "$requested" == pi || "$requested" == codex ]] && return 0
-  echo "ERROR: TOOL=${requested} is not supported — review supports Goose, Codex, and Pi." >&2
-  echo "  Unset TOOL, or pass TOOL=goose, TOOL=codex, or TOOL=pi." >&2
+  [[ -z "$requested" || "$requested" == goose || "$requested" == codex ]] && return 0
+  echo "ERROR: TOOL=${requested} is not supported — review supports Goose and Codex." >&2
+  echo "  Unset TOOL, or pass TOOL=goose or TOOL=codex." >&2
   return 1
 }
 codex_auth_configured() {
@@ -160,13 +159,7 @@ codex_auth_configured() {
 preflight_agent() {
   local backend="${1:-goose}"
   # Exactly one ERROR line per failure, each with the command that fixes it.
-  if [[ "$backend" == pi ]]; then
-    [[ -n "${PI_API_KEY:-}" ]] || {
-      echo "ERROR: Pi requires PI_API_KEY for the selected Anthropic provider." >&2
-      echo "  Export PI_API_KEY before running TOOL=pi just review-container." >&2
-      return 1
-    }
-  elif [[ "$backend" == codex ]]; then
+  if [[ "$backend" == codex ]]; then
     codex_auth_configured || {
       echo "ERROR: Codex subscription login is unavailable for the selected backend." >&2
       echo "  Run 'codex login' with file credential storage, then re-run TOOL=codex just review-container." >&2
@@ -1388,9 +1381,7 @@ review-container profile="" effort="":
     require_valid_container_name "$CONTAINER_NAME"
 
     resolve_model_profile "{{profile}}" "{{effort}}"
-    if [[ "$BACKEND" == pi ]]; then
-      export ANTHROPIC_API_KEY="$PI_API_KEY"
-    elif [[ "$BACKEND" == goose ]]; then
+    if [[ "$BACKEND" == goose ]]; then
       resolve_goose_selection
     fi
     REVIEW_RECIPE=review-container
@@ -1861,17 +1852,7 @@ review-doctor:
 
     BACKEND="${TOOL:-goose}"
     require_goose_backend "$BACKEND" || fail=$((fail+1))
-    if [[ "$BACKEND" == pi ]]; then
-      echo "=== Agent backend (Pi) ==="
-      if [[ -n "${PI_API_KEY:-}" ]]; then
-        echo "  ✓ pi: selected; image verifies the installed binary and the credential is available (not shown)"
-        pass=$((pass+1))
-      else
-        echo "  ✗ pi: selected, but PI_API_KEY is missing"
-        echo "    Export PI_API_KEY before running TOOL=pi just review-container."
-        fail=$((fail+1))
-      fi
-    else
+    if [[ "$BACKEND" != codex ]]; then
       echo "=== Agent backend (Goose) ==="
       if ! require_copilot_provider; then
         fail=$((fail+1))

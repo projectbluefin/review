@@ -41,7 +41,6 @@ done
 require_text 'BLUEFIN_REVIEW_BACKEND=codex just review-queue'
 require_text 'TOOL=goose'
 require_text 'TOOL=codex'
-require_text 'TOOL=pi'
 require_text 'REVIEW_DETACH=1'
 require_text 'just review-stop'
 
