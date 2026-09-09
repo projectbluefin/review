@@ -20,7 +20,9 @@ from typing import Any, Protocol
 
 
 DEFAULT_PLAN_TTL = timedelta(minutes=10)
-MAX_OPERATIONS = 32
+# A typical maintainer batch runs 5–50 items; the cap exists to bound one
+# confirmation's blast radius, not to reject the wide end of normal work.
+MAX_OPERATIONS = 64
 MAX_RECEIPT_DETAIL = 256
 _FULL_SHA = re.compile(r"[0-9a-fA-F]{40}\Z")
 _REPOSITORY = re.compile(r"[^/\s]+/[^/\s]+\Z")

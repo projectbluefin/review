@@ -1,6 +1,6 @@
 ---
 name: review-dashboard
-version: "3.0"
+version: "3.1"
 last_updated: 2026-09-09
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
@@ -19,7 +19,7 @@ metadata:
 
 # Review Dashboard
 
-`just review-queue` reads the organization's open pull requests and open issues live through paginated GraphQL searches using the shipped GitHub CLI, carrying the review, mergeability, and CI-rollup evidence each recommended action is classified from. It opens on the pull-request view; `I` reaches issues and the mixed workboard when needed. `just review-queue owner/repo` reads that repository's open pull requests and issues the same way and normalizes them into repository-qualified queue rows. The flag form `--repo` narrows the queue to one repository without disabling mixed view or issue navigation. The authenticated maintainer's own pull requests remain hidden. The dashboard distinguishes ready, empty, missing, inaccessible, malformed, and failed sources; `R` rereads whichever source is active. A source failure displays an explicit error row and status message rather than rendering an empty successful queue.
+`just review-queue` reads the organization's open pull requests and open issues live through paginated GraphQL searches using the shipped GitHub CLI, carrying the review, mergeability, and CI-rollup evidence each recommended action is classified from. It opens on the pull-request view; `I` reaches issues and the mixed workboard when needed. `just review-queue owner/repo` reads that repository's open pull requests and issues the same way and normalizes them into repository-qualified queue rows. The flag form `--repo` narrows the queue to one repository without disabling mixed view or issue navigation. Work that is out of the maintainer's hands stays out of the queue: the authenticated maintainer's own pull requests and pull requests already carrying their APPROVED or CHANGES_REQUESTED verdict are hidden, and the status line counts both ("out of my hands: N own, M reviewed by me") so a shrunken queue never reads as a dead organization. The dashboard distinguishes ready, empty, missing, inaccessible, malformed, and failed sources; `R` rereads whichever source is active. A source failure displays an explicit error row and status message rather than rendering an empty successful queue.
 
 The dashboard retains its last good live GitHub queue and read-only Hive view. Receipt-verified clean reviews, successful mutations or batch queues, and terminal landing completion request reconciliation. Requests coalesce with one bounded follow-up; there is no polling or Hive assignment/completion mutation. `R` is the explicit-read control; failed reads retain visibly aged data.
 
@@ -108,7 +108,11 @@ Verified against Context7 `/textualize/textual`:
   now (gated on `push` permission). `L` leaves a review and merges nothing.
   `$` ("slay") executes the full review weapon pipeline: reviews unreviewed PRs,
   dispatches automated fix-and-land if findings are detected, and enqueues batch
-  landing if clean. Prior reviewed identities are captured before live refresh,
+  landing if clean. Selected issues ride the same gate and dispatch an issue
+  fix agent whose deliverable is a pull request under the maintainer's own
+  account (or one evidenced finding comment) — never a merge, approval, or
+  label: review policy routes the opened pull request to another contributor.
+  Prior reviewed identities are captured before live refresh,
   and exact-head revalidation aborts landing when a pull request advances to a
   new head on GitHub, preventing stale approvals from landing unreviewed code.
 - **Mixed workboard and three-way view cycle:** The dashboard opens on pull
@@ -118,8 +122,9 @@ Verified against Context7 `/textualize/textual`:
   recent comments in context. Triage actions: `c` comments via `CommentBody`,
   `CommentPreview`, and the typed issue-number gate; `x` closes the issue with a
   triage comment behind the typed number gate; `o` opens in browser; `y` copies
-  handoff. PR actions (`r`, `v`, `m`, `u`, `a`/`A`, `L`, `$`) guard against
-  issues and apply to pull requests only.
+  handoff. PR actions (`r`, `v`, `m`, `u`, `a`/`A`, `L`) guard against
+  issues and apply to pull requests only; `$` applies to both kinds, giving
+  issues the fix-agent lane above.
 - **Keyboard reference modal on `?`**: `?` opens `HelpScreen`, a modal
   grouping navigation, review, batching, and mutations with cyan/magenta
   badges; dismisses cleanly with `?`, `q`, or `Esc`.
@@ -142,7 +147,7 @@ Verified against Context7 `/textualize/textual`:
 
 ## Batch Review and Landing
 
-Batch landings partition across independent repository lanes and execute via background agents. Evidenced review findings enable `[f] fix & land in background`. See [`landing-batches.md`](landing-batches.md) for the `[$]` state machine, landing gate, concurrency lanes, and state persistence, and [`review-scheduler.md`](review-scheduler.md) for admission, capacity, and transport reuse.
+Batch landings partition across independent repository lanes and execute via background agents. Evidenced review findings are repaired through `[$]`, which dispatches the fixer behind slay's gates; the standalone `[f]`/`[F]` fix lane is deleted — it ran the same fixer with no confirmation, no blocked-reason check, and no durable run record. See [`landing-batches.md`](landing-batches.md) for the `[$]` state machine, landing gate, concurrency lanes, and state persistence, and [`review-scheduler.md`](review-scheduler.md) for admission, capacity, and transport reuse.
 The review lane keeps separate `review-batches/` JSONL state. Resolve every exact cache hit before applying capacity, and trust a receipt only when its full run and check-scope identity matches. Review the explicit `base...head` range from a clean isolated worktree. Synchronize cancellation with submission and cache publication; a cancelled run cannot publish or delete another session's receipt. Local lanes and the Hive fleet are two separate concurrency displays and are never conflated; see [`review-monitoring.md`](review-monitoring.md).
 On the dashboard, `b` toggles the highlighted row, `B` selects or clears every visible row, `Space` toggles the highlighted row and advances, `n` jumps to the next pull request lacking the maintainer's own GitHub review, and `r` reviews the selection as a batch while retaining its selection on snapshot failure. Rows say `QUEUED` in cyan, `IN PROGRESS` in yellow, `DONE` in green, `FAILED` in red, or `BLOCKED` in yellow; failures lead the queue, followed by active, queued, ready, completed, and unroutable blocked work. A completed review remains visible until normal live reconciliation removes a merged pull request. The status bar summarizes those states and retains the three newest repository-qualified merged pull requests from landing records. `Enter` on a reviewed row reloads GitHub evidence before rendering cached analysis; CI, mergeability, reviews, and overlap are never restored from the cache.
 

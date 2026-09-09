@@ -254,8 +254,11 @@ anywhere in the head commit message, so a commit that merely writes about one
 lands with no validation and no published image, and no failed check to show
 for it. This cannot be a CI check — the message that skips CI skips the check
 that would catch it.
-ShellCheck is a CI-only manual hook because its upstream hook runs in a
-container; CI invokes it explicitly.
+ShellCheck runs as an ordinary pre-commit hook through the shellcheck-py
+wheel: the binary rides the wheel, so the hook needs no container runtime
+and no registry pull. Its container-image predecessor was pulled from
+Docker Hub anonymously on every CI run, and registry rate limiting turned
+every main validation red.
 
 ## References
 
