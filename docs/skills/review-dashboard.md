@@ -1,7 +1,7 @@
 ---
 name: review-dashboard
 version: "3.0"
-last_updated: 2026-09-08
+last_updated: 2026-09-09
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
 entry_point: docs/skills/review-dashboard.md
@@ -37,7 +37,7 @@ Do not use this for the launcher ([`launcher.md`](launcher.md)), image build ([`
 
 `image/tui/semantic_view.py` defines the pure semantic contract for the dashboard.
 `ActionID` separates verdict selection, review submission, PR mutations, and navigation.
-`COMMANDS` projects live bindings (`j/k`, `g/G`, `Ctrl-d/Ctrl-u`, `h/l`, Enter, Escape, `q`, `Ctrl-C`, `/`, `r`, `y`, `Ctrl-p`, `:`, `?`, `I`); `Tab` retains Textual's native focus traversal.
+`COMMANDS` projects live bindings (`j/k`, `g/G`, `Ctrl-d/Ctrl-u`, `h/l`, Enter, Escape, `q`, `Ctrl-C`, `/`, `r`, `y`, `Ctrl-p`, `:`, `?`, `I`, `+`, `-`, `p`); `Tab` retains Textual's native focus traversal.
 `QueueRow` and `DecisionCard` bind head SHA, CI rollup, mergeability, and findings.
 Right-hand panes scroll evidence (`h`/`l`), `e` opens decisions, and `[u]` updates clean branches.
 
@@ -52,7 +52,7 @@ Right-hand panes scroll evidence (`h`/`l`), `e` opens decisions, and `[u]` updat
 5. **Batch every action that a maintainer repeats.** Merging and updating branches take the batch selection when one exists. `A` dispatches one landing agent for the whole selection behind one proportionate gate (see "Batch landing" below).
 6. **Add behaviour to `tests/dashboard_pilot.py`**, which drives the real app through `run_test()`. Static assertions in `tests/dashboard-contract.sh` prove absence; presence is proven by pressing the key.
 7. **Completed reviews cross the `ReviewResult` contract.** Transcripts without valid JSONL findings and terminal events are `unparsable`, never clean. Keep decision cards concise and bounded raw evidence on `e`.
-8. **Keep the acting surface and activity explicit.** Shipped keys cover review, merge, branch updates, rejection, handoff, docs, and dupe cleanup; label/priority mutation are excluded. Above the queue, `AGENT ACTIVITY` shows active parent reviews, Check workers, landing agents, queued work, bounded repository-qualified rows, and freshness. Hive rows are read-only, unavailable when malformed, and never inferred. Selected rows state remote analysis in progress, local drafts, and maintainer reviews from retained live evidence with no polling.
+8. **Keep the queue, controls, and activity explicit.** The main screen has three rows: the full-width actionable item list; one review-metadata row that keeps the harness status, evidence, and context together; then a persistent queue row split between `AGENT ACTIVITY` and `LANDING QUEUE`. The landing side lists active, pending, and bounded recent terminal PRs with their agent-reported lifecycle state and model; it never requires a separate watch screen. `+` and `-` change only this dashboard session's pending-landing concurrency, while `p` pauses or resumes dispatch without interrupting active agents. `w` focuses those controls. Hive rows are read-only, unavailable when malformed, and never inferred. Selected rows state remote analysis in progress, local drafts, and maintainer reviews from retained live evidence with no polling.
 
 ## Textual Patterns
 
@@ -103,7 +103,8 @@ Verified against Context7 `/textualize/textual`:
   `[U]` selects those stops for gated `[u]`.
 - **Distinguish the merge paths.** `a` requests Hive's App-authored approval
   and applies `lgtm`. On a selection, `A` dispatches one landing agent for the
-  batch; without a selection `A` no-ops. `w` opens the batch queue. `m` squashes
+  batch; without a selection `A` no-ops. `w` focuses the persistent batch controls.
+  `m` squashes
   now (gated on `push` permission). `L` leaves a review and merges nothing.
   `$` ("slay") executes the full review weapon pipeline: reviews unreviewed PRs,
   dispatches automated fix-and-land if findings are detected, and enqueues batch
