@@ -283,10 +283,10 @@ if Static is not None:
         #state-badge {
             width: 100%; height: 1; text-align: center; margin-bottom: 1;
         }
-        #state-badge.active { color: $text-accent; background: $accent-muted; border: round $accent; }
-        #state-badge.idle, #state-badge.starting { color: $text-primary; background: $primary-muted; border: round $primary; }
-        #state-badge.warning { color: $text-warning; background: $warning-muted; border: round $warning; }
-        #state-badge.error { color: $text-error; background: $error-muted; border: round $error; }
+        #state-badge.active { color: $text-accent; background: $accent-muted; text-style: bold; }
+        #state-badge.idle, #state-badge.starting { color: $text-primary; background: $primary-muted; text-style: bold; }
+        #state-badge.warning { color: $text-warning; background: $warning-muted; text-style: bold; }
+        #state-badge.error { color: $text-error; background: $error-muted; text-style: bold; }
         #summary-sections { width: 100%; height: auto; }
         .section {
             width: 50%; height: auto; min-height: 4; padding: 0 1;
