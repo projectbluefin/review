@@ -1,0 +1,3 @@
+# One display name shared by the dashboard and attended worker companion.
+# Replace this line in a custom image; it does not change repository routing.
+Project Bluefin Review

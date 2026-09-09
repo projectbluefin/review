@@ -21,6 +21,9 @@ import sys
 sys.path.insert(0, str(ROOT / "image"))
 
 from tui import bluefin_review_tui as tui  # noqa: E402
+from tui import worker_status  # noqa: E402
+from tui.display_brand import display_brand, display_title  # noqa: E402
+import tui.display_brand as display_brand_module  # noqa: E402
 
 
 class ScreenHost(App):
@@ -68,6 +71,42 @@ def review_stop() -> tui.Stop:
 
 
 class ResponsiveTuiContractTests(unittest.TestCase):
+    def test_display_brand_is_shared_configurable_and_markup_safe(self):
+        with tempfile.TemporaryDirectory() as root:
+            missing = Path(root) / "missing-brand"
+            self.assertEqual(display_brand(missing), "Review")
+            brand_file = Path(root) / "display-brand"
+            brand_file.write_text("# custom image brand\n[ORBIT]\x1b[31m\n")
+            configured = display_brand(brand_file)
+            self.assertEqual(configured, "[ORBIT][31m")
+            self.assertEqual(
+                display_title("DASHBOARD", brand_file),
+                "[ORBIT][31m · DASHBOARD",
+            )
+            with mock.patch.object(
+                display_brand_module,
+                "display_brand",
+                return_value=configured,
+            ), mock.patch.object(
+                worker_status,
+                "display_brand",
+                return_value=configured,
+            ):
+                self.assertEqual(
+                    tui.ReviewDashboard().title,
+                    "[ORBIT][31m · DASHBOARD",
+                )
+                self.assertEqual(
+                    worker_status.WorkerStatusApp(lambda: None).title,
+                    "[ORBIT][31m · WORKER STATUS",
+                )
+                from rich.console import Console
+
+                rendered = Console().render_str(
+                    worker_status.render_brand(color=True)
+                )
+                self.assertIn("[ORBIT][31m  / WORKER STATUS", rendered.plain)
+
     def test_preferences_have_explicit_no_color_ascii_and_reduced_motion_modes(self):
         with mock.patch.dict(
             os.environ,

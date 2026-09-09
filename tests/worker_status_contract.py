@@ -157,6 +157,88 @@ class WorkerStatusContract(unittest.TestCase):
                       "Worker status", "4", "2", "<1m ago", "podman exec"):
             self.assertIn(value, rendered)
 
+    def test_render_sections_make_state_and_evidence_hierarchical(self):
+        projection = worker_status.Projection(
+            connection="online", identity="worker-7", state="working",
+            repository="projectbluefin/review", issue="151", title="Worker status",
+            actionable="4", contributors="2", freshness="unknown",
+            attach="podman exec -it review-container tmux attach -t contributor",
+        )
+        sections = worker_status.render_sections(projection, color=False)
+        self.assertEqual(
+            set(sections), {"connection", "worker", "assignment", "attach"}
+        )
+        self.assertIn("CONNECTION", sections["connection"])
+        self.assertIn("WORKER", sections["worker"])
+        self.assertIn("WORKING", sections["worker"])
+        self.assertIn("ASSIGNMENT", sections["assignment"])
+        self.assertIn("ATTACH", sections["attach"])
+        self.assertIn("unknown", sections["connection"])
+
+    def test_state_badge_does_not_equate_working_with_success(self):
+        projection = worker_status.Projection(state="working")
+        badge = worker_status.render_state_badge(projection, color=False)
+        self.assertIn("WORKING", badge)
+        self.assertNotIn("SUCCESS", badge)
+
+    def test_worker_companion_is_branded_and_bounded_at_compact_size(self):
+        if worker_status.Static is None:
+            self.skipTest("Textual is unavailable")
+
+        async def reader():
+            return {
+                "ok": True,
+                "data": {
+                    "status": {
+                        "hub": "online",
+                        "actionable_items": 4,
+                        "active_contributors": 2,
+                    },
+                    "me": {
+                        "github_username": "worker-7",
+                        "active": True,
+                        "current_task": {
+                            "repo": "projectbluefin/review",
+                            "number": 151,
+                            "title": "Worker status",
+                        },
+                    },
+                },
+            }
+
+        async def exercise():
+            app = worker_status.WorkerStatusApp(reader)
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                rendered = "\n".join(
+                    str(app.query_one(selector).render())
+                    for selector in (
+                        "#brand",
+                        "#state-badge",
+                        "#connection-section Static",
+                        "#worker-section Static",
+                        "#assignment-section Static",
+                        "#attach-section Static",
+                    )
+                )
+                self.assertIn("Project Bluefin Review", rendered)
+                self.assertIn("WORKER STATUS", rendered)
+                self.assertIn("WORKING", rendered)
+                for ident in (
+                    "#connection-section",
+                    "#worker-section",
+                    "#assignment-section",
+                    "#attach-section",
+                ):
+                    section = app.query_one(ident)
+                    self.assertGreater(section.region.height, 0)
+                    self.assertLessEqual(
+                        section.region.y + section.region.height,
+                        app.size.height,
+                    )
+
+        asyncio.run(exercise())
+
 
 if __name__ == "__main__":
     unittest.main()

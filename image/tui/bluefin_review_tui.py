@@ -82,6 +82,7 @@ from tui.review_cache import ReviewCache
 from tui.review_receipt import ReviewReceipt
 from tui.observability import ReviewObservability
 from tui.review_run import ReviewRun
+from tui.display_brand import display_title
 from tui.run_state import (
     FULL_SHA,
     IllegalRunTransition,
@@ -4019,7 +4020,7 @@ class ReviewDashboard(App):
     _current_batch_plan: action_plan.BatchActionPlan | None = None
     _batch_generation_token: int = 0
 
-    TITLE = "BLUEFIN REVIEW DASHBOARD"
+    TITLE = display_title("DASHBOARD")
     CSS = """
     #status-bar { height: 1; background: $panel; color: $text-accent; }
     #activity {
@@ -4107,6 +4108,7 @@ class ReviewDashboard(App):
         gh_client: GhClient | None = None,
     ) -> None:
         super().__init__()
+        self.title = display_title("DASHBOARD")
         self.filters = filters or QueueFilters()
         self.run_store = run_store or RunStateStore()
         self.gh_client = gh_client or default_client
@@ -6095,10 +6097,12 @@ class ReviewDashboard(App):
             compact_lines = [
                 "AGENT ACTIVITY",
                 f"reviews {parent_reviews} · checks {check_workers} · landing {len(active_landings)}",
-                active_detail,
-                f"queued {len(queued_landings)} · {self._activity_freshness()}",
+                f"{active_detail} · queued {len(queued_landings)} · {self._activity_freshness()}",
             ]
-            rendered_lines = compact_lines
+            # Keep the complete diagnostic rows in the renderable content for
+            # scrolling and existing consumers, while the five-line compact
+            # viewport leads with the active identity.
+            rendered_lines = [*compact_lines, *lines[1:], *rows]
         else:
             rendered_lines = [*lines, *rows]
         panel.update("\n".join(escape(line) for line in rendered_lines))

@@ -23,6 +23,11 @@ metadata:
 
 The dashboard retains its last good live GitHub queue and read-only Hive view. Receipt-verified clean reviews, successful mutations or batch queues, and terminal landing completion request reconciliation. Requests coalesce with one bounded follow-up; there is no polling or Hive assignment/completion mutation. `R` is the explicit-read control; failed reads retain visibly aged data.
 
+The display prefix comes from the image-owned `/opt/bluefin/config/display-brand`
+file (the source default is `Project Bluefin Review`); a missing file falls
+back to `Review`. It changes screen branding only and never changes repository
+targets or permissions.
+
 `A` confirms the selected pull requests as a landing batch and returns the
 maintainer to the live queue. `w` opens the deliberate landing view, where
 `j`/`k` select an explicit batch target, `x` stops that target's owned process

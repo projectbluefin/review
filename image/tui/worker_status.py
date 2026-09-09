@@ -12,17 +12,18 @@ from datetime import datetime, timezone
 
 try:
     from textual.app import App, ComposeResult
-    from textual.containers import Vertical
+    from textual.containers import Horizontal, Vertical, VerticalScroll
     from textual.widgets import Footer, Header, Static
 except ModuleNotFoundError:  # importable by socket-free contract tests
     App = object
     ComposeResult = object
-    Vertical = Header = Footer = Static = None
+    Horizontal = Vertical = VerticalScroll = Header = Footer = Static = None
 
 # This file is launched by path from the image entrypoint; keep the image root
 # on sys.path so the packaged `tui` siblings resolve exactly like the dashboard.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tui import hive_api
+from tui.display_brand import display_brand, display_title
 
 UNKNOWN = "unknown"
 
@@ -109,6 +110,125 @@ def render_text(projection: Projection) -> str:
     ))
 
 
+def _escape(value) -> str:
+    from rich.markup import escape
+
+    return escape(str(value))
+
+
+def _state_presentation(projection: Projection) -> tuple[str, str, str]:
+    state = str(projection.state or UNKNOWN).lower()
+    if state == "working":
+        return "●", "WORKING", "active"
+    if state == "idle":
+        return "○", "IDLE", "idle"
+    if state == "starting":
+        return "…", "STARTING", "starting"
+    if state == "disconnected":
+        return "✗", "DISCONNECTED", "error"
+    return "?", "UNKNOWN", "warning"
+
+
+def render_state_badge(projection: Projection, *, color: bool = True) -> str:
+    glyph, label, kind = _state_presentation(projection)
+    plain = f"{glyph} {label}"
+    if not color:
+        return plain
+    style = {
+        "active": "bold cyan",
+        "idle": "bold cyan",
+        "starting": "bold cyan",
+        "warning": "bold yellow",
+        "error": "bold red",
+    }[kind]
+    return f"[{style}]{_escape(plain)}[/]"
+
+
+def _connection_style(value: str) -> str:
+    lowered = str(value).lower()
+    if lowered in {"unavailable", "failed", "error", "disconnected"}:
+        return "bold red"
+    if lowered == UNKNOWN:
+        return "bold yellow"
+    return "bold cyan"
+
+
+def _freshness_style(value: str) -> str:
+    text = str(value)
+    if text == UNKNOWN or text.endswith("m ago"):
+        return "bold yellow"
+    return "cyan"
+
+
+def _section(title: str, rows: list[tuple[str, str, str]], *, color: bool) -> str:
+    if not color:
+        return "\n".join([title, *(f"{label:<14} {value}" for label, value, _ in rows)])
+    return "\n".join(
+        [
+            f"[bold cyan]{title}[/]",
+            *(
+                f"[dim]{label:<14}[/] [{style}]{_escape(value)}[/]"
+                for label, value, style in rows
+            ),
+        ]
+    )
+
+
+def render_sections(projection: Projection, *, color: bool = True) -> dict[str, str]:
+    """Render bounded, labeled sections without changing the plain projection."""
+    _, _, state_kind = _state_presentation(projection)
+    state_style = {
+        "active": "bold cyan",
+        "idle": "bold cyan",
+        "starting": "bold cyan",
+        "warning": "bold yellow",
+        "error": "bold red",
+    }[state_kind]
+    value_style = "bright_white" if color else ""
+    return {
+        "connection": _section(
+            "CONNECTION",
+            [
+                ("Hub", str(projection.connection), _connection_style(projection.connection)),
+                ("Identity", str(projection.identity), value_style),
+                ("Freshness", str(projection.freshness), _freshness_style(projection.freshness)),
+            ],
+            color=color,
+        ),
+        "worker": _section(
+            "WORKER",
+            [
+                ("State", str(projection.state).upper(), state_style),
+                ("Actionable", str(projection.actionable), value_style),
+                ("Contributors", str(projection.contributors), value_style),
+            ],
+            color=color,
+        ),
+        "assignment": _section(
+            "ASSIGNMENT",
+            [
+                ("Repository", str(projection.repository), value_style),
+                ("Issue", str(projection.issue), value_style),
+                ("Title", str(projection.title), value_style),
+            ],
+            color=color,
+        ),
+        "attach": _section(
+            "ATTACH",
+            [("Command", str(projection.attach or UNKNOWN), "cyan")],
+            color=color,
+        ),
+    }
+
+
+def render_brand(*, color: bool = True) -> str:
+    """Render configurable branding with the functional worker label separate."""
+    brand = display_brand()
+    if not color:
+        return f"{brand}  /  WORKER STATUS"
+    return f"[bold cyan]{_escape(brand)}[/]  [dim]/ WORKER STATUS[/]"
+
+
 class RefreshController:
     def __init__(self, reader, *, clock=time.monotonic, base_delay=5, max_delay=60):
         self.reader = reader
@@ -147,20 +267,70 @@ class RefreshController:
 
 if Static is not None:
     class WorkerStatusApp(App):
-        CSS = "Screen { align: center middle; } #status { width: 90%; height: auto; padding: 1 2; }"
+        TITLE = display_title("WORKER STATUS")
+        CSS = """
+        Screen { align: center middle; background: $background; }
+        Header { background: $primary; color: $text-primary; text-style: bold; }
+        #status {
+            width: 94%; max-width: 120; height: auto; max-height: 1fr;
+            padding: 1; border: heavy $primary; background: $surface;
+            overflow-y: auto;
+        }
+        #brand {
+            height: 1; text-align: center; color: $text-accent;
+            text-style: bold; border-bottom: solid $secondary; margin-bottom: 1;
+        }
+        #state-badge {
+            width: 100%; height: 1; text-align: center; margin-bottom: 1;
+        }
+        #state-badge.active { color: $text-accent; background: $accent-muted; border: round $accent; }
+        #state-badge.idle, #state-badge.starting { color: $text-primary; background: $primary-muted; border: round $primary; }
+        #state-badge.warning { color: $text-warning; background: $warning-muted; border: round $warning; }
+        #state-badge.error { color: $text-error; background: $error-muted; border: round $error; }
+        #summary-sections { width: 100%; height: auto; }
+        .section {
+            width: 50%; height: auto; min-height: 4; padding: 0 1;
+            border: round $secondary; margin-bottom: 1;
+        }
+        #assignment-section, #attach-section { width: 100%; }
+        .section Static { height: auto; }
+        .no-color #status, .no-color .section, .no-color #state-badge {
+            color: auto; background: transparent; border: none; text-style: none;
+        }
+        .no-color Header, .no-color Footer { color: auto; background: transparent; }
+        """
         BINDINGS = [("r", "refresh", "Refresh"), ("q", "quit", "Quit")]
 
         def __init__(self, reader, **kwargs):
             super().__init__(**kwargs)
+            self.title = display_title("WORKER STATUS")
             self.reader = reader
             self.controller = RefreshController(reader)
             self.projection = Projection(connection="starting", state="starting", attach=attach_command())
+            self.use_color = "NO_COLOR" not in os.environ
+            if not self.use_color:
+                self.add_class("no-color")
 
         def compose(self) -> ComposeResult:
-            yield Header()
-            with Vertical():
-                yield Static(render_text(self.projection), id="status")
-            yield Footer()
+            sections = render_sections(self.projection, color=self.use_color)
+            yield Header(show_clock=True)
+            with VerticalScroll(id="status"):
+                yield Static(render_brand(color=self.use_color), id="brand", markup=self.use_color)
+                yield Static(
+                    render_state_badge(self.projection, color=self.use_color),
+                    id="state-badge",
+                    markup=self.use_color,
+                )
+                with Horizontal(id="summary-sections"):
+                    with Vertical(id="connection-section", classes="section"):
+                        yield Static(sections["connection"], markup=self.use_color)
+                    with Vertical(id="worker-section", classes="section"):
+                        yield Static(sections["worker"], markup=self.use_color)
+                with Vertical(id="assignment-section", classes="section"):
+                    yield Static(sections["assignment"], markup=self.use_color)
+                with Vertical(id="attach-section", classes="section"):
+                    yield Static(sections["attach"], markup=self.use_color)
+            yield Footer(compact=True)
 
         def on_mount(self) -> None:
             self.set_interval(5, self.action_refresh)
@@ -179,7 +349,20 @@ if Static is not None:
             else:
                 self.projection = project_status(payload)
                 self.projection = Projection(**{**self.projection.__dict__, "attach": attach_command()})
-            self.query_one("#status", Static).update(render_text(self.projection))
+            self._render_projection()
+
+        def _render_projection(self) -> None:
+            sections = render_sections(self.projection, color=self.use_color)
+            self.query_one("#brand", Static).update(
+                render_brand(color=self.use_color)
+            )
+            badge = self.query_one("#state-badge", Static)
+            badge.update(render_state_badge(self.projection, color=self.use_color))
+            for class_name in ("active", "idle", "starting", "warning", "error"):
+                badge.remove_class(class_name)
+            badge.add_class(_state_presentation(self.projection)[2])
+            for name, content in sections.items():
+                self.query_one(f"#{name}-section Static", Static).update(content)
 
 
 def main() -> int:

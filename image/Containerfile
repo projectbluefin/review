@@ -425,6 +425,9 @@ RUN mkdir -p /opt/bluefin/goose/config /opt/bluefin/goose/data /opt/bluefin/goos
     && chown -R 1000:1000 /opt/bluefin/goose
 COPY --chown=1000:1000 image/config/goose.yaml /opt/bluefin/goose/config/config.yaml
 COPY image/config/local-agent-policy.md /opt/bluefin/local-agent-policy.md
+# The display name is image-owned branding, separate from repository and
+# permission targets. A custom image may replace this one-line setting.
+COPY --chmod=0644 image/config/display-brand /opt/bluefin/config/display-brand
 
 # The image-owned review scope: `goose review --check-scope` loads
 # .agents/REVIEW.md and .agents/checks/*.md from this out-of-tree directory,

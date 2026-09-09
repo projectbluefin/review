@@ -874,6 +874,12 @@ terminal and says so rather than looping silently without one.
 
 All configuration is read at launch.
 
+The image-owned display name is `/opt/bluefin/config/display-brand`, installed
+from `image/config/display-brand`. Custom images can replace its one nonempty
+line; the dashboard and worker companion use it only for display branding and
+fall back to `Review` when it is absent. Repository targets, permissions, and
+Hive assignments do not come from this setting.
+
 | Variable | Purpose |
 |---|---|
 | `REVIEW_CONTRIBUTOR_IMAGE` | Contributor image; defaults to `ghcr.io/projectbluefin/review:stable`. |

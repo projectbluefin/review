@@ -60,6 +60,9 @@ Goose, or image build skill documents.
    `podman exec -it <container> tmux attach -t contributor`. It never selects,
    injects, captures, or retries assignments; it never restarts or completes
    work.
+   The image-owned `/opt/bluefin/config/display-brand` file supplies the
+   display name shared by the dashboard and worker companion; a missing file
+   uses the generic `Review` fallback and does not affect routing or access.
 3. Mount only read-only Hive contributor configuration. `review-queue` gets
    an optional TLS `HIVE_HUB` URL, mounts
    `${XDG_STATE_HOME:-~/.local/state}/bluefin-review` with shared `rw,z`, and
