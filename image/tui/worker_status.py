@@ -273,15 +273,15 @@ if Static is not None:
         Header { background: $primary; color: $text-primary; text-style: bold; }
         #status {
             width: 94%; max-width: 120; height: auto; max-height: 1fr;
-            padding: 1; border: heavy $primary; background: $surface;
+            padding: 0 1; border: heavy $primary; background: $surface;
             overflow-y: auto;
         }
         #brand {
             height: 1; text-align: center; color: $text-accent;
-            text-style: bold; border-bottom: solid $secondary; margin-bottom: 1;
+            text-style: bold;
         }
         #state-badge {
-            width: 100%; height: 1; text-align: center; margin-bottom: 1;
+            width: 100%; height: 1; text-align: center;
         }
         #state-badge.active { color: $text-accent; background: $accent-muted; text-style: bold; }
         #state-badge.idle, #state-badge.starting { color: $text-primary; background: $primary-muted; text-style: bold; }
@@ -290,7 +290,7 @@ if Static is not None:
         #summary-sections { width: 100%; height: auto; }
         .section {
             width: 50%; height: auto; min-height: 4; padding: 0 1;
-            border: round $secondary; margin-bottom: 1;
+            border: round $secondary;
         }
         #assignment-section, #attach-section { width: 100%; }
         .section Static { height: auto; }

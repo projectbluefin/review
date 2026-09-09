@@ -240,6 +240,19 @@ class WorkerStatusContract(unittest.TestCase):
                         section.region.y + section.region.height,
                         app.size.height,
                     )
+                attach = app.query_one("#attach-section")
+                self.assertLessEqual(
+                    attach.region.y + attach.region.height,
+                    app.size.height - 1,
+                )
+                attach_text = "\n".join(
+                    "".join(
+                        segment.text
+                        for segment in app.query_one("#attach-section Static").render_line(row)
+                    )
+                    for row in range(app.query_one("#attach-section Static").region.height)
+                )
+                self.assertIn("podman exec", attach_text)
 
         asyncio.run(exercise())
 
