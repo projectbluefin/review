@@ -32,7 +32,8 @@ elapsed time, and evidence age; it does not invent an ETA.
 The waiting count covers only explicit CI or publication waits; a pull request
 without a report is shown as `? unreported` rather than being counted as
 waiting. The landing viewer keeps only its batch controls visible in the
-footer so the key labels remain readable at 120 columns.
+clickable footer so the key labels remain readable at 120 columns; the CI
+failure hint likewise keeps its literal `i` and `Esc` controls.
 
 ## When to Use
 

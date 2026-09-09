@@ -257,16 +257,32 @@ class ResponsiveTuiContractTests(unittest.TestCase):
             "footer fixture",
         )
         with tempfile.TemporaryDirectory() as root:
-            status = Path(root) / "footer.jsonl"
+            status = Path(root) / "footer-one.jsonl"
             status.write_text(json.dumps({"pr": stop.key, "state": "waiting"}) + "\n")
-            task = tui.landing.LandingTask(
+            first = tui.landing.LandingTask(
                 "footer",
                 [stop],
                 "reviewer",
                 status_path=str(status),
             )
+            second_stop = tui.Stop(
+                "projectbluefin/review",
+                428,
+                "review",
+                "second footer fixture",
+            )
+            second_status = Path(root) / "footer-two.jsonl"
+            second_status.write_text(
+                json.dumps({"pr": second_stop.key, "state": "waiting"}) + "\n"
+            )
+            second = tui.landing.LandingTask(
+                "footer-two",
+                [second_stop],
+                "reviewer",
+                status_path=str(second_status),
+            )
             dashboard = SimpleNamespace(
-                landing_queue=[task],
+                landing_queue=[first, second],
                 hive_state="ready",
                 _landing_task_active=lambda _task: False,
             )
@@ -275,16 +291,50 @@ class ResponsiveTuiContractTests(unittest.TestCase):
             async def exercise():
                 async with ScreenHost(screen).run_test(size=(120, 40)) as pilot:
                     await pilot.pause()
-                    footer = screen.query_one("#landing-keys", tui.Static)
-                    visible = "".join(
-                        segment.text for segment in footer.render_line(0)
+                    footer = screen.query_one("#landing-keys", tui.LandingFooter)
+                    footer_keys = list(footer.children)
+                    visible = " ".join(
+                        str(child.render()) for child in footer_keys
                     )
-                    self.assertIn("j/k batch", visible)
+                    self.assertIn("j next", visible)
+                    self.assertIn("k previous", visible)
                     self.assertIn("x stop", visible)
                     self.assertIn("^p palette", visible)
                     self.assertNotIn("last item", visible)
+                    previous = next(
+                        child
+                        for child in footer_keys
+                        if child.action == "previous_batch"
+                    )
+                    self.assertTrue(await pilot.click(previous))
+                    await pilot.pause()
+                    self.assertIs(screen._selected_task(), first)
+                    status = str(screen.query_one("#landing-status").render())
+                    self.assertIn("[x] stop", status)
+                    self.assertIn("[esc] back", status)
+                    self.assertIn("evidence age unknown", status)
 
             asyncio.run(exercise())
+
+    def test_ci_failure_hint_keeps_literal_control_labels(self):
+        evidence = {
+            "repository": "projectbluefin/review",
+            "pull_request": 7,
+            "head_sha": "b" * 40,
+            "check": "unit",
+            "run_id": 7,
+            "conclusion": "FAILURE",
+        }
+        screen = tui.CIFailureScreen(review_stop(), evidence)
+
+        async def exercise():
+            async with ScreenHost(screen).run_test(size=(120, 40)) as pilot:
+                await pilot.pause()
+                state = str(screen.query_one("#ci-log-state").render())
+                self.assertIn("[i] load", state)
+                self.assertIn("[esc] back", state)
+
+        asyncio.run(exercise())
 
     def test_dispatch_feedback_stays_in_status_instead_of_covering_context(self):
         stop = tui.Stop(

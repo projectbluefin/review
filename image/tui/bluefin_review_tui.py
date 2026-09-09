@@ -54,6 +54,7 @@ from textual.widgets import (
     Select,
     TextArea,
 )
+from textual.widgets._footer import FooterKey
 try:
     from textual.worker import get_current_worker
 except ModuleNotFoundError:  # minimal non-Textual import contracts
@@ -1948,6 +1949,38 @@ def batch_bar_style(state: str) -> str:
     return ui_style("bold $text-error on $error-muted")
 
 
+class LandingFooter(Footer):
+    """Clickable landing controls sized for the landing screen only."""
+
+    _CONTROLS = (
+        ("escape", "esc/q", "back"),
+        ("j", "j", "next"),
+        ("k", "k", "previous"),
+        ("x", "x", "stop"),
+        ("ctrl+p", "^p", "palette"),
+        ("ctrl+q", "^q", "quit"),
+    )
+
+    def compose(self) -> ComposeResult:
+        if not self._bindings_ready:
+            return
+        active = self.screen.active_bindings
+        for key, key_display, description in self._CONTROLS:
+            try:
+                _node, binding, enabled, tooltip = active[key]
+            except KeyError:
+                continue
+            yield FooterKey(
+                key,
+                key_display,
+                description,
+                binding.action,
+                disabled=not enabled,
+                tooltip=tooltip or binding.description,
+                classes="-grouped",
+            ).data_bind(compact=Footer.compact)
+
+
 class LandingScreen(Screen):
     """The live batch queue: every dispatched batch, its agent, the per-PR
     state the agent reports, and what Hive is doing alongside.
@@ -2044,10 +2077,10 @@ class LandingScreen(Screen):
             max_lines=200,
             id="landing-log",
         )
-        yield Static(
-            " esc/q back  j/k batch  x stop  ^p palette  ^q quit",
+        yield LandingFooter(
             id="landing-keys",
-            markup=False,
+            compact=True,
+            show_command_palette=False,
         )
 
     def on_mount(self) -> None:
@@ -2784,6 +2817,7 @@ class CIFailureScreen(ModalScreen[None]):
             yield Static(
                 "logs: not loaded · untrusted · [i] load · [esc] back",
                 id="ci-log-state",
+                markup=False,
             )
             yield RichLog(highlight=False, markup=False, wrap=True, id="ci-log")
             yield Footer()
@@ -6709,7 +6743,9 @@ class ReviewDashboard(App):
                     )
                 )
                 if failure.get("run_id"):
-                    lines_ci.append("  [i] inspect logs on demand · logs are untrusted")
+                    lines_ci.append(
+                        "  " + escape("[i] inspect logs on demand · logs are untrusted")
+                    )
             ci_triage_block = "\n" + "\n".join(lines_ci)
 
         self.query_one("#details", Static).update(
