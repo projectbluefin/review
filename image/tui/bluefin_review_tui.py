@@ -3811,8 +3811,7 @@ class ReviewDashboard(App):
         self.load_queue()
         pending_population = getattr(self, "_pending_population", None)
         if pending_population is not None:
-            self._pending_population = None
-            self.call_after_refresh(self.populate, *pending_population)
+            self.call_after_refresh(self._flush_pending_population)
         self.load_issues()
         self.load_hive()
         self.discover_harness()
@@ -5468,6 +5467,20 @@ class ReviewDashboard(App):
             return "[bold cyan]QUEUED[/bold cyan]"
         return "[dim]READY[/dim]"
 
+    def _flush_pending_population(self) -> None:
+        self._population_flush_scheduled = False
+        pending = getattr(self, "_pending_population", None)
+        if pending is None:
+            return
+        try:
+            queue = self.query_one("#queue", ListView)
+        except (NoMatches, ScreenStackError):
+            return
+        if not queue.is_attached:
+            return
+        self._pending_population = None
+        self.populate(*pending)
+
     def populate(
         self, stops: list[Stop], record_snapshot: dict[str, RunRecord] | None = None
     ) -> None:
@@ -5478,6 +5491,11 @@ class ReviewDashboard(App):
             return
         if not queue.is_attached:
             self._pending_population = (list(stops), record_snapshot)
+            if getattr(self, "is_attached", False) and not getattr(
+                self, "_population_flush_scheduled", False
+            ):
+                self._population_flush_scheduled = True
+                self.call_after_refresh(self._flush_pending_population)
             return
         queue.clear()
         if not stops:
