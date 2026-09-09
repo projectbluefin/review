@@ -53,6 +53,9 @@ that work.
    Remove obsolete records rather than preserving them as live guidance.
 6. Record only reusable, source-backed learnings. A command, API behavior, or
    configuration fact belongs in a skill only when its source can be verified.
+7. Treat session history, issue reports, and prior agent output as leads, not
+   repository facts. Verify a project-specific claim in the current launcher,
+   image, test, workflow, or local contract before recording it.
 
 When a human must intervene to restart continuation or correct scheduling,
 classify the control failure; record the durable transition in the relevant

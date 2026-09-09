@@ -15,10 +15,10 @@
 #                     worker that receives assigned tasks and donates
 #                     inference. Takes an optional model profile and
 #                     thinking effort, e.g. 'just review-container sol
-#                     medium'. Foreground when attended; REVIEW_DETACH=1
-#                     runs it as a labeled detached worker.
-#   review-stop       Stop a detached worker. Refuses attended runs and
-#                     containers this launcher did not start.
+#                     medium'. Contributor containers run in the
+#                     foreground; Ctrl-C stops them.
+#   review-stop       Stop cluster contributor workers. Refuses attended
+#                     runs and containers this launcher did not start.
 #   review-doctor     Preflight diagnostics. Starts no agent and mounts no
 #                     credential.
 #   review-queue      The interactive maintainer review surface: a
@@ -36,16 +36,14 @@
 # ─────────────────────────────────────────────────────────────────────────
 # LIFECYCLE
 #
-# The interactive recipes run in the foreground of the terminal that
-# launched them: a maintainer steers the session, and Ctrl-C stops it.
-# Cleanup of interactive runs is a startup concern: a launch reclaims
-# whatever a previous run left behind, so there is no lifecycle verb for
-# them.
+# Contributor and maintainer container runs execute in the foreground of the
+# terminal that launched them: a maintainer steers the session, and Ctrl-C
+# stops it. Detached contributor containers are not supported; cleanup of
+# interactive runs is a startup concern, so a launch reclaims whatever an
+# interrupted previous run left behind.
 #
-# The detached worker is the one permitted background launch. REVIEW_DETACH=1
-# stamps the container with the 'review.owner=detached' label; a later launch
-# refuses to reclaim it, and 'just review-stop' — a polite podman stop, never
-# a force flag — is its only lifecycle verb.
+# Cluster workers run in Kubernetes and are stopped with 'just review-stop'
+# (or 'just review-stop cluster').
 #
 # '--replace' is how interactive reclaim works: --rm removes the container
 # when it exits cleanly, but a hard-killed terminal, an OOM kill or a podman
@@ -55,8 +53,8 @@
 # lifecycle command.
 #
 # Every interactive launch path ends in an 'exec' or a final foreground
-# command whose exit status propagates verbatim; the detached path is an
-# explicit, labeled podman run -d. tests/just-onboarding.sh pins all of it.
+# command whose exit status propagates verbatim; tests/just-onboarding.sh
+# pins all of it.
 # ─────────────────────────────────────────────────────────────────────────
 #
 # Bluefin's root Justfile (/usr/share/ublue-os/just/00-entry.just) imports a
@@ -80,7 +78,7 @@ tool_env := env("TOOL", "")
 hive_repo_url := "https://github.com/hivecommons/hive"
 # origin/v4 via `git ls-remote --heads https://github.com/hivecommons/hive v4`
 # on 2026-09-06.
-hive_commit := "11bee81280861d03416a0c6278da35c9778cbdee"
+hive_commit := "c7a88b8518abf1163e13803b2094f2262605490b"
 gemini_model := "gemini-3.8-flash"
 # Contributor runs are automated in practice — Hive keeps feeding the session —
 # so a large window is money spent on context nobody reads. Opus and Kimi are
@@ -266,28 +264,19 @@ owner_run_label() {
   printf 'review.owner=%s:%s\n' "$(launcher_boot_id)" "$$"
 }
 require_no_running_instance() {
-  # 'Running' alone does not mean 'in use'. Distinguish three cases,
+  # 'Running' alone does not mean 'in use'. Distinguish two cases,
   # because they deserve different treatment:
   #
   #   owned    -- somebody is working in that terminal right now. Never touch
   #               it; hand over the attach command instead.
-  #   detached -- a deliberate background worker. Never reclaim it silently;
-  #               'just review-stop' is its lifecycle verb.
   #   orphan   -- still running, but its terminal is gone, so no one can ever
   #               reach it or Ctrl-C it again. Reclaim it silently.
   #
   # Telling a user to run 'podman rm -f' for the orphan case would smuggle
   # an undocumented stop command back in; the launcher cleans up after itself
-  # instead, and the detached case has its own explicit verb.
-  local name="$1" marker owner_pid owner_tty
+  # instead.
+  local name="$1" owner_pid owner_tty
   [[ "$(podman inspect --format '{{.State.Running}}' "$name" 2>/dev/null || echo false)" == "true" ]] || return 0
-  marker="$(podman inspect --format '{{index .Config.Labels "review.owner"}}' "$name" 2>/dev/null || true)"
-  if [[ "$marker" == "detached" ]]; then
-    echo "ERROR: ${name} is already running as a detached worker." >&2
-    echo "  Follow it:  podman logs -f ${name}" >&2
-    echo "  Stop it:    just review-stop ${name}" >&2
-    return 1
-  fi
   owner_pid="$(container_owner_pid "$name")"
   if [[ -z "$owner_pid" ]]; then
     cleanup_codex_auth_staging_dir "$(podman inspect --format '{{index .Config.Labels "review.codex-auth"}}' "$name" 2>/dev/null || true)"
@@ -569,23 +558,23 @@ cleanup_codex_auth_staging_dir() {
   rm -f -- "${staging_dir}/auth.json"
   rmdir -- "$staging_dir" 2>/dev/null || true
 }
-podman_default_connection_uri() {
+podman_selected_connection() {
   # Podman resolves its target engine in this order: CONTAINER_HOST wins
   # outright, CONTAINER_CONNECTION names a saved connection, and otherwise
   # whichever connection is marked default applies. Mirror that order so the
-  # check below sees exactly the engine 'podman run' itself would use.
+  # queue guard and remote credential staging see the engine 'podman run' uses.
   if [[ -n "${CONTAINER_HOST:-}" ]]; then
-    printf '%s\n' "$CONTAINER_HOST"
+    printf '%s\t\n' "$CONTAINER_HOST"
     return 0
   fi
   local list
-  if ! list="$(podman system connection list --format '{{.Name}}\t{{.URI}}\t{{.Default}}' 2>/dev/null)"; then
+  if ! list="$(podman system connection list --format '{{.Name}}\t{{.URI}}\t{{.Identity}}\t{{.Default}}' 2>/dev/null)"; then
     echo "ERROR: could not resolve Podman connections." >&2
     return 1
   fi
   if [[ -n "${CONTAINER_CONNECTION:-}" ]]; then
     local selected
-    selected="$(awk -F'\t' -v n="$CONTAINER_CONNECTION" '$1==n{print $2; exit}' <<<"$list")"
+    selected="$(awk -F'\t' -v n="$CONTAINER_CONNECTION" '$1==n{printf "%s\t%s\n", $2, $3; exit}' <<<"$list")"
     if [[ -z "$selected" ]]; then
       echo "ERROR: could not resolve selected Podman connection '${CONTAINER_CONNECTION}'." >&2
       return 1
@@ -593,7 +582,13 @@ podman_default_connection_uri() {
     printf '%s\n' "$selected"
     return 0
   fi
-  awk -F'\t' '$3=="true"{print $2; exit}' <<<"$list"
+  awk -F'\t' '$4=="true"{printf "%s\t%s\n", $2, $3; exit}' <<<"$list"
+}
+podman_default_connection_uri() {
+  local selected uri
+  selected="$(podman_selected_connection)" || return 1
+  IFS=$'\t' read -r uri _ <<<"$selected"
+  printf '%s\n' "$uri"
   return 0
 }
 podman_redacted_uri() {
@@ -870,6 +865,78 @@ ensure_hive_contributor_env() {
   HIVE_SKIP_VERSION_CHECK=true just --working-directory "$HIVE_SRC_DIR" --justfile "$HIVE_SRC_DIR/Justfile" contribute-setup goose
   [[ -f "$HIVE_CONTRIBUTOR_ENV" ]] || { echo "ERROR: contribute-setup ran but ${HIVE_CONTRIBUTOR_ENV} still missing." >&2; return 1; }
   echo "✓ Upstream contribute-setup complete."
+}
+stage_hive_registration_for_remote_podman() {
+  # Podman remote resolves bind mounts on its engine host, not the client.
+  # Mirror only the selected 0600 Hive registration when Podman targets an
+  # SSH engine, staging to an isolated private 0700
+  # directory and removing only that path on exit.
+  local selected_connection uri identity authority target port remote_dir remote_env
+  selected_connection="$(podman_selected_connection)" || return 1
+  [[ -n "$selected_connection" ]] || return 0
+  IFS=$'\t' read -r uri identity <<<"$selected_connection"
+  [[ "$uri" == ssh://* ]] || return 0
+  authority="${uri#ssh://}"
+  authority="${authority%%/*}"
+  [[ "$authority" =~ ^(([^@/]+)@)?(\[[^]]+\]|[^:]+)(:([0-9]+))?$ ]] || {
+    echo "ERROR: configured Podman SSH connection has an invalid host." >&2
+    return 1
+  }
+  target="${BASH_REMATCH[1]}${BASH_REMATCH[3]}"
+  port="${BASH_REMATCH[5]:-22}"
+  local -a ssh_args scp_args
+  ssh_args=(-o BatchMode=yes)
+  scp_args=(-o BatchMode=yes)
+  if [[ -n "$identity" ]]; then
+    ssh_args+=(-i "$identity")
+    scp_args+=(-i "$identity")
+  fi
+  if [[ "$port" != 22 ]]; then
+    ssh_args+=(-p "$port")
+    scp_args+=(-P "$port")
+  fi
+  remote_dir="$(ssh "${ssh_args[@]}" "$target" 'umask 077; mktemp -d /tmp/review-hive-registration.XXXXXX')" || {
+    echo "ERROR: cannot prepare the remote Podman Hive registration directory." >&2
+    return 1
+  }
+  [[ "$remote_dir" =~ ^/tmp/review-hive-registration\.[[:alnum:]]{6}$ ]] || {
+    echo "ERROR: remote Podman Hive registration directory is invalid." >&2
+    return 1
+  }
+  REMOTE_HIVE_TARGET="$target"
+  REMOTE_HIVE_SSH_ARGS=("${ssh_args[@]}")
+  REMOTE_HIVE_DIR="$remote_dir"
+  remote_env="${remote_dir}/${HIVE_CONTRIBUTOR_ENV##*/}"
+  REMOTE_HIVE_ENV="$remote_env"
+  scp "${scp_args[@]}" -p "$HIVE_CONTRIBUTOR_ENV" "${target}:${remote_env}" || {
+    echo "ERROR: cannot stage the Hive registration on the remote Podman engine." >&2
+    return 1
+  }
+  ssh "${ssh_args[@]}" "$target" "chmod 0600 $remote_env" || {
+    echo "ERROR: cannot secure the staged Hive registration on the remote Podman engine." >&2
+    return 1
+  }
+  HIVE_CONTRIBUTOR_ENV="$remote_env"
+  echo "✓ Hive contributor registration staged on remote Podman engine (0600, removed on exit; endpoint and secret not shown)."
+}
+cleanup_remote_hive_registration() {
+  local target="${REMOTE_HIVE_TARGET:-}"
+  local remote_dir="${REMOTE_HIVE_DIR:-}"
+  local remote_env="${REMOTE_HIVE_ENV:-}"
+  [[ -n "$target" && -n "$remote_dir" ]] || return 0
+  [[ "$remote_dir" =~ ^/tmp/review-hive-registration\.[[:alnum:]]{6}$ ]] || return 0
+  local cleanup_cmd
+  if [[ -n "$remote_env" ]]; then
+    [[ "$remote_env" =~ ^${remote_dir}/[a-zA-Z0-9_.-]+$ ]] || return 0
+    cleanup_cmd="rm -f -- $remote_env; rmdir -- $remote_dir"
+  else
+    cleanup_cmd="rmdir -- $remote_dir"
+  fi
+  ssh "${REMOTE_HIVE_SSH_ARGS[@]}" "$target" "$cleanup_cmd" 2>/dev/null || true
+  REMOTE_HIVE_TARGET=""
+  REMOTE_HIVE_DIR=""
+  REMOTE_HIVE_ENV=""
+  REMOTE_HIVE_SSH_ARGS=()
 }
 report_hive_selection() {
   # Say out loud which hive this launch contributes to. A silent default is
@@ -1278,6 +1345,10 @@ review-container profile="" effort="":
       echo "  Install Podman, then re-run review-container." >&2
       exit 1
     }
+    [[ -z "${REVIEW_DETACH:-}" ]] || {
+      echo "ERROR: detached contributor containers are not supported." >&2
+      exit 1
+    }
 
     STATE_DIR="${HOME}/.local/state/review"
     HIVE_SRC_DIR="${STATE_DIR}/hive-src"
@@ -1325,28 +1396,22 @@ review-container profile="" effort="":
     REVIEW_RECIPE=review-container
     ensure_hive_contributor_env
     report_hive_selection
+    REMOTE_HIVE_TARGET=""
+    REMOTE_HIVE_DIR=""
+    REMOTE_HIVE_ENV=""
+    REMOTE_HIVE_SSH_ARGS=()
+    CODEX_AUTH_STAGING_DIR=""
+    trap 'cleanup_remote_hive_registration; cleanup_codex_auth_file' EXIT
+    stage_hive_registration_for_remote_podman
 
     CONTRIBUTOR_IMAGE="{{contributor_image}}"
     require_no_running_instance "$CONTAINER_NAME"
     ensure_contributor_image "$CONTRIBUTOR_IMAGE"
 
-    # REVIEW_DETACH=1 runs the worker as a deliberate background container:
-    # no terminal, entrypoint follows the agent without attaching, logs
-    # through podman, and 'just review-stop' is the explicit lifecycle verb.
-    # The 'detached' owner label is what separates this from an orphan, so a
-    # later launch refuses to reclaim it silently.
-    DETACH="${REVIEW_DETACH:-0}"
-    if [[ "$DETACH" == 1 ]]; then
-      CONTAINER_ARGS=(
-        podman run --rm --detach --replace --name "$CONTAINER_NAME"
-        --label "review.owner=detached"
-      )
-    else
-      CONTAINER_ARGS=(
-        podman run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
-        --label "$(owner_run_label)"
-      )
-    fi
+    CONTAINER_ARGS=(
+      podman run --rm --interactive --tty --replace --name "$CONTAINER_NAME"
+      --label "$(owner_run_label)"
+    )
     CONTAINER_ARGS+=(
       # Rootless podman maps the host user to container root by default, so a
       # 0600 host file bind-mounts in as root-owned and the 'dev' user the
@@ -1397,13 +1462,8 @@ review-container profile="" effort="":
       CONTAINER_ARGS+=(--env ANTHROPIC_API_KEY)
       echo "✓ Pi credential passed to the agent (value not shown)."
     fi
-    CODEX_AUTH_STAGING_DIR=""
-    trap cleanup_codex_auth_file EXIT
     if [[ "$BACKEND" == codex ]]; then
       stage_codex_auth_file
-      if [[ "$DETACH" == 1 ]]; then
-        CONTAINER_ARGS+=(--label "review.codex-auth=${CODEX_AUTH_STAGING_DIR}")
-      fi
       CONTAINER_ARGS+=(--volume "$CODEX_AUTH_FILE:/home/dev/.codex/auth.json:rw,z")
       echo "✓ Codex subscription login staged as one private file (contents not shown; host cache not mounted)."
     fi
@@ -1417,76 +1477,50 @@ review-container profile="" effort="":
     fi
     CONTAINER_ARGS+=("$CONTRIBUTOR_IMAGE")
 
-    if [[ "$DETACH" == 1 ]]; then
-      echo "✓ starting the review contributor worker (detached)."
-      echo "  Follow it:  podman logs -f ${CONTAINER_NAME}"
-      echo "  Stop it:    just review-stop ${CONTAINER_NAME}"
-    else
-      echo "✓ starting the review contributor container."
-      echo "  The entrypoint attaches to the 'contributor' tmux session for you."
-      echo "  From a second terminal: podman exec -it ${CONTAINER_NAME} tmux attach -t contributor"
-      echo "  Stop any time with Ctrl-C."
-    fi
-    if [[ "$BACKEND" == codex ]]; then
-      if "${CONTAINER_ARGS[@]}"; then
-        status=0
-      else
-        status=$?
-        cleanup_codex_auth_file
-      fi
-      if [[ "$DETACH" == 1 && "$status" == 0 ]]; then
-        trap - EXIT
-      else
-        cleanup_codex_auth_file
-      fi
-      exit "$status"
-    fi
-    exec "${CONTAINER_ARGS[@]}"
+    echo "✓ starting the review contributor container."
+    echo "  The entrypoint attaches to the 'contributor' tmux session for you."
+    echo "  From a second terminal: podman exec -it ${CONTAINER_NAME} tmux attach -t contributor"
+    echo "  Stop any time with Ctrl-C."
+    status=0
+    "${CONTAINER_ARGS[@]}" || status=$?
+    exit "$status"
 
-# Start an unattended contributor worker. The existing launcher owns all
-# credential checks and lifecycle behavior; this selects its explicit
-# detached path so the worker survives the launching terminal.
-[doc("Start an unattended Hive contributor worker; local runs detach by default.")]
+# The contributor entrypoint deliberately reuses review-container so the
+# credential handoff and foreground lifecycle stay identical.
+[doc("Start a foreground Hive contributor worker.")]
 contribute profile="" effort="":
     #!/usr/bin/env bash
     set -euo pipefail
-    REVIEW_DETACH=1 just review-container "{{profile}}" "{{effort}}"
+    just review-container "{{profile}}" "{{effort}}"
 
-# Stop a detached review worker. This is the explicit lifecycle verb for
-# containers started with REVIEW_DETACH=1; it refuses to touch anything this
-# launcher did not start (no review.owner label) and never force-removes.
-# Interactive runs still end with Ctrl-C, not with this.
-[doc("Stop a detached contributor worker. Refuses attended runs and foreign containers.")]
-review-stop name="review-container":
+# Stop cluster contributor workers. This is the explicit lifecycle verb for
+# cluster workers; it refuses attended local runs (which end with Ctrl-C in
+# their terminal) and containers this launcher did not start.
+[doc("Stop cluster contributor workers.")]
+review-stop target="cluster":
     #!/usr/bin/env bash
     set -euo pipefail
     {{shared_functions}}
-    NAME="{{name}}"
-    if [[ "$NAME" == "cluster" ]]; then
+    TARGET="{{target}}"
+    if [[ "$TARGET" == "cluster" ]]; then
       stop_cluster_contributors
       exit 0
     fi
-    [[ "$NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || {
-      echo "ERROR: '${NAME}' is not a valid container name." >&2
+    [[ "$TARGET" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || {
+      echo "ERROR: '${TARGET}' is not a valid container name." >&2
       exit 1
     }
-    marker="$(podman inspect --format '{{{{index .Config.Labels "review.owner"}}' "$NAME" 2>/dev/null || true)"
+    marker="$(podman inspect --format '{{{{index .Config.Labels "review.owner"}}' "$TARGET" 2>/dev/null || true)"
     if [[ -z "$marker" ]]; then
-      if podman container exists "$NAME" 2>/dev/null; then
-        echo "ERROR: ${NAME} was not started by this launcher; not touching it." >&2
+      if podman container exists "$TARGET" 2>/dev/null; then
+        echo "ERROR: ${TARGET} was not started by this launcher; not touching it." >&2
         exit 1
       fi
-      echo "✓ no container named ${NAME} is running."
+      echo "✓ no container named ${TARGET} is running."
       exit 0
     fi
-    if [[ "$marker" != "detached" ]]; then
-      echo "ERROR: ${NAME} is an attended run; press Ctrl-C in its terminal instead." >&2
-      exit 1
-    fi
-    codex_auth_staging_dir="$(podman inspect --format '{{{{index .Config.Labels "review.codex-auth"}}' "$NAME" 2>/dev/null || true)"
-    podman stop "$NAME" >/dev/null
-    cleanup_codex_auth_staging_dir "$codex_auth_staging_dir"
-    echo "✓ stopped the detached worker ${NAME}."
+    echo "ERROR: ${TARGET} is an attended run; press Ctrl-C in its terminal instead." >&2
+    exit 1
 
 # The maintainer review dashboard over the Bluefin PR queue.
 # The container runs the dashboard instead of the contributor agent, so no
