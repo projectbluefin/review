@@ -311,6 +311,28 @@ class ResponsiveTuiContractTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_desktop_queue_allocates_room_for_identity_and_action(self):
+        async def exercise():
+            app = tui.ReviewDashboard()
+            app.load_queue = lambda: None
+            app.load_hive = lambda: None
+            app.discover_harness = lambda: None
+            async with app.run_test(size=(180, 52)) as pilot:
+                stop = tui.Stop(
+                    "projectbluefin/review",
+                    101,
+                    "review",
+                    "fix: desktop identity and action",
+                    check_state="success",
+                    live={"headRefOid": "1" * 40},
+                )
+                app.stops = [stop]
+                app.populate(app.stops)
+                await pilot.pause()
+                self.assertGreaterEqual(app.query_one("#queue-pane").size.width, 92)
+
+        asyncio.run(exercise())
+
     def test_editor_and_confirmation_keep_back_keys_and_input_isolated(self):
         async def exercise():
             root = ScreenHost(tui.ReviewBody(review_stop(), "comment"))

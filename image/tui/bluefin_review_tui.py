@@ -4299,10 +4299,11 @@ class ReviewDashboard(App):
         except NoMatches:
             return
         narrow = width <= 100
+        wide = width >= 160
         main.styles.layout = "vertical" if narrow else "horizontal"
-        queue.styles.width = "100%" if narrow else "45%"
+        queue.styles.width = "100%" if narrow else ("55%" if wide else "45%")
         queue.styles.height = "45%" if narrow else "1fr"
-        right.styles.width = "100%" if narrow else "55%"
+        right.styles.width = "100%" if narrow else ("45%" if wide else "55%")
         right.styles.height = "55%" if narrow else "1fr"
         context.styles.display = "none" if narrow else "block"
         activity.styles.height = 5 if narrow else "auto"
