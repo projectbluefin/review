@@ -33,10 +33,6 @@ gh auth login --web --hostname github.com --scopes repo,read:org
 just review-doctor
 ```
 
-The doctor defaults to the Goose worker checks; for a Pi worker, export
-`PI_API_KEY` first, then use
-`TOOL=pi just review-doctor`.
-
 GitHub authentication is separate from model-provider authentication. `gh auth
 login` supplies the GitHub identity used for repository work; it does not
 authenticate GitHub Copilot inference.
@@ -52,7 +48,6 @@ supports today:
 | Maintainer / `review-queue` | Codex subscription | Run `codex login` with file credential storage so the current launcher can read `${CODEX_HOME:-$HOME/.codex}/auth.json`. | `BLUEFIN_REVIEW_BACKEND=codex just review-queue` |
 | Contributor / `review-container` | Goose + GitHub Copilot (default, `TOOL=goose`) | The same Goose/Copilot setup as above. A separate GitHub token is still needed for contributor Git operations. | `just review-container` |
 | Contributor / `review-container` | Codex subscription (`TOOL=codex`) | The same file-auth `auth.json` from `codex login`; explicitly selecting Codex does not require host Goose or Copilot. | `TOOL=codex just review-container` |
-| Contributor / `review-container` | Pi (`TOOL=pi`) | Set `PI_API_KEY`; the launcher passes it to the selected Pi process as its Anthropic credential. | `TOOL=pi just review-container` |
 
 Goose is fixed to GitHub Copilot here: `GOOSE_PROVIDER` may be unset or
 `github_copilot`. Contributor model profiles are defaults from the justfile:
@@ -79,9 +74,6 @@ just contribute
 
 # Hive contributor worker with Codex.
 TOOL=codex just review-container
-
-# Hive contributor worker with Pi, after PI_API_KEY is set in the shell.
-TOOL=pi just review-container
 
 # Optional Goose profile and effort.
 just review-container opus5 high
@@ -123,7 +115,7 @@ Review is the human review experience plus a Hive contributor appliance:
   to the foreground `review-queue` dashboard.
 - Hive owns task selection and assignment.
 - `BLUEFIN_REVIEW_BACKEND=codex` preselects Codex for a maintainer review; it
-  never changes the worker backend. Use `TOOL=codex` or `TOOL=pi` for workers.
+  never changes the worker backend. Use `TOOL=codex` for workers.
 
 `review` comes with Goose, the official Codex CLI, and Pi prebundled and
 passes through only the credential each selected client needs.
@@ -899,7 +891,7 @@ Hive assignments do not come from this setting.
 | `GITHUB_COPILOT_TOKEN` | Optional Copilot credential override. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Optional local Kubernetes-session countme configuration; it is staged only in the ephemeral session Secret. |
 | `OTEL_EXPORTER_OTLP_HEADERS` | Optional local countme authentication headers; they are staged only in the ephemeral session Secret. |
-| `TOOL` | Contributor agent backend selector: `goose` (default), `codex`, or `pi`. It does not select the maintainer dashboard backend. |
+| `TOOL` | Contributor agent backend selector: `goose` (default) or `codex`. It does not select the maintainer dashboard backend. |
 
 The maintainer dashboard may remember non-secret harness preferences at
 `~/.config/bluefin-review/harness.json` (or the equivalent

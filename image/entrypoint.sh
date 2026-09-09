@@ -43,21 +43,6 @@ goose)
     exit 1
   fi
   ;;
-pi)
-  command -v pi >/dev/null 2>&1 || {
-    note 'ERROR: Pi backend selected but pi is not installed.'
-    exit 1
-  }
-  pi --version >/dev/null 2>&1 || {
-    note 'ERROR: Pi backend selected but pi is not executable.'
-    exit 1
-  }
-  [ -n "${ANTHROPIC_API_KEY:-}" ] || {
-    note 'ERROR: Pi backend selected but its Anthropic credential is missing.'
-    exit 1
-  }
-  export PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0
-  ;;
 codex)
   command -v codex >/dev/null 2>&1 || {
     note 'ERROR: Codex backend selected but codex is not installed.'
