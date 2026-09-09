@@ -243,7 +243,10 @@ not claim work, assign agents, mutate labels, or run a service.
 - `podman`.
 - Goose configured for GitHub Copilot (`goose configure`), or
   `GITHUB_COPILOT_TOKEN`, for contributor work and Goose reviews. The
-  `GOOSE_PROVIDER` value must be unset or `github_copilot`.
+  `GOOSE_PROVIDER` value must be unset or `github_copilot`. This credential is
+  load-bearing: without it every dispatched agent exits immediately with
+  "Provider is not configured", so `review-container` and `review-queue`
+  refuse to launch rather than start a session whose slays can only die.
 - `codex login` with file credential storage completed on the host for Codex
   subscription reviews. The image already contains the pinned official CLI;
   explicitly selected Codex reviews do not require host Goose or Copilot.
@@ -435,7 +438,7 @@ comment behind the typed issue-number gate, `o` opens in the browser, and `y` co
 | `Space` | toggle selection on highlighted row and advance |
 | `n` | advance to the next pull request lacking my review on GitHub |
 | `r` | **start a review with Goose** — streams live, reports COMPLETE / INCOMPLETE / FAILED |
-| `$` | **slay pull request** — review if unreviewed, fix with agent if findings exist, land in batch |
+| `$` | **slay** — for pull requests: review if unreviewed, fix with agent if findings exist, land in batch; for issues: dispatch a fix agent that opens a pull request under your account (or files an evidenced finding) |
 | `L` | leave a review on GitHub: approve, request changes, or comment (also from the review screen) |
 | `d` | docs-update agent task (tracked as #134) |
 | `o` | optional browser escape hatch |

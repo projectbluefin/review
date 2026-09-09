@@ -441,12 +441,15 @@ report_missing_copilot_credential() {
   # Named so every caller tells the same story. A `gh auth token` is the
   # tempting substitute and the reason this message exists: it looks like a
   # GitHub credential, so a contributor reasonably assumes their gh login is
-  # enough, and then the agent dies on "failed to get api info" inside a
-  # container they were not watching.
-  echo "! no Copilot credential found; the agent will ask for a device code." >&2
+  # enough — but Copilot inference rejects it, and a headless
+  # `goose run --no-session` exits immediately with "Provider is not
+  # configured". Every dispatched review, fix, or landing agent dies at
+  # startup, surfacing only as opaque died-mid-batch failures.
+  echo "ERROR: no Copilot credential found; every dispatched agent would die at startup." >&2
+  echo "  Headless 'goose run' exits immediately with 'Provider is not configured'." >&2
   echo "  A 'gh auth token' is NOT a substitute — Copilot inference rejects it." >&2
-  echo "  Log in once on this host with: goose configure" >&2
-  echo "  Or export GITHUB_COPILOT_TOKEN before launching." >&2
+  echo "  Log in once on this host with: goose configure (pick GitHub Copilot)," >&2
+  echo "  or export GITHUB_COPILOT_TOKEN before launching." >&2
   return 0
 }
 hive_contributor_backend() {
@@ -1446,7 +1449,11 @@ review-container profile="" effort="":
         CONTAINER_ARGS+=(--env GITHUB_COPILOT_TOKEN)
         echo "✓ Copilot credential passed to the agent."
       else
+        # A contributor without this credential still claims Hive assignments
+        # and fails every one at startup, booking hub-side failure cooldowns
+        # against the contributor's own standing. Refuse to launch.
         report_missing_copilot_credential
+        exit 1
       fi
     fi
     if [[ "$BACKEND" == pi ]]; then
@@ -1676,9 +1683,11 @@ review-queue *queue_args:
       CONTAINER_ARGS+=(--env "BLUEFIN_REVIEW_BACKEND=${REVIEW_BACKEND}")
       echo "✓ review backend preselected: ${REVIEW_BACKEND}; Start still requires confirmation."
     fi
-    # The Copilot credential is what powers 'r' (the Goose review of a pull
-    # request); the dashboard itself only reads GitHub, so a missing credential
-    # is a warning, not a stop.
+    # The Copilot credential powers every dispatched agent: reviews, fixers,
+    # and landings all run headless `goose run`, which exits immediately with
+    # "Provider is not configured" when the credential is absent. A dashboard
+    # that can only produce dead dispatches is broken at its one job, so a
+    # missing credential stops the launch.
     if [[ "$REVIEW_BACKEND" != codex ]]; then
       resolve_copilot_token
       if [[ -n "${COPILOT_TOKEN:-}" ]]; then
@@ -1687,6 +1696,7 @@ review-queue *queue_args:
         echo "✓ Copilot credential passed to the agent."
       else
         report_missing_copilot_credential
+        exit 1
       fi
     fi
     # Codex subscription OAuth is staged into one private file, not mounted
@@ -1877,7 +1887,8 @@ review-doctor:
         pass=$((pass+1))
       else
         echo "  ✗ no Copilot credential is available"
-        echo "    The agent will stop at 'enter code XXXX-XXXX' and wait for a human."
+        echo "    Headless 'goose run' exits immediately with 'Provider is not configured',"
+        echo "    so review-queue and review-container refuse to launch without it."
         echo "    A 'gh auth token' is NOT a substitute — Copilot inference rejects it."
         echo "    Run: goose configure (pick GitHub Copilot), or export GITHUB_COPILOT_TOKEN."
         fail=$((fail+1))

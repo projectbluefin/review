@@ -1,7 +1,7 @@
 ---
 name: review-checks
-version: "1.0"
-last_updated: 2026-09-06
+version: "1.1"
+last_updated: 2026-09-09
 id: review-checks
 one_line_purpose: Maintain the five review check subagents and Goose review scope.
 entry_point: docs/skills/review-checks.md
@@ -52,8 +52,9 @@ The review scope deploys five distinct check subagents:
    present.
 4. `--check-scope <DIR>` replaces repo-root discovery, ensuring Bluefin review
    doctrine applies cleanly without modifying the target repository checkout.
-5. In the maintainer cockpit, evidenced findings enable `[f] fix & land in
-   background` to dispatch automatic remediation.
+5. In the maintainer cockpit, evidenced findings are remediated through
+   `[$]` (slay), which dispatches the fixer behind its typed gate and
+   durable run record.
 
 ## Core Process
 

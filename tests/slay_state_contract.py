@@ -2,6 +2,7 @@
 """Contract tests for slay ($) state machine and invariants (#409, #410, #414)."""
 
 import glob
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -42,6 +43,30 @@ def _identity(number: int, head: str | None = None) -> RunIdentity:
 
 
 class SlayStateMachineContractTests(unittest.TestCase):
+    def setUp(self):
+        # Landing task creation writes prompt and status records through
+        # landing_state_dir(). Unpatched, that is the maintainer's real
+        # ${XDG_STATE_HOME}/bluefin-review/landings/ — this suite once littered
+        # it with records for fixture pull requests that do not exist.
+        scratch = Path(__file__).parents[1] / ".cache" / "slay-state-contract"
+        scratch.mkdir(parents=True, exist_ok=True)
+        self._landing_dir = tempfile.TemporaryDirectory(dir=scratch)
+        self.addCleanup(self._landing_dir.cleanup)
+        patcher = mock.patch.object(
+            tui.landing, "landing_state_dir", return_value=self._landing_dir.name
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # The dispatch preflight refuses the real headless-goose command when
+        # no Copilot credential is present. These tests never run the agent
+        # (drain_landings is stubbed), so they opt out with the same override
+        # every stubbed-agent test uses.
+        env = mock.patch.dict(
+            os.environ, {"BLUEFIN_REVIEW_LANDING_COMMAND": "/bin/true @PROMPT"}
+        )
+        env.start()
+        self.addCleanup(env.stop)
+
     def _store_dir(self):
         scratch = Path(__file__).parents[1] / ".cache" / "slay-state-contract"
         scratch.mkdir(parents=True, exist_ok=True)

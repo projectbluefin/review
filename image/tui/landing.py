@@ -69,13 +69,18 @@ PR_STATES = (
     "merged",
     "blocked",
     "failed",
+    # Issue-batch outcomes: the deliverable of an issue run is a pull
+    # request under the contributor's own account, or an evidenced written
+    # finding when the fix is out of scope — never a merge.
+    "pr-opened",
+    "finding-filed",
 )
 TASK_DONE = "done"
 
-# The states that close a pull request's record. The reporter at the bottom
-# of this module writes each exactly once: an identical retry is a no-op,
-# and anything else after a terminal state is refused (#377).
-TERMINAL_PR_STATES = ("merged", "blocked", "failed")
+# The states that close a pull request's or issue's record. The reporter at
+# the bottom of this module writes each exactly once: an identical retry is
+# a no-op, and anything else after a terminal state is refused (#377).
+TERMINAL_PR_STATES = ("merged", "blocked", "failed", "pr-opened", "finding-filed")
 
 
 def landing_state_dir() -> str:
@@ -224,6 +229,9 @@ Execute the following end-to-end loop:
 
 4. Re-review to confirm findings are cleared. When checks are green and the PR is mergeable, land it:
    {reporter} report --status {status} event --pr "{stop.key}" --state "merging" --note "checks green; approving and merging"
+   Never approve or merge a pull request authored by @{task.login}: Bluefin policy
+   requires review by a different contributor; report `blocked` with the note
+   "own pull request — needs another contributor's review" instead.
    Approve it: `gh pr review {stop.number} --repo "{stop.repository}" --approve --body "Approved by @{task.login} after automated fix-and-land run."`
    Then squash-merge: `gh pr merge {stop.number} --repo "{stop.repository}" --squash`. If branch protection or merge requirements block direct merge,
    add the `lgtm` label: `gh pr edit {stop.number} --repo "{stop.repository}" --add-label lgtm`.
@@ -235,6 +243,104 @@ Execute the following end-to-end loop:
    Finally report task done:
    {reporter} report --status {status} done --note "PR {stop.key} fix-and-land run complete"
 """
+
+
+def issue_prompt(task: LandingTask) -> str:
+    """The issue-batch brief: fix each issue and open a pull request under
+    the contributor's own account, or file one evidenced finding. Never a
+    merge — review policy requires a different contributor to land it."""
+    rows = "\n".join(f"- {stop.key} — {stop.title}" for stop in task.stops)
+    reporter = f"{shlex.quote(sys.executable)} {shlex.quote(os.path.abspath(__file__))}"
+    status = shlex.quote(task.status_path)
+    return f"""You are the Bluefin issue fix agent. The maintainer has read and
+selected the open issues below and confirmed — once, interactively — that one
+agent should work the batch. That confirmation is your authority; do not ask
+for more.
+
+{rows}
+
+Your deliverable per issue is a pull request under @{task.login}'s own
+account, or one evidenced written finding. You never merge, approve, or label
+anything: Bluefin policy requires a different contributor to review and land
+your work.
+
+For each issue, in order:
+
+1. Report diagnosing, then read the issue completely:
+   {reporter} report --status {status} event --pr "<owner/repo#N>" --state "diagnosing" --note "reading the issue"
+   `gh issue view <number> --repo <owner>/<repo> --comments`
+
+2. Decide scope. This work is toil reduction: repair what is broken, finish
+   what the project already decided to do, and size the change so a tired
+   maintainer can review it. When the issue can only be completed by
+   out-of-scope work, the deliverable is a written finding: post one
+   evidenced comment with `gh issue comment <number> --repo <owner>/<repo> --body ...`
+   naming what you verified and what blocks the fix, then report:
+   {reporter} report --status {status} event --pr "<owner/repo#N>" --state "finding-filed" --note "<comment url>"
+   and move to the next issue.
+
+3. Fix it in a scratch workdir on its own branch:
+   {reporter} report --status {status} event --pr "<owner/repo#N>" --state "fixing" --note "applying the fix"
+   WORKDIR=$(mktemp -d /tmp/issue-<number>-XXXXXX)
+   gh repo clone <owner>/<repo> "$WORKDIR" && cd "$WORKDIR"
+   git checkout -b fix/issue-<number>
+   Keep the change surgical and scoped to the issue. Run the project's own
+   existing tests and linters for the changed surface before pushing.
+
+4. Push under your own account and open the pull request. If you lack push
+   permission, fork first: `gh repo fork <owner>/<repo> --remote`. Then:
+   git push --set-upstream <remote> fix/issue-<number>
+   gh pr create --repo <owner>/<repo> --title "<conventional title>" \\
+     --body "<what and why>\n\nFixes <owner>/<repo>#<number>"
+   Report the outcome with the PR URL in the note:
+   {reporter} report --status {status} event --pr "<owner/repo#N>" --state "pr-opened" --note "<pr url>"
+   Then clean up: cd / && rm -rf "$WORKDIR".
+
+5. An issue you cannot carry to pr-opened or finding-filed is reported
+   honestly: `failed` with the exact error, or `blocked` with the rule that
+   stops you. Never skip one silently.
+
+When every issue above has a terminal state (pr-opened, finding-filed,
+failed, or blocked), close the batch:
+{reporter} report --status {status} done --note "one-line summary for the maintainer"
+"""
+
+
+def new_issue_task(stops: list, login: str) -> LandingTask:
+    """An issue-batch task: same ledger, prompt, and log layout as a landing
+    task, with the issue brief and an issue-qualified id."""
+    directory = landing_state_dir()
+    instance = re.sub(
+        r"[^A-Za-z0-9_.-]+", "-", os.environ.get("BLUEFIN_REVIEW_INSTANCE", "")
+    ).strip("-.")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    base = f"{stamp}-{instance}-issues" if instance else f"{stamp}-issues"
+    task_id = base
+    suffix = 2
+    while os.path.exists(os.path.join(directory, f"{task_id}.prompt.md")):
+        task_id = f"{base}-{suffix}"
+        suffix += 1
+    task = LandingTask(
+        task_id=task_id,
+        stops=list(stops),
+        login=login,
+        prompt_path=os.path.join(directory, f"{task_id}.prompt.md"),
+        status_path=os.path.join(directory, f"{task_id}.jsonl"),
+        log_path=os.path.join(directory, f"{task_id}.log"),
+        started=time.monotonic(),
+    )
+    with open(task.prompt_path, "w", encoding="utf-8") as handle:
+        handle.write(issue_prompt(task))
+    with open(task.status_path, "w", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {"expect": task.keys, "ts": int(time.time()), "issues": True},
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+    task.command = landing_command(task)
+    return task
 
 
 def new_fix_task(
@@ -314,7 +420,11 @@ For each pull request, in order:
    while the run is still active, continue watching rather than treating the timeout as failure.
 4. When checks are green and the PR is mergeable, approve it:
    `gh pr review <number> --repo <owner>/<repo> --approve --body "Approved by @{task.login} for Hive auto-merge on green CI."`
-   then squash-merge: `gh pr merge <number> --repo <owner>/<repo> --squash`. If GitHub refuses (branch
+   then squash-merge: `gh pr merge <number> --repo <owner>/<repo> --squash`.
+   Never approve or merge a pull request authored by @{task.login}: Bluefin
+   policy requires review by a different contributor, so an own-authored
+   pull request in this batch is reported `blocked` with the note
+   "own pull request — needs another contributor's review". If GitHub refuses (branch
    protection, review requirements), do not force anything — add the `lgtm`
    label instead: `gh pr edit <number> --repo <owner>/<repo> --add-label lgtm` and move on. GitHub computes mergeability asynchronously,
    so `mergeable: UNKNOWN` is a cache-warming placeholder, never a verdict:
@@ -520,6 +630,35 @@ def landing_command(task: LandingTask) -> list[str]:
         arg.replace("@PROMPT", task.prompt_path)
         for arg in shlex.split(template)
     ]
+
+
+def dispatch_blocker() -> str:
+    """Why a dispatched agent would die at startup, or "" when it can run.
+
+    Headless `goose run --no-session` exits immediately with "Provider is
+    not configured" when the github_copilot provider has no credential; the
+    launcher passes GITHUB_COPILOT_TOKEN for exactly this. Checking before
+    every dispatch turns an instant, silent agent death — surfaced only as
+    a died-mid-batch hole in the report — into a refusal that names the
+    cause. An overridden landing command or a non-Copilot backend owns its
+    own runtime and is never blocked here.
+    """
+    template = os.environ.get(
+        "BLUEFIN_REVIEW_LANDING_COMMAND", DEFAULT_LANDING_COMMAND
+    )
+    if template != DEFAULT_LANDING_COMMAND:
+        return ""
+    if os.environ.get("BLUEFIN_REVIEW_BACKEND", "") == "codex":
+        return ""
+    if os.environ.get("GOOSE_PROVIDER", "github_copilot") != "github_copilot":
+        return ""
+    if os.environ.get("GITHUB_COPILOT_TOKEN", "").strip():
+        return ""
+    return (
+        "no Copilot credential (GITHUB_COPILOT_TOKEN unset): headless goose "
+        "exits with 'Provider is not configured'; run goose configure on the "
+        "host and relaunch"
+    )
 
 
 def report_age(path: str) -> str:

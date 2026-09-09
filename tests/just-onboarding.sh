@@ -497,7 +497,7 @@ run_recipe() {
     env \
       -u TOOL -u REVIEW_HIVE_COMMIT \
       -u AGENT_MODEL -u GOOSE_PROVIDER -u GOOSE_MODEL -u GH_READY \
-      -u GITHUB_COPILOT_TOKEN -u FAKE_KEYRING_COPILOT_TOKEN \
+      -u GITHUB_COPILOT_TOKEN \
       -u GH_TOKEN -u GITHUB_TOKEN \
       -u REVIEW_GH_TOKEN -u FAKE_GH_TOKEN -u FAKE_GH_SCOPES \
       -u CODEX_HOME \
@@ -525,6 +525,7 @@ run_recipe() {
       -u FAKE_KUBECTL_REWRITE_HIVE_HUB \
       HOME="$home" PATH="$fake_bin:$system_bin" TMPDIR="$tmp_root" \
       XDG_RUNTIME_DIR="$tmp_root" \
+      FAKE_KEYRING_COPILOT_TOKEN=copilot-test-token \
       GUM_LOG="$gum_log" RUNNER_LOG="$runner_log" \
       IMAGE_LOG="$image_log" \
       CREDENTIAL_LOG="$credential_log" \
@@ -1235,7 +1236,8 @@ assert_file_not_contains "create secret generic review-contributor-secret" "$kub
 begin "review-container cluster: missing Copilot token leaves the Secret unchanged"
 reset_logs
 RECIPE_ARGS=(cluster)
-run_recipe review-container GH_READY=1 FAKE_GH_TOKEN=gho-test-token
+run_recipe review-container GH_READY=1 FAKE_GH_TOKEN=gho-test-token \
+  FAKE_KEYRING_COPILOT_TOKEN=
 assert_nonzero_status "$STATUS" "cluster scale-out without a Copilot token must fail"
 assert_contains "cluster Secret without a Copilot credential" "$OUT"
 assert_file_not_contains "create namespace bluefin-system" "$kubectl_log"
@@ -1776,14 +1778,20 @@ assert_file_not_contains "GITHUB_COPILOT_TOKEN=ghu-keyring-token" "$runner_log"
 assert_file_contains "GITHUB_COPILOT_TOKEN:present" "$credential_log"
 assert_not_contains "ghu-keyring-token" "$OUT"
 
-begin "review-container: no credential says so plainly and names the fix"
+begin "review-container: no credential refuses the launch and names the fix"
 reset_logs
 run_recipe review-container GH_READY=1 \
-  GOOSE_MODEL=gpt-4o
+  GOOSE_MODEL=gpt-4o \
+  FAKE_KEYRING_COPILOT_TOKEN=
+assert_nonzero_status "$STATUS" "a credential-less contributor launch must refuse"
 assert_contains "no Copilot credential found" "$OUT"
+assert_contains "Provider is not configured" "$OUT"
 assert_contains "gh auth token' is NOT a substitute" "$OUT"
 assert_contains "goose configure" "$OUT"
 assert_file_not_contains "GITHUB_COPILOT_TOKEN=" "$runner_log"
+# Refusal means refusal: no contributor container may start only to have
+# every claimed Hive task die on an unconfigured provider.
+assert_file_not_contains "run" "$runner_log"
 
 begin "review-container: a GitHub identity is inherited, never mounted"
 # Without GH_TOKEN the agent picks up a task, runs gh, is told to 'gh auth
@@ -2021,7 +2029,7 @@ assert_file_not_contains "run --rm" "$runner_log"
 
 begin "review-doctor: a missing Copilot credential is a failed check with the fix"
 reset_logs
-run_recipe review-doctor GH_READY=1
+run_recipe review-doctor GH_READY=1 FAKE_KEYRING_COPILOT_TOKEN=
 assert_nonzero_status "$STATUS" "a missing Copilot credential must fail the doctor"
 assert_contains "no Copilot credential is available" "$OUT"
 assert_contains "gh auth token' is NOT a substitute" "$OUT"
@@ -2293,6 +2301,7 @@ fi
 begin "static: remote Hive staging never alters canonical paths and validates cleanup"
 stage_func="$(sed -n '/^stage_hive_registration_for_remote_podman()/,/^}/p' "$code")"
 cleanup_func="$(sed -n '/^cleanup_remote_hive_registration()/,/^}/p' "$code")"
+# shellcheck disable=SC2016 # the single-quoted $HOME is the literal being searched for
 if grep -q '\$HOME/\.config/hive' <<<"$stage_func"; then
   fail "remote Hive staging must not target remote canonical \$HOME/.config/hive"
 fi

@@ -76,6 +76,6 @@ Run the smallest existing contract test that covers the change:
 Launcher tests are hermetic: fake external tools and assert exact commands or
 observable behavior. Do not allow a missing-tool scenario to fall through to a
 host `kubectl`, Podman service, cluster, or credential. For broad hygiene, run
-`pre-commit run --all-files`; ShellCheck is a manual hook and needs
-`pre-commit run shellcheck --hook-stage manual --all-files`. Finish changes
+`pre-commit run --all-files`, which includes ShellCheck via the
+shellcheck-py wheel (no container pull). Finish changes
 with `git diff --check`.

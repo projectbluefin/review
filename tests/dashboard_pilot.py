@@ -7438,7 +7438,9 @@ async def main() -> int:
             await pilot.press("escape")
             await pilot.pause()
 
-        # ── [f] on ReviewScreen dispatches an auto-fix & land agent in background ──
+        # The [f]/[F] background fix-and-land lane is deleted: findings are
+        # fixed through [$], which dispatches the same fixer behind slay's
+        # gates. [f] on ReviewScreen must do nothing to the landing queue.
         fix_stop = app.stops[0]
         fix_stop.live = {
             "isDraft": False,
@@ -7465,8 +7467,13 @@ async def main() -> int:
         check(isinstance(app.screen, tui.ReviewScreen), "ReviewScreen must be active")
         await pilot.press("f")
         await pilot.pause()
-        check(any(t.stops[0].number == fix_stop.number for t in app.landing_queue), "[f] on decision card must enqueue background fix task")
-        check(not isinstance(app.screen, tui.ReviewScreen), "[f] must dismiss ReviewScreen back to queue")
+        check(
+            not any(t.stops and t.stops[0].number == fix_stop.number for t in app.landing_queue),
+            "[f] must not dispatch a gate-bypassing fix task; slay owns fixes",
+        )
+        check(isinstance(app.screen, tui.ReviewScreen), "[f] must be inert on ReviewScreen")
+        await pilot.press("escape")
+        await pilot.pause()
         app.landing_queue.clear()
 
     # ── the steer box: typed text reaches the review as instructions ─────
