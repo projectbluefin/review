@@ -55,6 +55,9 @@ credential handoff, remote Podman and Kubernetes sessions.
 `0f5eeca`, using live Bluefin LTS GitHub data. Documentation capture, not an installed-image
 acceptance test or a current queue-status report. Open the image at full size.*
 
+`review` comes with Goose and the official Codex CLI prebundled and
+passes through only the credential each selected client needs.
+
 1. **Check activity and freshness.** The top panels show review workers and
    landing work. An idle session is normal; opening the dashboard starts no review.
 2. **Choose a pull request.** Use `j` / `k` to move, `f` to cycle the action
