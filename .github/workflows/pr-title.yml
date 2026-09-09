@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   conventional-title:
-    runs-on: ubuntu-latest
+    runs-on: ghost-runners
     steps:
       - name: Validate PR title
         uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1

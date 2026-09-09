@@ -38,7 +38,7 @@ env:
 
 jobs:
   resolve-goose:
-    runs-on: ubuntu-latest
+    runs-on: ghost-runners
     outputs:
       x86_64_sha256: ${{ steps.goose.outputs.x86_64_sha256 }}
       aarch64_sha256: ${{ steps.goose.outputs.aarch64_sha256 }}
@@ -66,7 +66,7 @@ jobs:
   # stamp these as config labels and the index carries the identical set as
   # annotations, so 'created' has to be decided once, before either.
   metadata:
-    runs-on: ubuntu-latest
+    runs-on: ghost-runners
     outputs:
       created: ${{ steps.metadata.outputs.created }}
       base_name: ${{ steps.metadata.outputs.base_name }}
