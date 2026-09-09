@@ -54,7 +54,6 @@ from textual.widgets import (
     Select,
     TextArea,
 )
-from textual.widgets._footer import FooterKey
 try:
     from textual.worker import get_current_worker
 except ModuleNotFoundError:  # minimal non-Textual import contracts
@@ -1975,6 +1974,12 @@ class LandingFooter(Footer):
 
     def compose(self) -> ComposeResult:
         if not self._bindings_ready:
+            return
+        try:
+            from textual.widgets._footer import FooterKey
+        except ModuleNotFoundError:
+            # Import-only contract tests provide a small widgets stub; the
+            # real Textual runtime supplies the clickable footer key.
             return
         active = self.screen.active_bindings
         for key, key_display, description in self._CONTROLS:
