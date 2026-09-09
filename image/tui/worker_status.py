@@ -131,9 +131,10 @@ class RefreshController:
         try:
             result = await self.reader()
         except Exception:
-            self._record_failure()
-            return False
-        if result is False or (isinstance(result, dict) and result.get("ok") is False):
+            result = {"ok": False}
+        if result is False:
+            result = {"ok": False}
+        if isinstance(result, dict) and result.get("ok") is False:
             self._record_failure()
             return result
         self.delay = self.base_delay

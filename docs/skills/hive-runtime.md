@@ -57,7 +57,9 @@ credential handling ([`launcher.md`](launcher.md)).
    `current_task.repo`/`number`/`title` from me; absent fields render as
    `unknown`, active me records render as `working` or `idle`, inactive
    records as `disconnected`, failed reads as `unavailable`, and the
-   Hive-owned tmux session remains authoritative.
+   Hive-owned tmux session remains authoritative. Reader exceptions and
+   explicit read failures replace the previous projection with unavailable
+   evidence; only a throttled refresh leaves the current projection untouched.
 2. Attach only to inspect or deliberately steer a live session:
 
    ```bash
