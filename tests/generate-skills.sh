@@ -4,6 +4,13 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# The generator's input is docs/skills/index.json, which
+# scripts/check-skill-frontmatter.sh generates from skill front-matter. Run
+# that producer's contract first, so a manifest defect is reported at the
+# layer that produced it rather than as a confusing generator failure.
+bash "$repo_root/tests/check-skill-frontmatter-contract.sh"
+
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
