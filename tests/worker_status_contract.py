@@ -108,9 +108,38 @@ class WorkerStatusContract(unittest.TestCase):
         with patch.dict(os.environ, {"REVIEW_CONTAINER_NAME": "review-2"}, clear=False):
             projection = worker_status.unavailable_projection()
         self.assertEqual(projection.connection, "unavailable")
-        self.assertEqual(projection.state, "disconnected")
+        self.assertEqual(projection.state, "unknown")
+        self.assertEqual(projection.read_state, "unavailable")
         self.assertEqual(projection.identity, "unknown")
         self.assertEqual(projection.attach, "podman exec -it review-2 tmux attach -t contributor")
+
+    def test_api_unavailable_is_distinct_from_an_explicit_worker_disconnect(self):
+        unavailable = worker_status.unavailable_projection()
+        self.assertIn(
+            "HUB UNAVAILABLE",
+            worker_status.render_state_badge(unavailable, color=False),
+        )
+        disconnected = worker_status.project_status(
+            {
+                "ok": True,
+                "data": {
+                    "status": {"hub": "online"},
+                    "me": {"active": False},
+                },
+            }
+        )
+        self.assertEqual(disconnected.state, "disconnected")
+        self.assertEqual(disconnected.read_state, "current")
+        self.assertIn(
+            "DISCONNECTED",
+            worker_status.render_state_badge(disconnected, color=False),
+        )
+
+    def test_initial_projection_does_not_claim_a_current_read(self):
+        if worker_status.Static is None:
+            self.skipTest("Textual is unavailable")
+        app = worker_status.WorkerStatusApp(lambda: None)
+        self.assertEqual(app.projection.read_state, "starting")
 
     def test_refresh_deduplicates_inflight_reads_and_backs_off_after_failure(self):
         started = asyncio.Event()
@@ -268,7 +297,7 @@ class WorkerStatusContract(unittest.TestCase):
         self.assertIn("Hub contributors", sections["worker"])
 
     def test_state_badge_does_not_equate_working_with_success(self):
-        projection = worker_status.Projection(state="working")
+        projection = worker_status.Projection(state="working", read_state="current")
         badge = worker_status.render_state_badge(projection, color=False)
         self.assertIn("WORKING", badge)
         self.assertNotIn("SUCCESS", badge)

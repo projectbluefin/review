@@ -56,8 +56,11 @@ credential handling ([`launcher.md`](launcher.md)).
    `active_contributors` from status, plus `github_username`, `active`, and
    `current_task.repo`/`number`/`title` from me; absent fields render as
    `unknown`, active me records render as `working` or `idle`, inactive
-   records as `disconnected`, failed reads as `unavailable`, and the
-   Hive-owned tmux session remains authoritative.
+   records as `disconnected`, failed reads as `unavailable`; a failed refresh
+   after a successful read keeps the last assignment as `LAST KNOWN` with a
+   stale age. Hub-wide actionable and contributor counts are labeled
+   separately from the worker's own state, and the Hive-owned tmux session
+   remains authoritative.
 2. Attach only to inspect or deliberately steer a live session:
 
    ```bash

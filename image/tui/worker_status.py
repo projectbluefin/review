@@ -50,7 +50,7 @@ class Projection:
     contributors: str = UNKNOWN
     freshness: str = UNKNOWN
     attach: str = ""
-    read_state: str = "current"
+    read_state: str = "unknown"
     read_error: str = ""
 
 
@@ -101,7 +101,7 @@ def attach_command() -> str:
 def unavailable_projection() -> Projection:
     return Projection(
         connection="unavailable",
-        state="disconnected",
+        state="unknown",
         attach=attach_command(),
         read_state="unavailable",
         read_error="hub read unavailable",
@@ -145,6 +145,10 @@ def _escape(value) -> str:
 
 
 def _state_presentation(projection: Projection) -> tuple[str, str, str]:
+    if projection.read_state == "starting":
+        return "…", "STARTING", "starting"
+    if projection.read_state == "unknown":
+        return "?", "READ UNKNOWN", "warning"
     if projection.read_state == "stale":
         return "⚠", f"LAST KNOWN · {str(projection.state or UNKNOWN).upper()}", "warning"
     if projection.read_state == "unavailable":
@@ -197,6 +201,8 @@ def _read_style(projection: Projection) -> str:
         return "bold yellow"
     if projection.read_state == "unavailable":
         return "bold red"
+    if projection.read_state in {"starting", "unknown"}:
+        return "bold yellow"
     return "cyan"
 
 
@@ -358,7 +364,12 @@ if Static is not None:
             self.title = display_title("WORKER STATUS")
             self.reader = reader
             self.controller = RefreshController(reader)
-            self.projection = Projection(connection="starting", state="starting", attach=attach_command())
+            self.projection = Projection(
+                connection="starting",
+                state="starting",
+                attach=attach_command(),
+                read_state="starting",
+            )
             self.last_success_at: float | None = None
             self.use_color = "NO_COLOR" not in os.environ
             if not self.use_color:
