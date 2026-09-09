@@ -7716,6 +7716,19 @@ async def main() -> int:
     # exercised above with real queue replacement; isolate this older unit of
     # behavior from its intentionally unrelated transport refresh.
     app._request_reconciliation = lambda: None
+
+    def fixture_live(repository, number, force=False):
+        # The production forced read rejects a headless response. This fixture
+        # owns the exact live snapshot for each synthetic head instead of
+        # routing the state-machine checks through the generic empty response.
+        candidate = next(
+            item
+            for item in app.stops
+            if item.repository == repository and item.number == number
+        )
+        return dict(candidate.live)
+
+    app.fetch_live_pr = fixture_live
     async with app.run_test() as pilot:
         await pilot.pause()
         for _ in range(200):
