@@ -210,8 +210,8 @@
         "automerge"
       ],
       "description": "Manages batch landings, multi-repo lane partitioning, fix-and-land agents, and landing status persistence. Use when modifying batch execution or landing.py.",
-      "version": "1.1",
-      "last_updated": "2026-09-08",
+      "version": "1.2",
+      "last_updated": "2026-09-09",
       "doc_type": "procedure"
     },
     {
@@ -267,8 +267,8 @@
         "testing"
       ],
       "description": "Defines pull request, branch, title, trailer, and validation requirements, the factory's seven-label contract and this repository's three automation labels, how to reconcile a long-lived branch with squash-merged main, and why a test must run a feature.",
-      "version": "1.10",
-      "last_updated": "2026-08-16",
+      "version": "1.11",
+      "last_updated": "2026-09-09",
       "doc_type": "policy"
     },
     {
@@ -286,8 +286,8 @@
         "doctrine"
       ],
       "description": "Maintains the five image-owned review check subagents (bluefin-doctrine, security, correctness, test-coverage, simplicity) and Goose review scope. Use when changing review checks or review thread concurrency.",
-      "version": "1.0",
-      "last_updated": "2026-09-06",
+      "version": "1.1",
+      "last_updated": "2026-09-09",
       "doc_type": "reference"
     },
     {
@@ -305,7 +305,7 @@
         "maintainer"
       ],
       "description": "Maintains image/tui/bluefin_review_tui.py: the mutation gate, the queue view, and its Textual patterns. Use when editing the dashboard or its pilot tests.",
-      "version": "3.0",
+      "version": "3.1",
       "last_updated": "2026-09-09",
       "doc_type": "runbook"
     },

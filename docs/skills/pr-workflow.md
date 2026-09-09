@@ -1,7 +1,7 @@
 ---
 name: pr-workflow
-version: "1.10"
-last_updated: 2026-08-16
+version: "1.11"
+last_updated: 2026-09-09
 id: pr-workflow
 one_line_purpose: Open review pull requests that merge cleanly.
 entry_point: docs/skills/pr-workflow.md
@@ -152,15 +152,10 @@ git diff --check
 just --list
 ```
 
-`pre-commit run --all-files` runs all socket-free contributor hygiene checks.
-ShellCheck is a manual container-backed hook that the required `validate`
-workflow invokes explicitly, so a missing local container socket does not
-block the local gate. That also means it passes locally and then fails CI:
-before pushing a shell change, run the manual stage too.
-
-```bash
-pre-commit run shellcheck --hook-stage manual --all-files
-```
+`pre-commit run --all-files` runs all contributor hygiene checks, ShellCheck
+included: the hook uses the shellcheck-py wheel, so it needs no container
+socket and behaves identically locally and in the required `validate`
+workflow.
 
 `gh label list -R projectbluefin/review` returns the seven canonical labels and
 the three automation labels above, and nothing else.

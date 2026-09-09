@@ -33,7 +33,8 @@ Choose your review backend before launching:
 | Codex subscription | Run `codex login` with file credential storage so the launcher can read `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`). | `BLUEFIN_REVIEW_BACKEND=codex just review-queue` |
 
 GitHub login and model login are separate: a GitHub CLI token does not
-authenticate Copilot inference. Explicit Codex selection needs no host Goose
+authenticate Copilot inference. Goose launches refuse missing Copilot credentials
+rather than dispatch agents that cannot start. Explicit Codex selection needs no host Goose
 or Copilot credential.
 
 ```bash
@@ -66,6 +67,10 @@ passes through only the credential each selected client needs.
 3. **Read the evidence.** Inspect the selected PR's checks, merge state and
    context. `Enter` opens its diff, or existing review evidence when available.
    `v` opens the diff, `C` comments, and `o` the GitHub page.
+
+Use `$` to slay selected PRs through the gated review/fix/land flow. For issues,
+it dispatches a fixer that opens a PR under your account or files an evidenced
+finding; it never merges the resulting PR itself.
 
 4. **Start a review when ready.** Press `r`; use `/` to steer the review or
    `y` to hand its context to your own client. `?` shows current key help and

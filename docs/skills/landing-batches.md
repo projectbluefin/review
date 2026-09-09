@@ -1,7 +1,7 @@
 ---
 name: landing-batches
-version: "1.1"
-last_updated: 2026-09-08
+version: "1.2"
+last_updated: 2026-09-09
 id: landing-batches
 one_line_purpose: Manage multi-PR landing batches and automated fix-and-land agents.
 entry_point: docs/skills/landing-batches.md
@@ -38,11 +38,13 @@ or cluster scale-out (`cluster-workers.md`).
    independent per-repository `LandingTask` lanes.
 3. **Concurrent Execution:** Up to `BLUEFIN_REVIEW_CONCURRENT_LANDINGS`
    (default 6) run concurrently across disjoint repository sets.
-4. **Fix & Land:** From `ReviewScreen`, `[f]` dispatches a background
-   fix-and-land agent (`new_fix_task`) seeded with evidenced review findings.
-   `[F]` prompts for steering guidance before dispatching.
-   `[$]` ("slay") executes the pipeline end-to-end. See below: it is a durable
-   per-pull-request state machine, not a sequence of dispatches.
+4. **Fix & Land:** `[$]` ("slay") executes the pipeline end-to-end and owns
+   fix dispatch: a review with evidenced findings seeds a fixer
+   (`new_fix_task`) behind slay's own gates. The standalone `[f]`/`[F]`
+   ReviewScreen lane is deleted — it dispatched the same fixer with no
+   confirmation, no blocked-reason check, no head revalidation, and no
+   durable run record. See below: `[$]` is a durable per-pull-request state
+   machine, not a sequence of dispatches.
 5. **State Directory:** State persists at `${XDG_STATE_HOME}/bluefin-review/landings/`.
    Each batch receives `.jsonl` events, `.log` output, and `.prompt.md`.
    Filenames qualify with `BLUEFIN_REVIEW_INSTANCE` to avoid cross-session collisions.

@@ -33,13 +33,14 @@ repos:
         exclude: ^(image/.*\.sh|tests/guest-bootstrap-consumer\.py)$
 
   # ------------------------------------------------------------------ shell
-  - repo: https://github.com/koalaman/shellcheck-precommit
-    rev: v0.11.0 # v0.11.0
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1-1 # shellcheck v0.11.0
     hooks:
       - id: shellcheck
-        # This hook uses a container image. Keep the ordinary contributor
-        # hygiene command socket-free; CI invokes this manual stage explicitly.
-        stages: [manual]
+        # The wheel bundles the shellcheck binary, so the hook needs no
+        # container runtime and no registry pull: koalaman's own pre-commit
+        # hook runs a Docker Hub image, and anonymous runner pulls of it
+        # rate-limited every main validation run red.
         # SC1090: the entrypoint sources a path resolved at runtime.
         # SC2034: the onboarding harness captures launcher output into vars
         # that are asserted on conditionally.

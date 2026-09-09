@@ -1430,9 +1430,10 @@ class MixedWorkboardContractTests(unittest.TestCase):
         # Required typed confirmation string must be the PR number
         self.assertEqual(confirm_screen.expected, "31")
 
-    def test_slay_action_uses_typed_gate_showing_prs_and_heads_and_preserves_issue_selection(self) -> None:
+    def test_slay_action_uses_typed_gate_showing_prs_heads_and_issues(self) -> None:
         """Finding 1: $ must use ONE typed mutation/batch gate showing exact PRs + heads.
-        Selected issues are excluded before the gate and their selection remains intact.
+        Selected issues ride the same gate: their slay lane is the fix agent
+        whose deliverable is a new pull request, never a merge.
         """
         app = tui.ReviewDashboard()
         app.self_login = "tester"
@@ -1478,15 +1479,68 @@ class MixedWorkboardContractTests(unittest.TestCase):
         self.assertEqual(len(screens_pushed), 1)
         gate, callback = screens_pushed[0]
         self.assertIsInstance(gate, tui.SlayConfirmScreen)
-        # Gate must target only the PRs, not issues
-        self.assertEqual(gate.targets, [pr1, pr2])
-        # Issue selection must remain intact
-        self.assertTrue(issue1.selected)
+        # Gate must carry the PRs and the issue: one confirmation for the batch
+        self.assertEqual(gate.targets, [pr1, pr2, issue1])
         # Gate must show exact PRs and heads behind one bounded confirmation.
         self.assertEqual(gate.expected, "slay")
         self.assertEqual(gate.targets[0].head_identity, "b" * 40)
         self.assertEqual(gate.targets[1].head_identity, "c" * 40)
-        self.assertNotIn(issue1, gate.targets)
+
+    def test_slay_confirmed_issues_dispatch_issue_fix_agent(self) -> None:
+        """A confirmed issue batch dispatches one fix agent per repository.
+
+        The agent's brief opens a pull request under the maintainer's own
+        account (or files a finding); it never merges, approves, or labels —
+        review policy routes the opened pull request to another contributor.
+        """
+        import tempfile
+
+        app = tui.ReviewDashboard()
+        app.self_login = "tester"
+        issue_a = tui.Stop(
+            repository="projectbluefin/review",
+            number=42,
+            action="triage",
+            title="Issue 42",
+            is_issue=True,
+            live={"labels": [], "comments_count": 0},
+        )
+        issue_b = tui.Stop(
+            repository="projectbluefin/common",
+            number=9,
+            action="triage",
+            title="Issue 9",
+            is_issue=True,
+            live={"labels": [], "comments_count": 0},
+        )
+        app.stops = [issue_a, issue_b]
+        issue_a.selected = True
+        issue_b.selected = True
+
+        enqueued: list[object] = []
+        app.enqueue_landing = enqueued.append
+        app.notify = lambda *a, **kw: None
+        app.push_screen = lambda screen, callback=None: callback(True)
+
+        scratch = REPO_ROOT / ".cache" / "mixed-workboard-contract"
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as root:
+            with mock.patch.object(
+                tui.landing, "landing_state_dir", return_value=root
+            ):
+                app.action_slay_pr()
+
+            self.assertEqual(len(enqueued), 2, "one issue task per repository lane")
+            keys = sorted(stop.key for task in enqueued for stop in task.stops)
+            self.assertEqual(
+                keys, ["projectbluefin/common#9", "projectbluefin/review#42"]
+            )
+            for task in enqueued:
+                prompt = Path(task.prompt_path).read_text(encoding="utf-8")
+                self.assertIn("issue fix agent", prompt)
+                self.assertIn("pr-opened", prompt)
+                self.assertIn("finding-filed", prompt)
+                self.assertIn("You never merge, approve, or label", prompt)
 
     def test_routability_evidence_preserved_from_queue_loaders_and_rechecked_before_dispatch(self) -> None:
         """Finding 2: Preserve routability evidence through loaders and apply_filters into Stop.live.

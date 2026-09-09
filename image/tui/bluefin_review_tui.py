@@ -1474,6 +1474,34 @@ def classify_action(check_state: str, mergeable_state: str, review_state: str) -
     return "review"
 
 
+def carries_verdict_by(reviews: object, login: str) -> bool:
+    """True when login already gave a live verdict on this pull request.
+
+    A verdict is APPROVED or CHANGES_REQUESTED and not dismissed: a comment
+    review is participation, not a hand-off. Used to drop out-of-my-hands
+    work from the queue, so it deliberately errs on the side of showing.
+    """
+    if not login or not isinstance(reviews, list):
+        return False
+    for review in reviews:
+        if not isinstance(review, dict):
+            continue
+        author = review.get("author")
+        author_login = (
+            author.get("login")
+            if isinstance(author, dict)
+            else (author if isinstance(author, str) else "")
+        )
+        if author_login != login:
+            continue
+        if str(review.get("state") or "").upper() in (
+            "APPROVED",
+            "CHANGES_REQUESTED",
+        ):
+            return True
+    return False
+
+
 def org_queue_item(node: dict) -> dict:
     """One queue item from one GraphQL search node, validated field by field.
 
@@ -2151,6 +2179,10 @@ LANDING_STATE_STYLES: dict[str, tuple[str, str]] = {
     "merged": ("✓", "bold $text-success on $success-muted"),
     "blocked": ("■", "$text-warning on $warning-muted"),
     "failed": ("✗", "bold $text-error on $error-muted"),
+    # Issue-batch outcomes: the run's deliverable is a new pull request or a
+    # filed finding, both successful terminals.
+    "pr-opened": ("✓", "bold $text-success on $success-muted"),
+    "finding-filed": ("✓", "$text-accent"),
     # The final review-and-fix phases share the row vocabulary (#378): the
     # word is the fact, the glyph is its shape, the colour is decoration.
     "final-review": ("◇", "$text-accent"),
@@ -2587,6 +2619,12 @@ class SlayConfirmScreen(ModalScreen[bool]):
         with Vertical(id="confirm-box"):
             yield Label("Slay (review + fix + land) will execute for:", id="confirm-heading")
             for stop in self.targets:
+                if stop.is_issue:
+                    yield Static(
+                        f"  {stop.key} (issue → fix agent opens a PR)",
+                        classes="confirm-command",
+                    )
+                    continue
                 head = stop.head_identity or stop.head_sha or "?"
                 yield Static(f"  {stop.key} @ {head}", classes="confirm-command")
             prompt_label = (
@@ -3592,28 +3630,6 @@ class HelpScreen(ModalScreen[None]):
             yield Static("[dim]Press [bold]?[/bold], [bold]q[/bold], or [bold]Esc[/bold] to return to the dashboard[/dim]", id="help-footer")
 
 
-class FixSteerModal(ModalScreen[str | None]):
-    """Prompt maintainer for optional guidance before background fix-and-land."""
-
-    BINDINGS = [
-        Binding("ctrl+s", "submit", "submit", priority=True),
-        Binding("enter", "submit", "submit", priority=True),
-        *back_bindings("dismiss(None)"),
-    ]
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="confirm-box"):
-            yield Label("guidance for background fix-and-land (empty for default):")
-            yield Input(id="fix-steer-input")
-            yield Static("[enter] dispatch · [esc] cancel", markup=False)
-
-    def on_mount(self) -> None:
-        self.query_one(Input).focus()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        self.dismiss(event.value.strip())
-
-
 class ReviewScreen(Screen):
     """One Goose review, streamed live.
 
@@ -3627,8 +3643,6 @@ class ReviewScreen(Screen):
     BINDINGS = [
         *back_bindings("close"),
         Binding("x", "stop", "stop review"),
-        Binding("f", "spawn_fix", "fix & land in background"),
-        Binding("F", "steer_fix", "steer fix & land"),
         Binding("L", "leave_review", "leave a review"),
         Binding("a", "queue", "approve and queue"),
         Binding("m", "merge_now", "merge now"),
@@ -4209,34 +4223,12 @@ class ReviewScreen(Screen):
     def action_update_branch(self) -> None:
         self.return_to_queue(self.app.action_update_branch)
 
-    def action_spawn_fix(self) -> None:
-        """Spawn background fix-and-land subagent for evidenced findings."""
-        if not self.finished:
-            self.notify("review still running — [x] stops it")
-            return
-        self._dispatch_fix(steer="")
-
-    def action_steer_fix(self) -> None:
-        """Prompt for guidance, then spawn background fix-and-land subagent."""
-        if not self.finished:
-            self.notify("review still running — [x] stops it")
-            return
-
-        def with_steer(value: str | None) -> None:
-            if value is not None:
-                self._dispatch_fix(steer=value.strip())
-
-        self.app.push_screen(FixSteerModal(), with_steer)
-
-    def _dispatch_fix(self, steer: str = "") -> None:
-        if not self.app.self_login:
-            self.notify("your GitHub login is unknown; needed for agent fix.", severity="warning")
-            return
-        findings = list(self.stop_record.review_result.findings if self.stop_record.review_result else [])
-        task = landing.new_fix_task(self.stop_record, findings, self.app.self_login, steer=steer)
-        self.app.enqueue_landing(task)
-        self.notify(f"dispatched auto-fix & land for {self.stop_record.key} [w]")
-        self.dismiss_to_queue()
+    # The background fix-and-land lane that used to live here ([f]/[F]) is
+    # gone: it dispatched the same fixer as the slay pipeline while skipping
+    # every one of its gates — no confirmation, no blocked-reason check, no
+    # head revalidation, no durable run record. Findings are fixed by
+    # selecting the row and pressing [$]; slay routes them through the same
+    # fixer with the safety properties attached.
 
     def action_close(self) -> None:
         # A review takes minutes. Closing mid-run would throw that away with a
@@ -4432,6 +4424,11 @@ class ReviewDashboard(App):
         # open. Unknown until asked, and never cached as True by default.
         self.merge_rights: dict[str, bool] = {}
         self.queue_items: list[dict] = []
+        # Out-of-my-hands accounting: pull requests hidden because I authored
+        # them or already gave a verdict. The counts keep the hiding honest on
+        # the status line — a silently shrunken queue reads as a dead org.
+        self.hidden_own_prs = 0
+        self.hidden_reviewed_prs = 0
         # What Hive says, when it has been asked. "" means not asked yet, so
         # the status line can tell "we have not looked" apart from "the hub is
         # down" — the first is a dashboard that never tried, which is what the
@@ -5335,8 +5332,19 @@ class ReviewDashboard(App):
                     stop.review_result = None
                     stop.cached_age = ""
             self.refresh_rows()
+            # Name the failing items in the banner: "exact-head snapshot
+            # failed" alone hides whether one item or the whole batch is at
+            # fault, and which one.
+            named = [
+                f"{key}: {bounded_detail(str(reason))}"
+                for key, reason in sorted(snapshot.failures.items())
+            ]
+            summary = "; ".join(named[:3])
+            if len(named) > 3:
+                summary = f"{summary}; +{len(named) - 3} more"
             self.notify(
-                "batch review not started: exact-head snapshot failed.",
+                "batch review not started — exact-head snapshot failed: "
+                f"{summary or 'no per-item reason recorded'}",
                 severity="error",
             )
             return
@@ -5889,11 +5897,27 @@ class ReviewDashboard(App):
         self.pr_source_message = str(snapshot.get("message", ""))
         if state in {"ready", "empty"}:
             self.all_items = snapshot["items"]
-            self.queue_items = [
-                item
-                for item in self.all_items
-                if not (self.self_login and item.get("author") == self.self_login)
-            ]
+            # Ping-pong visibility: work leaves this queue the moment it is
+            # out of this maintainer's hands. Own-authored pull requests need
+            # someone else's review, and a pull request already carrying my
+            # verdict (APPROVED or CHANGES_REQUESTED) is waiting on its
+            # author or another contributor — not on me.
+            own = 0
+            reviewed = 0
+            visible: list[dict] = []
+            for item in self.all_items:
+                if self.self_login and item.get("author") == self.self_login:
+                    own += 1
+                    continue
+                if self.self_login and carries_verdict_by(
+                    item.get("reviews"), self.self_login
+                ):
+                    reviewed += 1
+                    continue
+                visible.append(item)
+            self.queue_items = visible
+            self.hidden_own_prs = own
+            self.hidden_reviewed_prs = reviewed
             self.queue_snapshot_at = time.monotonic()
         self._sync_source_state()
         self.apply_filters(refreshed_source="prs")
@@ -7023,7 +7047,26 @@ class ReviewDashboard(App):
             for task in self.landing_queue
             if not task.phase and task not in active and task not in queued
         ]
-        rows = [*active, *queued, *reversed(completed)]
+        # A final review-and-fix round rides the landing lane with the SAME
+        # stops and status record as the batch it reviews. Listing its stops
+        # again would show every landed pull request twice while the round
+        # runs (a race the pilot caught on fast machines), so a round is one
+        # batch-level line and per-PR rows come from landing tasks alone.
+        rounds = [task for task in (*active, *queued) if task.phase]
+        for task in rounds:
+            round_state = "running" if task in active else "queued"
+            model = task.model or os.environ.get(
+                "GOOSE_MODEL", "gemini-3.8-flash"
+            )
+            lines.append(
+                f"final {task.phase} round {task.round}"
+                f"/{landing.FINAL_ROUND_LIMIT} — {round_state} · {model}"
+            )
+        rows = [
+            *(task for task in active if not task.phase),
+            *(task for task in queued if not task.phase),
+            *reversed(completed),
+        ]
         visible = 0
         unique_keys = {stop.key for task in rows for stop in task.stops}
         total = len(unique_keys)
@@ -7115,6 +7158,16 @@ class ReviewDashboard(App):
         # the whole queue is how a maintainer concludes there are five open
         # pull requests when there are a hundred and twenty-one.
         held_back = f" (of {total}; [f] widens)" if shown != total else ""
+        out_of_hands_parts = []
+        if self.hidden_own_prs:
+            out_of_hands_parts.append(f"{self.hidden_own_prs} own")
+        if self.hidden_reviewed_prs:
+            out_of_hands_parts.append(f"{self.hidden_reviewed_prs} reviewed by me")
+        out_of_hands = (
+            f" | out of my hands: {', '.join(out_of_hands_parts)}"
+            if out_of_hands_parts
+            else ""
+        )
         landed = (
             f" | last {self.last_landing_outcome} | "
             if self.last_landing_outcome
@@ -7209,7 +7262,7 @@ class ReviewDashboard(App):
             )
         elif self.view_mode == "prs":
             status_bar.update(
-                f" {landing_prefix}{view_tag}Queue: {shown} PRs{held_back} | {queue_status} "
+                f" {landing_prefix}{view_tag}Queue: {shown} PRs{held_back}{out_of_hands} | {queue_status} "
                 f"| filter {scope} | {breakdown} "
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
@@ -7220,7 +7273,7 @@ class ReviewDashboard(App):
             pr_shown = sum(1 for s in self.stops if not s.is_issue)
             issue_shown = sum(1 for s in self.stops if s.is_issue)
             status_bar.update(
-                f" {landing_prefix}{view_tag}Board: {shown} items ({pr_shown} PRs, {issue_shown} issues){held_back} | {queue_status} "
+                f" {landing_prefix}{view_tag}Board: {shown} items ({pr_shown} PRs, {issue_shown} issues){held_back}{out_of_hands} | {queue_status} "
                 f"| filter {scope} | {breakdown} "
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
@@ -8336,16 +8389,8 @@ class ReviewDashboard(App):
 
         selected = [s for s in self.stops if s.selected]
         if selected:
-            prs = [s for s in selected if not s.is_issue]
-            if len(prs) < len(selected):
-                self.notify("selected issues skipped; action applies to pull requests only", severity="warning")
-            if not prs:
-                return
-            targets = prs
+            targets = selected
         elif self.current:
-            if self.current.is_issue:
-                self.notify("action applies to pull requests only", severity="warning")
-                return
             targets = [self.current]
         else:
             self.notify("nothing selected to slay", severity="warning")
@@ -8353,6 +8398,11 @@ class ReviewDashboard(App):
 
         actionable = []
         for stop in targets:
+            if stop.is_issue:
+                # An issue's slay lane is the fix agent: no head, no merge,
+                # its deliverable is a new pull request or a written finding.
+                actionable.append(stop)
+                continue
             reason = self.stop_blocked_reason(stop)
             if reason:
                 self.notify(f"[$] {stop.key} cannot be slayed: {reason}", severity="warning")
@@ -8369,7 +8419,27 @@ class ReviewDashboard(App):
 
         self.push_screen(SlayConfirmScreen(actionable), confirmed)
 
+    def _dispatch_slay_issues(self, issues: list["Stop"]) -> None:
+        """One fix agent per repository lane for the confirmed issues.
+
+        The deliverable is a pull request under the maintainer's own account
+        (or an evidenced finding), never a merge: review policy routes the
+        opened pull request to another contributor's queue.
+        """
+        groups: dict[str, list[Stop]] = {}
+        for stop in issues:
+            groups.setdefault(stop.repository, []).append(stop)
+        for repository, stops in sorted(groups.items()):
+            task = landing.new_issue_task(stops, self.self_login)
+            self.enqueue_landing(task)
+            keys = ", ".join(stop.key for stop in stops)
+            self.notify(f"[$] dispatched issue fix agent for {keys} [w]")
+
     def _execute_slay(self, targets: list[Stop]) -> None:
+        issues = [stop for stop in targets if stop.is_issue]
+        if issues:
+            self._dispatch_slay_issues(issues)
+        targets = [stop for stop in targets if not stop.is_issue]
         review_targets = []
         for stop in targets:
             has_review = (
@@ -8396,8 +8466,16 @@ class ReviewDashboard(App):
             try:
                 live_data = self.fetch_live_pr(stop.repository, stop.number, force=True)
                 stop.live.update(live_data)
-            except Exception:
+            except Exception as error:
+                # Stale queue evidence still gates below; the fetch failure
+                # itself must not vanish — it is often the first symptom of
+                # a rate limit or auth problem the maintainer needs to see.
                 live_data = {}
+                self.notify(
+                    f"[$] {stop.key}: live refresh failed "
+                    f"({bounded_detail(str(error))}); using queue evidence",
+                    severity="warning",
+                )
 
             reason = self.stop_blocked_reason(stop)
             if reason:
@@ -8744,8 +8822,15 @@ class ReviewDashboard(App):
                     )
                     self.refresh_rows()
                     return
-        except Exception:
-            pass
+        except Exception as error:
+            # An unreadable permission probe is not proof of permission:
+            # proceed (GitHub itself still enforces push rights at the
+            # mutation), but say the probe failed instead of hiding it.
+            self.notify(
+                f"[$] {stop.key}: push-permission probe failed "
+                f"({bounded_detail(str(error))}); GitHub remains the gate",
+                severity="warning",
+            )
 
         task = landing.new_task([stop], self.self_login)
         task.policy = self.final_policy or "automatic"
@@ -9644,6 +9729,10 @@ class ReviewDashboard(App):
         self.landing_queue = kept
 
     def enqueue_landing(self, task: "landing.LandingTask") -> None:
+        blocker = landing.dispatch_blocker()
+        if blocker:
+            self._fail_landing_dispatch(task, blocker)
+            return
         with self._landing_condition:
             self.landing_queue.append(task)
             self._prune_landing_queue()
@@ -9790,6 +9879,58 @@ class ReviewDashboard(App):
             self._landing_condition.notify_all()
         self.drain_landings()
 
+    def _close_run_record(self, stop, state: RunState, reason: str) -> None:
+        """Close a MUTATING durable run record with a terminal outcome.
+
+        The slay pipeline transitions a run to MUTATING before it enqueues
+        the landing task; without this closure the record stays MUTATING
+        forever and the durable state machine disagrees with the landing
+        ledger about a batch that already finished.
+        """
+        try:
+            record = self.run_store.get_by_pr(stop.repository, stop.number)
+        except Exception:
+            return
+        if record is None or record.state is not RunState.MUTATING:
+            return
+        try:
+            self.run_store.transition(
+                record.identity, state, reason=bounded_detail(reason)
+            )
+        except IllegalRunTransition:
+            pass
+
+    def _landing_log_tail(self, task: "landing.LandingTask", limit: int = 3) -> str:
+        """The last non-empty log lines of a dead agent, bounded.
+
+        An agent that exits without reporting leaves its real error — a
+        misconfigured provider, a rejected credential, a crash — only in its
+        log file. Surfacing that tail is the difference between
+        "died mid-batch" and a failure a maintainer can act on.
+        """
+        try:
+            with open(task.log_path, encoding="utf-8", errors="replace") as handle:
+                lines = [line.strip() for line in handle if line.strip()]
+        except OSError:
+            return ""
+        return bounded_detail(" | ".join(lines[-limit:]))
+
+    def _fail_landing_dispatch(self, task: "landing.LandingTask", blocker: str) -> None:
+        """Refuse a dispatch whose agent would die at startup, with the cause."""
+        task.returncode = 1
+        for stop in task.stops:
+            stop.selected = False
+            stop.failure = f"not dispatched: {bounded_detail(blocker)}"
+            self._close_run_record(
+                stop, RunState.MUTATION_FAILED, f"not dispatched: {blocker}"
+            )
+        self.last_landing_outcome = (
+            f"batch {task.task_id} not dispatched: {bounded_detail(blocker)}"
+        )
+        self.refresh_rows()
+        self.refresh_status()
+        self.notify(f"agent not dispatched: {blocker}", severity="error")
+
     def landing_finished(self, task: "landing.LandingTask") -> None:
         """Fold the agent's report back onto rows without re-arming retries.
 
@@ -9808,6 +9949,7 @@ class ReviewDashboard(App):
         # parse_status files every pr-less line under "" — a malformed tail
         # line included — so only the exact done event closes a report.
         done = events.get("", {}).get("state") == landing.TASK_DONE
+        log_tail = "" if done else self._landing_log_tail(task)
         counts: Counter[str] = Counter()
         for stop in task.stops:
             event = events.get(stop.key, {})
@@ -9820,11 +9962,23 @@ class ReviewDashboard(App):
                     ["gh", "pr", "merge", str(stop.number), "--repo", stop.repository],
                     action_verified=True,
                 )
+                self._close_run_record(stop, RunState.COMPLETED, "landed")
+            elif state in ("pr-opened", "finding-filed"):
+                # Issue outcomes: the deliverable exists (a PR under the
+                # maintainer's account, or a filed finding). The note carries
+                # its URL; the row clears like a merge does.
+                stop.selected = False
+                stop.failure = ""
             elif state in ("blocked", "failed", "awaiting-stable"):
                 stop.selected = False
                 stop.failure = (
                     f"{state}: "
                     f"{bounded_detail(str(event.get('note', 'no reason given')))}"
+                )
+                self._close_run_record(
+                    stop,
+                    RunState.MUTATION_FAILED if state == "failed" else RunState.BLOCKED,
+                    stop.failure,
                 )
             else:
                 detail = f"last report: {state}" if state else "no report"
@@ -9836,15 +9990,20 @@ class ReviewDashboard(App):
                     stop.failure = f"no outcome reported ({detail})"
                     state = "no outcome"
                 else:
-                    # No done event at all: the agent died mid-batch,
-                    # distinguishable from every state it can report.
+                    # No done event at all: the agent died mid-batch. Its
+                    # real error lives only in the log, so carry the tail.
                     stop.failure = f"agent died mid-batch ({detail})"
+                    if log_tail:
+                        stop.failure = f"{stop.failure}: {log_tail}"
                     state = "died mid-batch"
+                self._close_run_record(stop, RunState.MUTATION_FAILED, stop.failure)
             counts[state] += 1
         parts = [
             f"{counts[state]} {state}"
             for state in (
                 "merged",
+                "pr-opened",
+                "finding-filed",
                 "failed",
                 "blocked",
                 "awaiting-stable",
@@ -9867,6 +10026,8 @@ class ReviewDashboard(App):
                 f"batch {task.task_id} agent exited without reporting done: "
                 f"{', '.join(parts)}"
             )
+            if log_tail:
+                message = f"{message} — {log_tail}"
         if task.stop_requested:
             severity = "warning"
         elif (
@@ -9934,6 +10095,11 @@ class ReviewDashboard(App):
         answer. A landing that never reached terminal outcomes gets no
         final review at all — there is nothing settled to review.
         """
+        if any(getattr(stop, "is_issue", False) for stop in task.stops):
+            # An issue batch's deliverable is a new pull request; that pull
+            # request gets its own review when another contributor's queue
+            # picks it up. There is no landed head here to re-review.
+            return
         policy = task.policy or self.final_policy or "automatic"
         events = landing.parse_status(task.status_path)
         terminal = all(
