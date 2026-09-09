@@ -51,9 +51,9 @@ credential handoff, remote Podman and Kubernetes sessions.
 
 [![Wide live dashboard with numbered regions for activity, queue and selected PR evidence](docs/images/dashboard-overview.png)](docs/images/dashboard-overview.png)
 
-*Real dashboard rendered at 170 columns × 44 rows from source revision
-`0f5eeca`, using live Bluefin LTS GitHub data. Documentation capture, not an installed-image
-acceptance test or a current queue-status report. Open the image at full size.*
+*Real dashboard rendered from exact local image `sha-dfaa27e544a1ed6f21c7e98dce418a7dbddb5bac`
+(image ID `adbc75a71c2d…`) at 170 columns × 44 rows, using live GitHub queue data.
+The numbered annotations are outside the terminal pixels; open the image at full size.*
 
 `review` comes with Goose and the official Codex CLI prebundled and
 passes through only the credential each selected client needs.
