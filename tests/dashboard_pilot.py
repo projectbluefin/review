@@ -5633,7 +5633,7 @@ async def main() -> int:
         )
 
     app = tui.ReviewDashboard(tui.QueueFilters(action=""))
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         for _ in range(200):
             if len(app.stops) == 2:

@@ -5978,14 +5978,6 @@ class ReviewDashboard(App):
             f"Queued work: {len(queued_landings)}",
             f"Snapshot: {self._activity_freshness()}",
         ]
-        if self.size.width <= 100:
-            compact_lines = [
-                "AGENT ACTIVITY",
-                f"reviews {parent_reviews} · checks {check_workers} · landing {len(active_landings)}",
-                f"queued {len(queued_landings)} · {self._activity_freshness()}",
-            ]
-            panel.update("\n".join(escape(line) for line in compact_lines))
-            return
         lines.extend(self._review_activity_rows())
         rows = [f"Review — {self._activity_work([key])}" for key in active_reviews]
         rows.extend(
@@ -6017,7 +6009,16 @@ class ReviewDashboard(App):
             rows = rows[:MAX_ACTIVITY_ROWS - 1] + [
                 f"… {len(rows) - (MAX_ACTIVITY_ROWS - 1)} more active assignments"
             ]
-        panel.update("\n".join(escape(line) for line in [*lines, *rows]))
+        if self.size.width <= 100:
+            compact_lines = [
+                "AGENT ACTIVITY",
+                f"reviews {parent_reviews} · checks {check_workers} · landing {len(active_landings)}",
+                f"queued {len(queued_landings)} · {self._activity_freshness()}",
+            ]
+            rendered_lines = [*compact_lines, *lines, *rows]
+        else:
+            rendered_lines = [*lines, *rows]
+        panel.update("\n".join(escape(line) for line in rendered_lines))
 
     def refresh_status(self) -> None:
         selected = sum(1 for s in self.stops if s.selected)
