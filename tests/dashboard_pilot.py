@@ -2053,7 +2053,7 @@ async def main() -> int:
                 "✓ merged",
                 "✗ failed",
                 "◆ awaiting-stable",
-                "◌ waiting",
+                "? unreported",
                 "✔ done",
                 "publish workflow red",
                 "two landed, one failed",

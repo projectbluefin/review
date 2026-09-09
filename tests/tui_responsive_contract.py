@@ -220,6 +220,115 @@ class ResponsiveTuiContractTests(unittest.TestCase):
 
             asyncio.run(exercise())
 
+    def test_landing_progress_counts_only_explicit_external_waits(self):
+        stop = tui.Stop(
+            "projectbluefin/review",
+            425,
+            "review",
+            "waiting fixture",
+        )
+        with tempfile.TemporaryDirectory() as root:
+            status = Path(root) / "waiting.jsonl"
+            status.write_text(json.dumps({"expect": [stop.key]}) + "\n")
+            task = tui.landing.LandingTask(
+                "waiting",
+                [stop],
+                "reviewer",
+                status_path=str(status),
+                started=10,
+                process=object(),
+            )
+            progress = tui.landing.progress_snapshot(task, now=10)
+            self.assertEqual(progress.waiting, 0)
+            self.assertEqual(progress.stage, "starting")
+            status.write_text(
+                json.dumps({"pr": stop.key, "state": "waiting-ci", "ts": 1})
+                + "\n"
+            )
+            progress = tui.landing.progress_snapshot(task, now=10)
+            self.assertEqual(progress.waiting, 1)
+            self.assertEqual(progress.stage, "waiting-ci")
+
+    def test_landing_viewer_uses_a_scoped_footer_at_120_columns(self):
+        stop = tui.Stop(
+            "projectbluefin/review",
+            426,
+            "review",
+            "footer fixture",
+        )
+        with tempfile.TemporaryDirectory() as root:
+            status = Path(root) / "footer.jsonl"
+            status.write_text(json.dumps({"pr": stop.key, "state": "waiting"}) + "\n")
+            task = tui.landing.LandingTask(
+                "footer",
+                [stop],
+                "reviewer",
+                status_path=str(status),
+            )
+            dashboard = SimpleNamespace(
+                landing_queue=[task],
+                hive_state="ready",
+                _landing_task_active=lambda _task: False,
+            )
+            screen = tui.LandingScreen(dashboard)
+
+            async def exercise():
+                async with ScreenHost(screen).run_test(size=(120, 40)) as pilot:
+                    await pilot.pause()
+                    footer = screen.query_one("#landing-keys", tui.Static)
+                    visible = "".join(
+                        segment.text for segment in footer.render_line(0)
+                    )
+                    self.assertIn("j/k batch", visible)
+                    self.assertIn("x stop", visible)
+                    self.assertIn("^p palette", visible)
+                    self.assertNotIn("last item", visible)
+
+            asyncio.run(exercise())
+
+    def test_dispatch_feedback_stays_in_status_instead_of_covering_context(self):
+        stop = tui.Stop(
+            "projectbluefin/review",
+            427,
+            "review",
+            "dispatch fixture",
+        )
+        with tempfile.TemporaryDirectory() as root, mock.patch.dict(
+            os.environ,
+            {
+                "XDG_STATE_HOME": root,
+                "BLUEFIN_REVIEW_INSTANCE": "dispatch-feedback",
+                "BLUEFIN_REVIEW_PARTITION_BATCH": "0",
+            },
+        ):
+            app = tui.ReviewDashboard()
+            app.self_login = "reviewer"
+            app.final_policy = "automatic"
+            app.enqueue_landing = lambda task: app.landing_queue.append(task)
+            notices = []
+
+            async def exercise():
+                async with app.run_test(size=(120, 40)) as pilot:
+                    await pilot.pause()
+                    app.notify = lambda message, *args, **kwargs: notices.append(
+                        str(message)
+                    )
+                    app.plan_landing([stop])
+                    await pilot.pause()
+                    self.assertIsInstance(app.screen, tui.BatchPlanScreen)
+                    await pilot.press("enter")
+                    await pilot.pause()
+                    self.assertTrue(app.landing_queue)
+                    self.assertFalse(
+                        any("dispatched" in message for message in notices)
+                    )
+                    self.assertIn(
+                        "last dispatched",
+                        str(app.query_one("#status-bar", tui.Static).render()),
+                    )
+
+            asyncio.run(exercise())
+
     def test_dashboard_mounts_at_compact_and_desktop_sizes_with_queue_focus(self):
         async def exercise(size):
             app = tui.ReviewDashboard()

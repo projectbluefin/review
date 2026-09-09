@@ -432,7 +432,11 @@ class BatchOutcome:
 
 @dataclass(frozen=True)
 class LandingProgress:
-    """Observed landing milestones with no estimated completion time."""
+    """Observed landing milestones with no estimated completion time.
+
+    ``waiting`` counts only explicit waits on external CI or publication
+    evidence. A missing per-PR event is not a wait claim.
+    """
 
     stage: str
     model: str

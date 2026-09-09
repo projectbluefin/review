@@ -1913,6 +1913,7 @@ class FinalPolicyScreen(ModalScreen[str]):
 # app.stylesheet.parse_style), and padding spaces inside a span keep its
 # background — which is what turns a batch header into a full-width bar.
 LANDING_STATE_STYLES: dict[str, tuple[str, str]] = {
+    "unreported": ("?", "dim"),
     "waiting": ("◌", "dim"),
     "diagnosing": ("◐", "cyan"),
     "fixing": ("◐", "cyan"),
@@ -1978,6 +1979,10 @@ class LandingScreen(Screen):
         border: round $secondary; height: 1fr; min-height: 5;
         overflow-y: scroll;
     }
+    #landing-keys {
+        height: 1; background: $panel; color: $text-accent;
+        padding: 0 1; overflow: hidden;
+    }
     """
 
     BINDINGS = [
@@ -2029,7 +2034,7 @@ class LandingScreen(Screen):
         self._move_task(-1)
 
     def compose(self) -> ComposeResult:
-        yield Static("batch queue", id="landing-status")
+        yield Static("batch queue", id="landing-status", markup=False)
         yield Static("", id="landing-rows")
         yield Static("", id="landing-hive")
         yield RichLog(
@@ -2039,7 +2044,11 @@ class LandingScreen(Screen):
             max_lines=200,
             id="landing-log",
         )
-        yield Footer()
+        yield Static(
+            " esc/q back  j/k batch  x stop  ^p palette  ^q quit",
+            id="landing-keys",
+            markup=False,
+        )
 
     def on_mount(self) -> None:
         self.query_one("#landing-rows", Static).border_title = "BATCHES"
@@ -2084,7 +2093,7 @@ class LandingScreen(Screen):
                 # before it meets the markup parser. The styled branch only
                 # fires on this module's own fixed literal keys, so the
                 # escape belongs on the fallback alone.
-                mark = str(event.get("state", "waiting"))
+                mark = str(event.get("state") or "unreported")
                 glyph, style = LANDING_STATE_STYLES.get(mark, ("?", ""))
                 glyph = ui_glyph(glyph, "*")
                 style = ui_style(style)
@@ -2186,16 +2195,16 @@ class LandingScreen(Screen):
         )
         progress_text = ""
         if progress is not None:
-            model = f" · model {escape(progress.model)}" if progress.model else ""
-            round_text = f" · round {escape(progress.round)}" if progress.round else ""
+            model = f" · model {progress.model}" if progress.model else ""
+            round_text = f" · round {progress.round}" if progress.round else ""
             progress_text = (
-                f" · stage {escape(progress.stage)}{model}{round_text}"
+                f" · stage {progress.stage}{model}{round_text}"
                 f" · {progress.completed}/{progress.total} terminal"
-                f" · {progress.waiting} waiting"
+                f" · {progress.waiting} external waiting"
                 f" · {progress.blocked} blocked"
                 f" · {progress.failed} failed"
                 f" · elapsed {progress.elapsed}"
-                f" · evidence {progress.evidence_age} old"
+                f" · evidence age {progress.evidence_age}"
             )
         self.query_one("#landing-status", Static).update(
             f" batch queue: {len(self.dashboard.landing_queue)} batches, "
@@ -8237,10 +8246,11 @@ class ReviewDashboard(App):
                 for stop in task.stops:
                     stop.selected = False
                 self.enqueue_landing(task)
-            self.notify(
+            self.last_landing_outcome = (
                 f"dispatched {len(tasks)} landing batch"
                 f"{'es' if len(tasks) != 1 else ''}; review queue remains open"
             )
+            self.refresh_status()
 
         self.push_screen(BatchPlanScreen(tasks if should_partition else tasks[0]), finish)
 

@@ -29,6 +29,10 @@ maintainer to the live queue. `w` opens the deliberate landing view, where
 group, and Escape returns to the queue. The landing view reports observed
 stage, model and round when available, terminal/waiting/blocked/failed counts,
 elapsed time, and evidence age; it does not invent an ETA.
+The waiting count covers only explicit CI or publication waits; a pull request
+without a report is shown as `? unreported` rather than being counted as
+waiting. The landing viewer keeps only its batch controls visible in the
+footer so the key labels remain readable at 120 columns.
 
 ## When to Use
 
