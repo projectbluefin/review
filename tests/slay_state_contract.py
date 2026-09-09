@@ -891,7 +891,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
             # Case 2: Terminal HUMAN_REVIEW_MISSING record
             id_human = _identity(502, _sha("1"))
             stop_human = tui.Stop(
-                repository="projectbluefin/review",
+                repository="projectbluefin/common",
                 number=502,
                 action="review",
                 title="PR 502",

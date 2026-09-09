@@ -600,7 +600,7 @@ begin "TOOL=claude is rejected with a Goose-only error"
 run_recipe review-container GH_READY=1 TOOL=claude
 assert_nonzero_status "$STATUS" "a non-Goose TOOL must be a hard error"
 assert_contains "TOOL=claude is not supported" "$OUT"
-assert_contains "review supports Goose, Codex, and Pi" "$OUT"
+assert_contains "review supports Goose and Codex" "$OUT"
 assert_not_contains "auto-detected" "$OUT"
 assert_not_contains "Multiple AI CLIs" "$OUT"
 
@@ -611,21 +611,11 @@ assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
 assert_not_contains "is not supported" "$OUT"
 assert_not_contains "Unset TOOL" "$OUT"
 
-begin "TOOL=pi is accepted only with its executable backend credential"
-rm -f "$home/.config/goose/config.yaml"
-run_recipe review-container GH_READY=1 TOOL=pi PI_API_KEY=pi-test-key
-assert_nonzero_status "$STATUS" "the fake runner always exits non-zero"
-assert_not_contains "is not supported" "$OUT"
-assert_file_contains "--env AGENT_BACKEND=pi" "$runner_log"
-assert_file_contains "--env ANTHROPIC_API_KEY" "$runner_log"
-assert_file_not_contains "pi-test-key" "$runner_log"
-write_goose_config
-
-begin "TOOL=pi without its credential is rejected before container launch"
+begin "TOOL=pi is rejected before container launch"
 reset_logs
-run_recipe review-container GH_READY=1 TOOL=pi
-assert_nonzero_status "$STATUS" "Pi without a credential must fail preflight"
-assert_contains "Pi requires PI_API_KEY" "$OUT"
+run_recipe review-container GH_READY=1 TOOL=pi PI_API_KEY=pi-test-key
+assert_nonzero_status "$STATUS" "Pi must be unsupported"
+assert_contains "is not supported" "$OUT"
 assert_file_not_contains "run --rm" "$runner_log"
 
 begin "TOOL=codex uses subscription auth without Goose or Copilot"
@@ -2013,24 +2003,6 @@ assert_not_contains "claude" "$OUT"
 assert_not_contains "Agent backend (Codex)" "$OUT"
 
 assert_file_not_contains "run --rm" "$runner_log"
-
-begin "review-doctor: Pi diagnostics appear only when Pi is selected"
-reset_logs
-run_recipe review-doctor GH_READY=1 TOOL=pi PI_API_KEY=pi-test-key
-assert_contains "Agent backend (Pi)" "$OUT"
-assert_contains "pi: selected" "$OUT"
-assert_not_contains "Copilot credential" "$OUT"
-assert_not_contains "Agent backend (Goose)" "$OUT"
-assert_file_not_contains "run --rm" "$runner_log"
-
-begin "review-doctor: a saved Pi backend matches selected Pi"
-reset_logs
-backend_backup="$scratch/contributor.env.pi-bak"
-cp "$home/.config/hive/contributor.env" "$backend_backup"
-sed -i 's/^AGENT_BACKEND=.*/AGENT_BACKEND=pi/' "$home/.config/hive/contributor.env"
-run_recipe review-doctor GH_READY=1 TOOL=pi PI_API_KEY=pi-test-key
-assert_not_contains "selected backend is" "$OUT"
-cp "$backend_backup" "$home/.config/hive/contributor.env"
 
 begin "review-doctor: rejects an unsupported provider"
 reset_logs

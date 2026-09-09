@@ -92,6 +92,51 @@ class MixedWorkboardContractTests(unittest.TestCase):
             ["I"],
         )
 
+    def test_queue_controls_have_direct_key_bindings(self) -> None:
+        self.assertEqual(
+            [
+                command.key
+                for command in tui.COMMANDS
+                if command.action in {
+                    "decrease_landing_concurrency",
+                    "increase_landing_concurrency",
+                    "toggle_landing_pause",
+                }
+            ],
+            ["-", "+", "p"],
+        )
+
+    def test_only_named_repositories_block_missing_human_review(self) -> None:
+        for repository in (
+            "projectbluefin/common",
+            "projectbluefin/bluefin",
+            "projectbluefin/bluefin-lts",
+            "projectbluefin/dakota",
+        ):
+            self.assertEqual(
+                tui.classify_routability(
+                    tui.Stop(
+                        repository,
+                        1,
+                        "review",
+                        "one",
+                        failure="landing refused: no human review on GitHub",
+                    )
+                ),
+                "human review required",
+            )
+        self.assertIsNone(
+            tui.classify_routability(
+                tui.Stop(
+                    "projectbluefin/documentation",
+                    1,
+                    "review",
+                    "one",
+                    failure="landing refused: no human review on GitHub",
+                )
+            )
+        )
+
     def test_multi_pr_slay_confirmation_uses_one_word(self) -> None:
         gate = tui.SlayConfirmScreen([
             tui.Stop("acme/repo", 1, "review", "one"),
@@ -820,7 +865,7 @@ class MixedWorkboardContractTests(unittest.TestCase):
             sequence=1,
         )
         pr_human_req = tui.Stop(
-            repository="projectbluefin/review",
+            repository="projectbluefin/common",
             number=4,
             action="review",
             title="Human review PR",
@@ -901,7 +946,7 @@ class MixedWorkboardContractTests(unittest.TestCase):
             ("draft", tui.Stop("projectbluefin/review", 1, "review", "draft", is_issue=False, live={"isDraft": True})),
             ("unmodifiable fork", tui.Stop("projectbluefin/review", 2, "review", "fork", is_issue=False, live={"isCrossRepository": True, "maintainerCanModify": False})),
             ("push denied", tui.Stop("projectbluefin/review", 3, "review", "push", is_issue=False, failure="landing refused: push permission denied")),
-            ("human review required", tui.Stop("projectbluefin/review", 4, "review", "human", is_issue=False, failure="landing refused: no human review on GitHub")),
+            ("human review required", tui.Stop("projectbluefin/common", 4, "review", "human", is_issue=False, failure="landing refused: no human review on GitHub")),
             ("head changed", tui.Stop("projectbluefin/review", 5, "review", "head changed", is_issue=False, failure="landing aborted: head changed (reviewed 1111, live 2222)")),
         ]
 

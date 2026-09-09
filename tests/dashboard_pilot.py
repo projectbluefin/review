@@ -1568,7 +1568,7 @@ async def main() -> int:
             )
         binding_keys = {binding.key for binding in tui.ReviewDashboard.BINDINGS}
         check(
-            "l" not in binding_keys and "p" not in binding_keys,
+            "l" not in binding_keys,
             f"terminal-dispatched pane navigation must not collide with a binding, got {sorted(binding_keys)}",
         )
         review = [b for b in tui.ReviewDashboard.BINDINGS if b.action == "review"]
@@ -1578,8 +1578,8 @@ async def main() -> int:
             f"review must be on 'r', got {[b.key for b in review]}",
         )
         check(
-            "[b]l[/b]" not in tui.KEYS_ACTING and "[b]p[/b]" not in tui.KEYS_ACTING,
-            f"the acting key line must not advertise label or priority, got {tui.KEYS_ACTING!r}",
+            "[b]l[/b]" not in tui.KEYS_ACTING,
+            f"the acting key line must not advertise label actions, got {tui.KEYS_ACTING!r}",
         )
         root_screen = app.screen
         await pilot.press("ctrl+p")
@@ -1942,24 +1942,16 @@ async def main() -> int:
             await pilot.press("w")
             await pilot.pause()
             check(
-                isinstance(app.screen, tui.LandingScreen),
-                "[w] must reopen the live batch queue",
+                app.query_one("#landing-pause", tui.Button).has_focus,
+                "[w] must focus the persistent live batch queue",
             )
-            screen = app.screen
-            if isinstance(screen, tui.LandingScreen):
-                screen.poll()
-                rows = str(screen.query_one("#landing-rows", tui.Static).render())
-                check(
-                    rows.count("merged") == 2,
-                    f"the queue must show each landed PR, got {rows!r}",
-                )
-                check(
-                    "all landed" in rows,
-                    f"the queue must show the batch summary, got {rows!r}",
-                )
-            await pilot.press("q")
-            await pilot.pause()
-            check(not isinstance(app.screen, tui.LandingScreen), "q must return from LandingScreen")
+            rows = str(
+                app.query_one("#landing-control-status", tui.Static).render()
+            )
+            check(
+                rows.count("merged") == 2,
+                f"the persistent queue must show each landed PR, got {rows!r}",
+            )
     del os.environ["BLUEFIN_REVIEW_INSTANCE"]
 
     # ── landing batches share repository lanes, not one global FIFO ─────
@@ -2003,6 +1995,57 @@ async def main() -> int:
         return predicate()
 
     os.environ["BLUEFIN_REVIEW_INSTANCE"] = "pilot-concurrency"
+    app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("p")
+        paused_started = workdir / "paused.started"
+        paused_release = workdir / "paused.release"
+        paused_task = blocking_task(
+            "acme/paused", 1, paused_started, paused_release
+        )
+        app.landing_queue.append(paused_task)
+        app.refresh_status()
+        app.drain_landings()
+        await pilot.pause(0.1)
+        check(
+            app.landing_paused and not paused_started.exists(),
+            "pausing must hold pending landing work without starting its agent",
+        )
+        control_rows = str(
+            app.query_one("#landing-control-status", tui.Static).render()
+        )
+        check(
+            "PAUSED · agents 0/6 · 1 queued" in control_rows,
+            f"the persistent panel must show queue pause and counts, got {control_rows!r}",
+        )
+        await pilot.press("-")
+        await pilot.press("+")
+        check(
+            app.landing_concurrency == 6,
+            "the +/- controls must update the session concurrency limit",
+        )
+        await pilot.press("p")
+        started = await wait_until(lambda: paused_task.running, pilot)
+        check(started, "resuming must release pending landing work")
+        paused_release.touch()
+        finished = await wait_until(lambda: paused_task.returncode is not None, pilot)
+        check(finished, "a resumed landing worker must finish cleanly")
+        final_round = blocking_task(
+            "acme/final", 2, workdir / "final.started", workdir / "final.release"
+        )
+        final_round.phase = "final-review"
+        final_round.process = object()
+        app.landing_queue.append(final_round)
+        app.refresh_status()
+        control_rows = str(
+            app.query_one("#landing-control-status", tui.Static).render()
+        )
+        check(
+            "agents 1/6" in control_rows,
+            f"phase rounds must consume displayed landing capacity, got {control_rows!r}",
+        )
+
     app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -2200,6 +2243,24 @@ async def main() -> int:
             top_edge.startswith("╭") and "BATCHES" in top_edge,
             f"the batch list must render a framed title edge, got {top_edge!r}",
         )
+        await pilot.press("escape")
+        await pilot.pause()
+        app.refresh_status()
+        control_rows = str(
+            app.query_one("#landing-control-status", tui.Static).render()
+        )
+        for expected in (
+            "LANDING QUEUE",
+            "agents 1/6",
+            "projectbluefin/bluefinctl#31 — merged · gemini-3.8-flash",
+            "projectbluefin/common#7 — failed · gemini-3.8-flash",
+            "projectbluefin/dakota#12 — awaiting-stable · gemini-3.8-flash",
+            "projectbluefin/bluefin#99 — reviewing · gemini-3.8-flash",
+        ):
+            check(
+                expected in control_rows,
+                f"the persistent queue must show {expected!r}, got {control_rows!r}",
+            )
     for artifact in (
         Path(colour_task.prompt_path),
         Path(colour_task.status_path),
@@ -2909,14 +2970,14 @@ async def main() -> int:
         await pilot.press("w")
         await pilot.pause()
         check(
-            isinstance(app.screen, tui.LandingScreen),
-            "[w] must open LandingScreen explicitly after dispatch",
+            app.query_one("#landing-pause", tui.Button).has_focus,
+            "[w] must focus persistent queue controls instead of opening a second view",
         )
-        await pilot.press("q")
+        await pilot.press("escape")
         await pilot.pause()
         check(
-            not isinstance(app.screen, tui.LandingScreen),
-            "q must return from LandingScreen back to review queue",
+            app.query_one("#queue", tui.ListView).has_focus,
+            "Escape from queue controls must return to the item list, not exit the dashboard",
         )
     gh_log.write_text("")
 
@@ -2936,6 +2997,7 @@ async def main() -> int:
         'printf "{\\"state\\": \\"done\\", \\"note\\": \\"one landed, one refused\\"}\\n" >>"$status"\n',
     )
     os.environ["BLUEFIN_REVIEW_LANDING_COMMAND"] = f"{mixed_stub} @PROMPT"
+
     app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -7977,11 +8039,9 @@ async def main() -> int:
         await pilot.press("w")
         await pilot.pause()
         check(
-            isinstance(app.screen, tui.LandingScreen),
-            "[w] must open LandingScreen after partitioned batch dispatch",
+            app.query_one("#landing-pause", tui.Button).has_focus,
+            "[w] must focus persistent queue controls after partitioned batch dispatch",
         )
-        await pilot.press("escape")
-        await pilot.pause()
     os.environ["BLUEFIN_REVIEW_PARTITION_BATCH"] = "0"
     gh_log.write_text("")
 
@@ -8261,6 +8321,7 @@ async def main() -> int:
         app.view_mode = "prs"
 
         # ── #414: Slay refuses PR with no human review at landing gate ──
+        stop.repository = "projectbluefin/common"
         stop.review_status = "complete"
         stop.review_result = None
         stop.live["reviews"] = []  # No human review on GitHub!
@@ -8270,7 +8331,16 @@ async def main() -> int:
         stop.live["headRefOid"] = stop.head_sha
         no_human_identity = app.run_identity(stop)
         initial_landings = len(app.landing_queue)
+        notices: list[str] = []
+        real_notify = app.notify
+
+        def record_notice(message, *args, **kwargs):
+            notices.append(message)
+            real_notify(message, *args, **kwargs)
+
+        app.notify = record_notice
         await slay_and_confirm()
+        app.notify = real_notify
         check(
             len(app.landing_queue) == initial_landings,
             "slay must refuse to land PR with no human review",
@@ -8285,6 +8355,14 @@ async def main() -> int:
             "no human review" in (stop.failure or "").lower(),
             f"stop failure must record missing human review, got {stop.failure!r}",
         )
+        check(
+            f"[$] {stop.key}: landing blocked — GitHub has no qualifying human review. "
+            f"{stop.repository} requires a human review; leave one with [L], "
+            "then re-run [$]; no merge was attempted."
+            in notices,
+            "missing human review must explain the qualifying action and safe retry",
+        )
+        stop.repository = "projectbluefin/bluefinctl"
 
         # ── #410: Head change between review and mutation refuses landing ──
         stop.review_status = "complete"

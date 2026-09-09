@@ -188,6 +188,7 @@ MAX_REVIEW_OUTPUT_LINES = int(os.environ.get("BLUEFIN_REVIEW_MAX_OUTPUT_LINES", 
 MAX_ACTIVITY_ROWS = 8
 MAX_ACTIVITY_WORK_KEYS = 2
 MAX_ACTIVITY_TEXT = 96
+MAX_LANDING_CONTROL_ROWS = 8
 MAX_RECENT_MERGES = 3
 PERSISTED_PR_KEY_PATTERN = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+#[1-9][0-9]*"
@@ -300,6 +301,9 @@ COMMANDS = (
     CommandSpec("approve_or_land", "a", "merge", "approve+queue", mutating=True),
     CommandSpec("land_batch", "A", "land_batch", "land batch", mutating=True),
     CommandSpec("agents", "w", "agents", "watch batches"),
+    CommandSpec("decrease_landing_concurrency", "-", "decrease_landing_concurrency", "fewer landing agents"),
+    CommandSpec("increase_landing_concurrency", "+", "increase_landing_concurrency", "more landing agents"),
+    CommandSpec("toggle_landing_pause", "p", "toggle_landing_pause", "pause landing queue"),
     CommandSpec("review_policy", "P", "review_policy", "final review policy"),
     CommandSpec("merge_now", "m", "merge_now", "merge now", mutating=True),
     CommandSpec("reject", "x", "reject", "reject", mutating=True),
@@ -1240,6 +1244,13 @@ REVIEW_FAILURES = {
     "review_unparsable",
 }
 
+HUMAN_REVIEW_REPOSITORIES = frozenset({
+    "projectbluefin/common",
+    "projectbluefin/bluefin",
+    "projectbluefin/bluefin-lts",
+    "projectbluefin/dakota",
+})
+
 QUEUE_STATE_RANK = {
     "failed": 0,
     "in progress": 1,
@@ -1248,6 +1259,10 @@ QUEUE_STATE_RANK = {
     "done": 4,
     "blocked": 5,
 }
+
+
+def requires_human_review(repository: str) -> bool:
+    return repository.casefold() in HUMAN_REVIEW_REPOSITORIES
 
 
 def classify_routability(stop: Stop, record: RunRecord | None = None) -> str | None:
@@ -1277,11 +1292,17 @@ def classify_routability(stop: Stop, record: RunRecord | None = None) -> str | N
 
     # 4. Durable human-review-required state
     if (
+        requires_human_review(stop.repository)
+        and
         record is not None
         and record.state == RunState.HUMAN_REVIEW_MISSING
     ):
         return "human review required"
-    if stop.failure and "no human review" in stop.failure.lower():
+    if (
+        requires_human_review(stop.repository)
+        and stop.failure
+        and "no human review" in stop.failure.lower()
+    ):
         has_human = False
         reviews = live.get("reviews") or []
         if isinstance(reviews, dict):
@@ -3331,10 +3352,23 @@ class ReviewDashboard(App):
         border: heavy $primary; height: auto; padding: 0 1;
         color: $text;
     }
-    #queue-pane { width: 45%; border: solid $secondary; }
-    #right-pane { width: 55%; }
-    #details-pane { height: 60%; border: solid $secondary; padding: 0 1; }
-    #context-pane { height: 40%; border: solid $secondary; padding: 0 1; }
+    #review-metadata, #landing-row { height: 1fr; }
+    #activity {
+        width: 50%;
+    }
+    #landing-control {
+        width: 50%; border: heavy $primary; height: auto; padding: 0 1;
+        color: $text;
+    }
+    #landing-control { height: 100%; }
+    #landing-control-status { height: 1fr; }
+    #landing-control-buttons { height: 3; }
+    #landing-control-buttons Button { width: 1fr; min-width: 9; margin: 0 1; }
+    #queue-pane { height: 1fr; border: solid $secondary; }
+    #queue { height: 1fr; }
+    #details-pane, #context-pane {
+        width: 50%; height: 1fr; border: solid $secondary; padding: 0 1;
+    }
     #details, #context { height: auto; }
     #confirm-box {
         border: heavy magenta; background: $surface;
@@ -3430,6 +3464,10 @@ class ReviewDashboard(App):
         self.landing_queue: list[landing.LandingTask] = []
         self._landing_active: set[int] = set()
         self._landing_condition = threading.Condition()
+        # The launch environment supplies the session default. These controls
+        # change only future dispatches; an active review keeps its lane.
+        self.landing_concurrency = MAX_CONCURRENT_LANDINGS
+        self.landing_paused = False
         # One dispatcher owns scheduling. A final-review round is enqueued
         # from a finished task's callback, so this flag keeps a second
         # dispatcher from racing the first for the same task (#378).
@@ -3767,22 +3805,23 @@ class ReviewDashboard(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static("loading queue…", id="status-bar")
-        yield Static("AGENT ACTIVITY\nSnapshot: unavailable", id="activity")
-        yield Static("Harness Autopilot — CHECKING…", id="harness-status")
-        with Horizontal():
-            with Vertical(id="queue-pane"):
-                yield ListView(id="queue")
-            with Vertical(id="right-pane"):
-                # The evidence panes are scroll containers, not bare
-                # Statics: a Static clips content it cannot fit and is not
-                # focusable, so evidence taller than the pane was simply
-                # unreachable, and h/l could never land on it. A
-                # ScrollableContainer takes focus, so pane movement reaches
-                # it and its own keys scroll it.
+        with Vertical(id="queue-pane"):
+            yield ListView(id="queue")
+        with Vertical(id="review-metadata"):
+            yield Static("Harness Autopilot — CHECKING…", id="harness-status")
+            with Horizontal():
                 with ScrollableContainer(id="details-pane"):
                     yield Static("", id="details")
                 with ScrollableContainer(id="context-pane"):
                     yield Static("", id="context")
+        with Horizontal(id="landing-row"):
+            yield Static("AGENT ACTIVITY\nSnapshot: unavailable", id="activity")
+            with Vertical(id="landing-control"):
+                yield Static("LANDING QUEUE\nNo batches dispatched.", id="landing-control-status")
+                with Horizontal(id="landing-control-buttons"):
+                    yield Button("-", id="landing-concurrency-down")
+                    yield Button("+", id="landing-concurrency-up")
+                    yield Button("Pause", id="landing-pause")
         yield Input(
             placeholder="[/] steer the review of the highlighted PR — "
             "enter runs it, esc returns to the queue",
@@ -5761,6 +5800,64 @@ class ReviewDashboard(App):
             ]
         panel.update("\n".join(escape(line) for line in [*lines, *rows]))
 
+    def refresh_landing_control(self) -> None:
+        """Render the live dispatch queue without opening a second screen."""
+        try:
+            panel = self.query_one("#landing-control-status", Static)
+            pause = self.query_one("#landing-pause", Button)
+        except (NoMatches, ScreenStackError):
+            return
+        active = [
+            task for task in self.landing_queue if self._landing_task_active(task)
+        ]
+        queued = [
+            task
+            for task in self.landing_queue
+            if (
+                not self._landing_task_active(task)
+                and task.process is None
+                and task.returncode is None
+            )
+        ]
+        state = "PAUSED" if self.landing_paused else "RUNNING"
+        lines = [
+            "LANDING QUEUE",
+            f"{state} · agents {len(active)}/{self.landing_concurrency} · {len(queued)} queued",
+        ]
+        completed = [
+            task
+            for task in self.landing_queue
+            if not task.phase and task not in active and task not in queued
+        ]
+        rows = [*active, *queued, *reversed(completed)]
+        visible = 0
+        total = sum(len(task.stops) for task in rows)
+        for task in rows:
+            if visible >= MAX_LANDING_CONTROL_ROWS:
+                break
+            events = landing.parse_status(task.status_path)
+            fallback = "queued" if task in queued else "reviewing"
+            if task in completed:
+                fallback = (
+                    "finished" if task.returncode == 0 else "failed"
+                )
+            model = task.model or os.environ.get(
+                "GOOSE_MODEL", "gemini-3.8-flash"
+            )
+            for stop in task.stops:
+                if visible >= MAX_LANDING_CONTROL_ROWS:
+                    break
+                event = events.get(stop.key, {})
+                phase = str(event.get("state") or fallback)
+                lines.append(f"{stop.key} — {phase} · {model}")
+                visible += 1
+        if total > visible:
+            lines.append(f"… {total - visible} more items")
+        if len(lines) == 2:
+            lines.append("No batches dispatched.")
+        panel.update("\n".join(escape(line) for line in lines))
+        pause.label = "Resume" if self.landing_paused else "Pause"
+
     def refresh_status(
         self, record_snapshot: dict[str, RunRecord] | None = None
     ) -> None:
@@ -5798,6 +5895,7 @@ class ReviewDashboard(App):
         self.observability.state("reviews.active", active_reviews)
         self.observability.state("landings.active", running)
         self.observability.state("check_workers.active", review_running)
+        self.refresh_landing_control()
         reviews = f" | review slots: {review_running}/{review_cap}"
         breaker_parts = []
         for dep in Dependency:
@@ -6798,6 +6896,13 @@ class ReviewDashboard(App):
     def action_back(self) -> None:
         if isinstance(self.focused, (Input, TextArea)):
             return
+        if isinstance(self.focused, Button) and self.focused.id in {
+            "landing-concurrency-down",
+            "landing-concurrency-up",
+            "landing-pause",
+        }:
+            self.query_one("#queue", ListView).focus()
+            return
         if len(self.screen_stack) > 1:
             self.pop_screen()
         else:
@@ -7272,7 +7377,10 @@ class ReviewDashboard(App):
         self.run_store.transition(identity, RunState.MUTATING, low_risk=low_risk)
 
         # Human review invariant at the landing gate (#414)
-        if not self.has_human_review(live_data):
+        if (
+            requires_human_review(stop.repository)
+            and not self.has_human_review(live_data)
+        ):
             self.run_store.transition(
                 identity,
                 RunState.HUMAN_REVIEW_MISSING,
@@ -7281,7 +7389,9 @@ class ReviewDashboard(App):
             stop.failure = "landing refused: no human review on GitHub"
             stop.failure_command = "landing gate"
             self.notify(
-                f"[$] {stop.key}: landing refused: no human review on GitHub",
+                f"[$] {stop.key}: landing blocked — GitHub has no qualifying human review. "
+                f"{stop.repository} requires a human review; leave one with [L], "
+                "then re-run [$]; no merge was attempted.",
                 severity="error",
             )
             self.refresh_rows()
@@ -8141,6 +8251,8 @@ class ReviewDashboard(App):
             )
 
         with self._landing_condition:
+            if self.landing_paused:
+                return
             if self.landing_draining:
                 self._landing_condition.notify_all()
                 return
@@ -8148,6 +8260,8 @@ class ReviewDashboard(App):
         try:
             while True:
                 with self._landing_condition:
+                    if self.landing_paused:
+                        return
                     active = [
                         task
                         for task in self.landing_queue
@@ -8156,7 +8270,7 @@ class ReviewDashboard(App):
                     running_repos: set[str] = set()
                     for task in active:
                         running_repos.update(self._landing_repositories(task))
-                    slots = MAX_CONCURRENT_LANDINGS - len(active)
+                    slots = self.landing_concurrency - len(active)
                     for task in self.landing_queue:
                         if slots <= 0:
                             break
@@ -8203,7 +8317,7 @@ class ReviewDashboard(App):
         finally:
             with self._landing_condition:
                 self.landing_draining = False
-                restart = pending()
+                restart = not self.landing_paused and pending()
             if restart:
                 self.drain_landings()
 
@@ -8495,10 +8609,36 @@ class ReviewDashboard(App):
         ]
 
     def action_agents(self) -> None:
-        if not self.landing_queue:
-            self.notify("no batch has been dispatched yet.", severity="warning")
+        self.query_one("#landing-pause", Button).focus()
+
+    def action_decrease_landing_concurrency(self) -> None:
+        if self.landing_concurrency == 1:
+            self.notify("landing concurrency is already 1.", severity="warning")
             return
-        self.push_screen(LandingScreen(self))
+        self.landing_concurrency -= 1
+        self.refresh_status()
+
+    def action_increase_landing_concurrency(self) -> None:
+        self.landing_concurrency += 1
+        self.refresh_status()
+        self.drain_landings()
+
+    def action_toggle_landing_pause(self) -> None:
+        self.landing_paused = not self.landing_paused
+        self.refresh_status()
+        if not self.landing_paused:
+            self.drain_landings()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        controls = {
+            "landing-concurrency-down": self.action_decrease_landing_concurrency,
+            "landing-concurrency-up": self.action_increase_landing_concurrency,
+            "landing-pause": self.action_toggle_landing_pause,
+        }
+        action = controls.get(event.button.id)
+        if action is not None:
+            event.stop()
+            action()
 
     def action_merge_now(self) -> None:
         """Merge this pull request now, as a maintainer, without `lgtm`.
