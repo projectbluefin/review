@@ -403,10 +403,16 @@ class ResponsiveTuiContractTests(unittest.TestCase):
                         str(message)
                     )
                     app.plan_landing([stop])
-                    await pilot.pause()
+                    for _ in range(100):
+                        if isinstance(app.screen, tui.BatchPlanScreen):
+                            break
+                        await pilot.pause(0.01)
                     self.assertIsInstance(app.screen, tui.BatchPlanScreen)
                     await pilot.press("enter")
-                    await pilot.pause()
+                    for _ in range(100):
+                        if app.landing_queue:
+                            break
+                        await pilot.pause(0.01)
                     self.assertTrue(app.landing_queue)
                     self.assertFalse(
                         any("dispatched" in message for message in notices)
