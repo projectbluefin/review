@@ -6529,7 +6529,9 @@ class ReviewDashboard(App):
         """Reserve visible room for state and action evidence in each row."""
         try:
             width = self.query_one("#queue", ListView).content_region.width
-        except NoMatches:
+            if type(width) is not int:
+                width = 80
+        except (NoMatches, ScreenStackError, AttributeError, TypeError):
             width = 80
         if width < 1:
             width = 80
