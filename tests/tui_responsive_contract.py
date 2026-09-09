@@ -637,6 +637,7 @@ class ResponsiveTuiContractTests(unittest.TestCase):
                 )
                 self.assertIn("CI FAILED", visible)
                 self.assertIn("[fix-ci]", visible)
+                self.assertEqual(visible.count("FAILED"), 1)
 
         asyncio.run(exercise())
 

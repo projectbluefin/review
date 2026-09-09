@@ -6470,8 +6470,18 @@ class ReviewDashboard(App):
         # A stop that would not merge says so on its own row, so a failure in
         # the middle of a batch survives the notification that reported it.
         failed = " ✗ DID NOT MERGE" if stop.failure else ""
-        marks = self._review_badge(stop, record_snapshot=record_snapshot)
         checks = effective_check_state(stop.check_state, stop.live)
+        ci_only_failure = (
+            checks == "failure"
+            and not stop.failure
+            and stop.review_status not in REVIEW_FAILURES
+            and stop.mergeable_state != "dirty"
+        )
+        marks = (
+            ""
+            if ci_only_failure
+            else self._review_badge(stop, record_snapshot=record_snapshot)
+        )
         if stop.mergeable_state == "dirty":
             marks += " ⚑ CONFLICTS"
         marks += f" {ci_marker(checks)}"
@@ -6518,9 +6528,9 @@ class ReviewDashboard(App):
             visible_suffix = Text.from_markup(suffix).plain
         except MarkupError:
             visible_suffix = suffix
-        # ListView may consume its edge column for the scrollbar after the
-        # label is measured; reserve it so the action/CI suffix remains visible.
-        available = max(1, width - 1 - len(prefix) - len(visible_suffix))
+        # ListView may consume edge columns for the scrollbar after the label
+        # is measured; reserve them so the action/CI suffix remains visible.
+        available = max(1, width - 2 - len(prefix) - len(visible_suffix))
         if len(stop.title) <= available:
             return stop.title
         if available == 1:
