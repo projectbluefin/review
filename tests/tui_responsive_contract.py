@@ -372,10 +372,12 @@ class ResponsiveTuiContractTests(unittest.TestCase):
                     self.assertFalse(
                         any("dispatched" in message for message in notices)
                     )
-                    self.assertIn(
-                        "last dispatched",
-                        str(app.query_one("#status-bar", tui.Static).render()),
+                    status_bar = app.query_one("#status-bar", tui.Static)
+                    self.assertIn("last dispatched", str(status_bar.render()))
+                    visible_status = "".join(
+                        segment.text for segment in status_bar.render_line(0)
                     )
+                    self.assertIn("last dispatched", visible_status)
 
             asyncio.run(exercise())
 

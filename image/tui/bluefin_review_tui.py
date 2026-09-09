@@ -6187,7 +6187,7 @@ class ReviewDashboard(App):
         view_tag = f"{escape('[Tab]')} Issues view | " if self.view_mode == "issues" else f"{escape('[Tab]')} PR view | "
         if self.view_mode == "issues":
             status_bar.update(
-                f" {view_tag}Issues: {shown} open "
+                f" {landed}{view_tag}Issues: {shown} open "
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
                 f"| batch: {selected}{reconciliation}"
@@ -6195,10 +6195,10 @@ class ReviewDashboard(App):
             )
         else:
             status_bar.update(
-                f" {view_tag}Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
+                f" {landed}{view_tag}Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
-                f"| batch: {selected}{reconciliation}{stuck}{review_failures}{agents}{landed}{policy}"
+                f"| batch: {selected}{reconciliation}{stuck}{review_failures}{agents}{policy}"
                 f"{reviews}{breakers}{countme} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
             )
 
