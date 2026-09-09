@@ -375,25 +375,25 @@ def back_bindings(dismiss_action: str) -> list[Binding]:
 # changes anything on GitHub; everything on the second goes through the
 # typed-number gate.
 KEYS_READING = (
-    " [b]I[/b] issues/PRs · [b]Tab[/b] focus panes"
-    " · [b]r[/b] review · [b]v[/b] diff · [b]C[/b] comments · [b]o[/b] open · [b]h[/b] handoff"
-    " · [b]/[/b] steer · [b]f[/b] filter · [b]b[/b]/[b]B[/b] select"
-    " · [b]Space[/b] select+next · [b]n[/b] next lacking my review"
-    " · [b]w[/b] watch batches · [b]i[/b] CI logs"
-    " · [b]P[/b] review policy · [b]H[/b] hive"
-    " · [b]R[/b] refresh · [b]q[/b]/Esc back"
+    " [b]I[/b]:issues/PRs · [b]Tab[/b]:focus panes"
+    " · [b]r[/b]:review · [b]v[/b]:diff · [b]C[/b]:comments · [b]o[/b]:open · [b]h[/b]:handoff"
+    " · [b]/[/b]:steer · [b]f[/b]:filter · [b]b[/b]/[b]B[/b]:select"
+    " · [b]Space[/b]:select+next · [b]n[/b]:next lacking my review"
+    " · [b]w[/b]:watch batches · [b]i[/b]:CI logs"
+    " · [b]P[/b]:review policy · [b]H[/b]:hive"
+    " · [b]R[/b]:refresh · [b]q[/b]/Esc:back"
 )
 KEYS_ACTING = (
-    " [b]L[/b] leave review · [b]a[/b] approve+queue · [b]A[/b] land batch · [b]m[/b] merge · [b]$[/b] slay"
-    " · [b]u[/b] update clean branch · [b]U[/b] select mechanical · [b]x[/b] reject · [b]M[/b] dupes"
+    " [b]L[/b]:leave review · [b]a[/b]:approve+queue · [b]A[/b]:land batch · [b]m[/b]:merge · [b]$[/b]:slay"
+    " · [b]u[/b]:update clean branch · [b]U[/b]:select mechanical · [b]x[/b]:reject · [b]M[/b]:dupes"
 )
 KEYS_READING_COMPACT = (
-    " [b]j/k[/b] move · [b]b/B[/b] select · [b]/[/b] steer · [b]i[/b] CI"
-    " · [b]w[/b] batches · [b]R[/b] refresh · [b]q[/b]/Esc back"
+    " [b]j/k[/b]:move · [b]b/B[/b]:select · [b]/[/b]:steer · [b]i[/b]:CI"
+    " · [b]w[/b]:batches · [b]R[/b]:refresh · [b]q[/b]/Esc:back"
 )
 KEYS_ACTING_COMPACT = (
-    " [b]A[/b] land · [b]a[/b] approve · [b]L[/b] review · [b]m[/b] merge"
-    " · [b]x[/b] reject · [b]u[/b] update · [b]$[/b] slay"
+    " [b]A[/b]:land · [b]a[/b]:approve · [b]L[/b]:review · [b]m[/b]:merge"
+    " · [b]x[/b]:reject · [b]u[/b]:update · [b]$[/b]:slay"
 )
 STEER_PLACEHOLDER = (
     "[/] steer the review of the highlighted PR — enter runs it, esc returns to the queue"
@@ -6563,6 +6563,14 @@ class ReviewDashboard(App):
             or effective_check_state(stop.check_state, stop.live) == "failure"
         ):
             return "failed"
+        if self is not None:
+            for task in self.landing_queue:
+                if stop.key not in task.keys:
+                    continue
+                if self._landing_task_active(task):
+                    return "in progress"
+                if task.process is None and task.returncode is None:
+                    return "queued"
         if stop.review_status in {"queued", "running"}:
             return "in progress"
         if stop.review_result is not None:

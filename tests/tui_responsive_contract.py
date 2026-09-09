@@ -681,8 +681,50 @@ class ResponsiveTuiContractTests(unittest.TestCase):
                     acting_text = "".join(
                         segment.text for segment in acting.render_line(0)
                     )
-                    self.assertIn("i CI", reading_text)
-                    self.assertIn("A land", acting_text)
+                    self.assertIn("i:CI", reading_text)
+                    self.assertIn("A:land", acting_text)
+
+        asyncio.run(exercise())
+
+    def test_active_landing_counts_as_queue_progress(self):
+        with tempfile.TemporaryDirectory() as root:
+            stop = tui.Stop(
+                "projectbluefin/review",
+                101,
+                "review",
+                "landing fixture",
+                check_state="pending",
+                live={
+                    "headRefOid": "1" * 40,
+                    "statusCheckRollup": [{
+                        "name": "fixture-ci",
+                        "state": "IN_PROGRESS",
+                        "headSha": "1" * 40,
+                    }],
+                },
+            )
+            task = tui.landing.LandingTask(
+                "active-landing",
+                [stop],
+                "reviewer",
+                status_path=str(Path(root) / "status.jsonl"),
+                process=object(),
+            )
+            app = tui.ReviewDashboard()
+            app.load_queue = lambda: None
+            app.load_hive = lambda: None
+            app.discover_harness = lambda: None
+            app.load_issues = lambda: None
+            app.stops = [stop]
+            app.landing_queue.append(task)
+
+            async def exercise():
+                async with app.run_test(size=(120, 40)) as pilot:
+                    app.populate(app.stops)
+                    await pilot.pause()
+                    self.assertEqual(app._queue_state(stop), "in progress")
+                    status = str(app.query_one("#status-bar").render())
+                    self.assertIn("1 in progress", status)
 
             asyncio.run(exercise())
 

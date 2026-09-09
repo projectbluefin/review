@@ -218,6 +218,15 @@ def apply_scenario(
         task.model = "fixture-model"
         task.process = object()
         task.started = time.monotonic() - 7
+        stop.check_state = "pending"
+        stop.live = {
+            **stop.live,
+            "statusCheckRollup": [{
+                "name": "fixture-ci",
+                "state": "IN_PROGRESS",
+                "headSha": stop.head_sha,
+            }],
+        }
         Path(task.status_path).write_text(
             json.dumps(
                 {
@@ -241,7 +250,18 @@ def apply_scenario(
             encoding="utf-8",
         )
         app.landing_queue.append(task)
+        app.refresh_rows()
+        queue = app.query_one("#queue")
+        queue.index = next(
+            index for index, candidate in enumerate(app.stops) if candidate is stop
+        )
+        app.render_evidence(stop)
         app.refresh_status()
+        details = str(app.query_one("#details").render())
+        if stop.key not in details or "1 pending" not in details:
+            raise RuntimeError(
+                "landing fixture did not select the active target details"
+            )
     elif scenario == "ci-failure":
         app.current.failure = "CI failed · local fixture"
         app.render_evidence(app.current)
