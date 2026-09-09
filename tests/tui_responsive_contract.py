@@ -416,7 +416,11 @@ class ResponsiveTuiContractTests(unittest.TestCase):
                             break
                         await pilot.pause(0.01)
                     self.assertIsInstance(app.screen, tui.BatchPlanScreen)
-                    await pilot.press("enter")
+                    await pilot.pause()
+                    self.assertIsNotNone(
+                        app.screen.query_one("#batch-dispatch", tui.Button)
+                    )
+                    await pilot.click("#batch-dispatch")
                     for _ in range(100):
                         if app.landing_queue:
                             break

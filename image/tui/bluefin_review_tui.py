@@ -1822,7 +1822,8 @@ class BatchPlanScreen(ModalScreen[bool]):
     command. On a batch the maintainer has already reviewed row by row —
     the selection was the review — typing the count back teaches nothing
     and only slows the loop. This gate is proportionate: every pull request
-    and the exact agent command are shown, Enter dispatches, Esc aborts.
+    and the exact agent command are shown, Dispatch or Enter proceeds, and
+    Abort or Esc cancels.
     There is no default and no timer; dispatch is still a decision, not a
     typing exercise.
     """
@@ -1856,10 +1857,19 @@ class BatchPlanScreen(ModalScreen[bool]):
                     yield Static(" ".join(task.command), classes="confirm-command")
             else:
                 yield Static(" ".join(self.plan.command), classes="confirm-command")
+            with Horizontal(id="confirm-actions"):
+                yield Button("Dispatch", id="batch-dispatch", variant="primary")
+                yield Button("Abort", id="batch-abort")
             yield Label("[enter] dispatch · [esc] abort")
 
     def action_dispatch(self) -> None:
         self.dismiss(True)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "batch-dispatch":
+            self.dismiss(True)
+        elif event.button.id == "batch-abort":
+            self.dismiss(False)
 
 
 class FinalPolicyScreen(ModalScreen[str]):
@@ -4040,6 +4050,8 @@ class ReviewDashboard(App):
         width: 1fr; max-width: 92%; max-height: 90%; overflow-y: auto;
         height: auto; padding: 1 2; margin: 1 2;
     }
+    #confirm-actions { width: auto; height: auto; align: center middle; }
+    #confirm-actions Button { margin: 1 1; }
     #confirm-command, .confirm-command { color: $text-accent; text-style: bold; }
     #steer { border: solid $secondary; height: 3; }
     #keys-reading, #keys-acting { height: 1; background: $panel; }

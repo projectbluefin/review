@@ -33,7 +33,7 @@ or cluster scale-out (`cluster-workers.md`).
 
 1. **Selection & Confirmation:** `[b]` marks stops for batching; `[A]` opens
    `BatchPlanScreen` showing every selected PR and the exact agent command.
-   Enter dispatches; Escape aborts.
+   The Dispatch button or Enter proceeds; the Abort button or Escape cancels.
 2. **Multi-Repository Partitioning:** Multi-repo selections partition into
    independent per-repository `LandingTask` lanes.
 3. **Concurrent Execution:** Up to `BLUEFIN_REVIEW_CONCURRENT_LANDINGS`
