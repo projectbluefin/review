@@ -51,22 +51,25 @@ credential handoff, remote Podman and Kubernetes sessions.
 
 [![Wide live dashboard with numbered regions for activity, queue and selected PR evidence](docs/images/dashboard-overview.png)](docs/images/dashboard-overview.png)
 
-*Real dashboard rendered at 220 columns × 60 rows from source revision
-`0f5eeca`, using live GitHub data. Documentation capture, not an installed-image
+*Real dashboard rendered at 170 columns × 44 rows from source revision
+`0f5eeca`, using live Bluefin LTS GitHub data. Documentation capture, not an installed-image
 acceptance test or a current queue-status report. Open the image at full size.*
 
 1. **Check activity and freshness.** The top panels show review workers and
    landing work. An idle session is normal; opening the dashboard starts no review.
 2. **Choose a pull request.** Use `j` / `k` to move, `f` to cycle the action
-   filter, and `R` to refresh. The capture uses the review filter; launch defaults
-   to the whole queue. `Tab` moves focus between panes.
+   filter, and `R` to refresh. The capture shows Bluefin LTS with all action types; launch defaults
+   to the whole organization. `Tab` moves focus between panes.
 3. **Read the evidence.** Inspect the selected PR's checks, merge state and
    context. `Enter` opens its diff, or existing review evidence when available.
    `v` opens the diff, `C` comments, and `o` the GitHub page.
+
 4. **Start a review when ready.** Press `r`; use `/` to steer the review or
    `y` to hand its context to your own client. `?` shows current key help and
    `Ctrl-p` opens the command palette. `Esc` returns from an inspection view;
    at the dashboard it exits.
+
+![Selected pull request evidence at readable detail size](docs/images/dashboard-evidence.png)
 
 A review draft is evidence for your decision. Review submission, approve-and-queue,
 merge and fix-and-land are distinct actions with side effects; inspect their

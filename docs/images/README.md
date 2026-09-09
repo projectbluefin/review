@@ -10,10 +10,14 @@ The documentation source is [Apache-2.0 licensed](https://github.com/projectblue
 The generated mark is a new interpretation, not the canonical illustration.
 
 `dashboard-overview.png` captures the actual Textual dashboard at source revision
-`0f5eecacd20d85a6f9b4dff79b181bec99e6f896`, with live GitHub reads at
-220 columns × 60 rows on September 9, 2026. Only numbered outlines and a legend
+`0f5eecacd20d85a6f9b4dff79b181bec99e6f896`, with live Bluefin LTS GitHub reads at
+170 columns × 44 rows on September 9, 2026. Only numbered outlines and a legend
 were added; UI pixels were not reconstructed. The session started no reviews
 or landing batches. It demonstrates the interface, not current PR status or
 published-container acceptance. Open at full size to read the terminal text.
 
 These documentation assets accompany the repository's [Apache-2.0 license](../../LICENSE).
+
+`dashboard-evidence.png` is a native-pixel crop of the selected PR panel from
+the same capture, with a caption added outside the UI. Native red conflict/CI
+failure rows, cyan review rows and gold focus are retained unchanged.
