@@ -283,7 +283,7 @@ if Static is not None:
         #state-badge {
             width: 100%; height: 1; text-align: center;
         }
-        #state-badge.active { color: $text-accent; background: $accent-muted; text-style: bold; }
+        #state-badge.active { color: $text-accent; background: $primary-muted; text-style: bold; }
         #state-badge.idle, #state-badge.starting { color: $text-primary; background: $primary-muted; text-style: bold; }
         #state-badge.warning { color: $text-warning; background: $warning-muted; text-style: bold; }
         #state-badge.error { color: $text-error; background: $error-muted; text-style: bold; }
