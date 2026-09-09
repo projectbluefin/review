@@ -210,7 +210,10 @@ def apply_scenario(
 ) -> None:
     app.refresh_rows()
     if scenario == "landing-progress":
-        stop = app.stops[0]
+        stop = next(
+            (candidate for candidate in app.stops if candidate.number == 101),
+            app.stops[0],
+        )
         task = landing.new_task([stop], "fixture-user")
         task.model = "fixture-model"
         task.process = object()

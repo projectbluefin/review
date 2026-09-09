@@ -375,25 +375,25 @@ def back_bindings(dismiss_action: str) -> list[Binding]:
 # changes anything on GitHub; everything on the second goes through the
 # typed-number gate.
 KEYS_READING = (
-    " [b]I[/b] issues/PRs [b]Tab[/b] focus panes"
-    " [b]r[/b] review [b]v[/b] diff [b]C[/b] comments [b]o[/b] open [b]h[/b] handoff"
-    " [b]/[/b] steer [b]f[/b] filter [b]b[/b]/[b]B[/b] select"
-    " [b]Space[/b] select+next [b]n[/b] next lacking my review"
-    " [b]w[/b] watch batches [b]i[/b] CI logs"
-    " [b]P[/b] review policy [b]H[/b] hive"
-    " [b]R[/b] refresh [b]q[/b]/Esc back"
+    " [b]I[/b] issues/PRs · [b]Tab[/b] focus panes"
+    " · [b]r[/b] review · [b]v[/b] diff · [b]C[/b] comments · [b]o[/b] open · [b]h[/b] handoff"
+    " · [b]/[/b] steer · [b]f[/b] filter · [b]b[/b]/[b]B[/b] select"
+    " · [b]Space[/b] select+next · [b]n[/b] next lacking my review"
+    " · [b]w[/b] watch batches · [b]i[/b] CI logs"
+    " · [b]P[/b] review policy · [b]H[/b] hive"
+    " · [b]R[/b] refresh · [b]q[/b]/Esc back"
 )
 KEYS_ACTING = (
-    " [b]L[/b] leave review [b]a[/b] approve+queue [b]A[/b] land batch [b]m[/b] merge [b]$[/b] slay"
-    " [b]u[/b] update clean branch [b]U[/b] select mechanical [b]x[/b] reject [b]M[/b] dupes"
+    " [b]L[/b] leave review · [b]a[/b] approve+queue · [b]A[/b] land batch · [b]m[/b] merge · [b]$[/b] slay"
+    " · [b]u[/b] update clean branch · [b]U[/b] select mechanical · [b]x[/b] reject · [b]M[/b] dupes"
 )
 KEYS_READING_COMPACT = (
-    " [b]j/k[/b] move  [b]b/B[/b] select  [b]/[/b] steer  [b]i[/b] CI"
-    "  [b]w[/b] batches  [b]R[/b] refresh  [b]q[/b]/Esc back"
+    " [b]j/k[/b] move · [b]b/B[/b] select · [b]/[/b] steer · [b]i[/b] CI"
+    " · [b]w[/b] batches · [b]R[/b] refresh · [b]q[/b]/Esc back"
 )
 KEYS_ACTING_COMPACT = (
-    " [b]A[/b] land  [b]a[/b] approve  [b]L[/b] review  [b]m[/b] merge"
-    "  [b]x[/b] reject  [b]u[/b] update  [b]$[/b] slay"
+    " [b]A[/b] land · [b]a[/b] approve · [b]L[/b] review · [b]m[/b] merge"
+    " · [b]x[/b] reject · [b]u[/b] update · [b]$[/b] slay"
 )
 STEER_PLACEHOLDER = (
     "[/] steer the review of the highlighted PR — enter runs it, esc returns to the queue"
@@ -6909,7 +6909,7 @@ class ReviewDashboard(App):
             ]
             if active_landing_keys:
                 active_detail = (
-                    f"active landing: {self._activity_work(active_landing_keys)}"
+                    f"active: {self._activity_work(active_landing_keys)}"
                 )
             elif active_reviews:
                 active_detail = (
@@ -7056,6 +7056,11 @@ class ReviewDashboard(App):
             if self.last_landing_outcome
             else ""
         )
+        landing_prefix = (
+            f"last {self.last_landing_outcome} | "
+            if self.last_landing_outcome
+            else ""
+        )
         recent_merges = (
             f" | last merged: {escape(', '.join(self.recent_merges))}"
             if self.recent_merges
@@ -7132,7 +7137,7 @@ class ReviewDashboard(App):
         )
         if self.view_mode == "issues":
             status_bar.update(
-                f" {landed}{view_tag}Issues: {shown} open "
+                f" {landing_prefix}{view_tag}Issues: {shown} open "
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
                 f"| batch: {selected}{reconciliation}"
@@ -7140,22 +7145,22 @@ class ReviewDashboard(App):
             )
         elif self.view_mode == "prs":
             status_bar.update(
-                f" {view_tag}Queue: {shown} PRs{held_back} | {queue_status} "
+                f" {landing_prefix}{view_tag}Queue: {shown} PRs{held_back} | {queue_status} "
                 f"| filter {scope} | {breakdown} "
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
-                f"| batch: {selected}{reconciliation}{stuck}{review_failures}{agents}{landed}{recent_merges}{policy}"
+                f"| batch: {selected}{reconciliation}{stuck}{review_failures}{agents}{recent_merges}{policy}"
                 f"{reviews}{breakers}{countme} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
             )
         else:
             pr_shown = sum(1 for s in self.stops if not s.is_issue)
             issue_shown = sum(1 for s in self.stops if s.is_issue)
             status_bar.update(
-                f" {view_tag}Board: {shown} items ({pr_shown} PRs, {issue_shown} issues){held_back} | {queue_status} "
+                f" {landing_prefix}{view_tag}Board: {shown} items ({pr_shown} PRs, {issue_shown} issues){held_back} | {queue_status} "
                 f"| filter {scope} | {breakdown} "
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
-                f"| batch: {selected}{reconciliation}{stuck}{review_failures}{agents}{landed}{recent_merges}{policy}"
+                f"| batch: {selected}{reconciliation}{stuck}{review_failures}{agents}{recent_merges}{policy}"
                 f"{reviews}{breakers}{countme} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
             )
 
@@ -7648,7 +7653,7 @@ class ReviewDashboard(App):
             except NoMatches:
                 return
             details.update(
-                f"[b]{issue_link}[/b]  {escape(title)}\n"
+                f"[b]{issue_link}[/b] — {escape(title)}\n"
                 f"author     {link(author, f'https://github.com/{author}')}\n"
                 f"state      {escape(state)}\n"
                 f"created    {escape(created_at[:19] if created_at else '-')}\n"
@@ -7737,7 +7742,7 @@ class ReviewDashboard(App):
             ci_triage_block = "\n" + "\n".join(lines_ci)
 
         self.query_one("#details", Static).update(
-            f"[b]{link(stop.key, pr_url(stop.repository, stop.number))}[/b]  "
+            f"[b]{link(stop.key, pr_url(stop.repository, stop.number))}[/b] — "
             f"{escape(stop.title)}\n"
             f"queue says: {escape(stop.action)}\n"
             f"author   {link(author, f'https://github.com/{author}')}\n"
@@ -7822,7 +7827,7 @@ class ReviewDashboard(App):
                 if counts.get(key)
             )
             lines.append(
-                f"[b]merge queue[/b]  {escape(stop.repository)} — {total} open"
+                f"[b]merge queue[/b] · {escape(stop.repository)} — {total} open"
             )
             lines.append(f"  {meter_bar(counts)}")
             lines.append(f"  {summary}")

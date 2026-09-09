@@ -129,6 +129,7 @@ class ResponsiveTuiContractTests(unittest.TestCase):
             app.load_queue = lambda: None
             app.load_hive = lambda: None
             app.discover_harness = lambda: None
+            app.load_issues = lambda: None
 
             async def exercise():
                 async with app.run_test(size=(80, 24)) as pilot:
@@ -419,6 +420,7 @@ class ResponsiveTuiContractTests(unittest.TestCase):
             app.load_queue = lambda: None
             app.load_hive = lambda: None
             app.discover_harness = lambda: None
+            app.load_issues = lambda: None
             app.enqueue_landing = lambda task: app.landing_queue.append(task)
             notices = []
 
@@ -448,12 +450,17 @@ class ResponsiveTuiContractTests(unittest.TestCase):
                         any("dispatched" in message for message in notices)
                     )
                     status_bar = app.query_one("#status-bar", tui.Static)
+                    visible_status = ""
+                    for _ in range(100):
+                        visible_status = "".join(
+                            segment.text for segment in status_bar.render_line(0)
+                        )
+                        if "last dispatched" in visible_status:
+                            break
+                        await pilot.pause(0.01)
                     self.assertIn("last dispatched", str(status_bar.render()))
-                    visible_status = "".join(
-                        segment.text for segment in status_bar.render_line(0)
-                    )
                     self.assertIn("last dispatched", visible_status)
-                    self.assertIn("review queue remains open | [Tab]", visible_status)
+                    self.assertIn("review queue remains open | [I]", visible_status)
 
             asyncio.run(exercise())
 
@@ -463,6 +470,7 @@ class ResponsiveTuiContractTests(unittest.TestCase):
             app.load_queue = lambda: None
             app.load_hive = lambda: None
             app.discover_harness = lambda: None
+            app.load_issues = lambda: None
             async with app.run_test(size=size) as pilot:
                 await pilot.pause()
                 self.assertIs(app.focused, app.query_one("#queue"))
@@ -480,6 +488,7 @@ class ResponsiveTuiContractTests(unittest.TestCase):
             app.load_queue = lambda: None
             app.load_hive = lambda: None
             app.discover_harness = lambda: None
+            app.load_issues = lambda: None
             async with app.run_test(size=(80, 24)) as pilot:
                 await pilot.pause()
                 queue = app.query_one("#queue")
@@ -505,6 +514,7 @@ class ResponsiveTuiContractTests(unittest.TestCase):
             app.load_queue = lambda: None
             app.load_hive = lambda: None
             app.discover_harness = lambda: None
+            app.load_issues = lambda: None
             async with app.run_test(size=(80, 24)) as pilot:
                 await pilot.pause()
                 for ident in ("#keys-reading", "#keys-acting"):
@@ -525,6 +535,7 @@ class ResponsiveTuiContractTests(unittest.TestCase):
             app.load_queue = lambda: None
             app.load_hive = lambda: None
             app.discover_harness = lambda: None
+            app.load_issues = lambda: None
             async with app.run_test(size=(80, 24), notifications=True) as pilot:
                 await pilot.pause()
                 app.notify("dispatch test message", timeout=5)
@@ -554,6 +565,7 @@ class ResponsiveTuiContractTests(unittest.TestCase):
             app.load_queue = lambda: None
             app.load_hive = lambda: None
             app.discover_harness = lambda: None
+            app.load_issues = lambda: None
             async with app.run_test(size=(180, 52)) as pilot:
                 stop = tui.Stop(
                     "projectbluefin/review",
@@ -576,6 +588,7 @@ class ResponsiveTuiContractTests(unittest.TestCase):
             app.load_queue = lambda: None
             app.load_hive = lambda: None
             app.discover_harness = lambda: None
+            app.load_issues = lambda: None
             async with app.run_test(size=(120, 40)) as pilot:
                 stop = tui.Stop(
                     "projectbluefin/review",

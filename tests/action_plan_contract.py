@@ -676,11 +676,12 @@ def test_batch_stale_fetch_does_not_fall_back_to_stale_cache():
     mock_app.App = MockBase
     sys.modules["textual.app"] = mock_app
     for mod in [
-        "rich", "rich.syntax", "textual", "textual.binding", "textual.containers",
+        "rich", "rich.errors", "rich.syntax", "rich.text", "textual", "textual.binding", "textual.containers",
         "textual.css", "textual.css.query", "textual.screen", "textual.widgets",
         "textual.geometry",
     ]:
         sys.modules.setdefault(mod, unittest.mock.MagicMock())
+    sys.modules["rich.errors"].MarkupError = type("MarkupError", (Exception,), {})
     import tui.bluefin_review_tui as tui
 
     class DummyDashboard:
