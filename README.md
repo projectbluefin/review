@@ -61,18 +61,22 @@ is required. Opening the dashboard does not start a review.
 
 ## Using the dashboard
 
-[![Review dashboard overview with a numbered guide to its panes](docs/images/dashboard-overview.png)](docs/images/dashboard-overview.png)
+[![Review dashboard overview with a numbered guide to its panes](docs/images/dashboard-overview.webp)](docs/images/dashboard-overview.webp)
 
 *An example session using real GitHub data. Open the image for full resolution;
 its counts are a captured moment, not a live status report.*
 
-1. **Check activity.** See running reviews, landing work, and data freshness.
-2. **Choose a PR.** Move with `j` / `k`; `f` changes the action filter and `R`
-   refreshes the queue. Use `Tab` to move between panes.
-3. **Inspect before acting.** Read the selected PR's checks, merge state, and
-   related changes. `v` opens the diff; `C` opens the conversation.
-4. **Review, then decide.** `r` starts a review. `/` adds instructions, and `y`
-   hands the context to your own client. `?` lists the available controls.
+The numbers identify these areas:
+
+1. **Activity:** running reviews, landing work, and data freshness.
+2. **Landing controls:** concurrency and pause/resume for queued batches.
+3. **Choose a PR:** move with `j` / `k`, change the filter with `f`, or refresh with `R`.
+4. **PR details:** inspect its checks, exact head, review, and merge state.
+5. **Related changes:** check overlapping work before taking action.
+6. **Keyboard shortcuts:** use `Tab` to move between panes and `?` for help.
+
+When ready, `v` opens the diff, `C` opens the conversation, and `r` starts a
+review. `/` adds instructions; `y` hands the context to your own client.
 
 Review submission, queueing, and merging are distinct actions. Read the
 confirmation before authorizing a change; a clean review is not permission
