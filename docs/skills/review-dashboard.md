@@ -142,8 +142,8 @@ Verified against Context7 `/textualize/textual`:
   triage comment behind the typed number gate; `o` opens in browser; `y` copies
   handoff. PR actions (`r`, `v`, `m`, `u`, `a`/`A`, `L`) notify PRs only.
 - **Keyboard reference modal on `?`**: `?` opens `HelpScreen`, a modal
-  grouping navigation, review, batching, and mutations with cyan/magenta
-  badges; dismisses cleanly with `?`, `q`, or `Esc`.
+  grouping navigation, review, batching, and mutations with semantic accent and
+  warning badges; dismisses cleanly with `?`, `q`, or `Esc`.
 - **Evidence-first CI failure triage card**: Failing, errored, or timed-out checks surface an immediate `CI FAILURE TRIAGE` section displaying the workflow name, job/check context, failing step, head SHA, execution timestamps, and direct evidence URLs.
 - **CI evidence stays bounded and untrusted**: Log acquisition is on demand and
   tied to the selected repository, pull request, head, run, and attempt. Missing
@@ -161,7 +161,10 @@ Verified against Context7 `/textualize/textual`:
 - **Responsive screens preserve focus**: Draft generation runs through a
   Textual worker with generation and edit revision guards, while log refreshes
   read bounded tails and restore the user's scroll position. Small terminals
-  retain the required controls with explicit compact fallbacks; no-color,
+  condense activity, keep both key rows visible, skip hidden panes during focus
+  navigation, keep transient notices above the controls, and expose compact CI
+  evidence through a focusable scroll pane. Theme-token accent, warning, error,
+  selection, and muted metadata colors supplement text and icons; no-color,
   reduced-motion, and ASCII modes carry the same facts in text.
 - **Empty queue celebration (`ALL SYSTEMS SLAY`)**: Draining the active review source (repository-scoped, own-work excluded) triggers a one-shot 1.3s retro sequence: Round 8/Fight (400ms) → Bluefin charging `SLAYDOKEN!` (300ms) → `9999!` hit (250ms) → `K.O.` (350ms) → `ALL SYSTEMS SLAY` held frame. Startup with an empty queue skips directly to the held frame. Action-filtered views do not trigger celebration.
 - **Treat the Hive API as JSON, not a browser.** The read-only status probe reports missing hub config, missing credentials, network/auth failure, edge/login redirects, malformed responses, and server failure as separate concise states. The queue POST succeeds only when bounded JSON says `queued`; the typed PR-number gate remains the boundary. Failed probes leave queue/review evidence visible and mark retained assignments as last-known. Direct GitHub review and merge stay available.

@@ -403,6 +403,8 @@ class CIFailurePilotContractTests(unittest.TestCase):
                     await pilot.app.workers.wait_for_complete()
                     await pilot.pause()
                     self.assertIsInstance(pilot.app.screen, tui.CIFailureScreen)
+                    evidence_scroll = pilot.app.screen.query_one("#ci-failure-evidence-scroll")
+                    self.assertTrue(evidence_scroll.can_focus)
                     await pilot.press("i")
                     await pilot.app.workers.wait_for_complete()
                     await pilot.pause()

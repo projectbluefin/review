@@ -2769,7 +2769,8 @@ class CIFailureScreen(ModalScreen[None]):
             ),
         ]
         with Vertical(id="ci-failure-box"):
-            yield Static(escape("\n".join(lines)), id="ci-failure-evidence")
+            with ScrollableContainer(id="ci-failure-evidence-scroll"):
+                yield Static(escape("\n".join(lines)), id="ci-failure-evidence")
             yield Button("Load bounded logs", id="ci-load-logs")
             yield Static(
                 "logs: not loaded · untrusted · [i] load · [esc] back",
@@ -3960,7 +3961,7 @@ class ReviewDashboard(App):
 
     TITLE = "BLUEFIN REVIEW DASHBOARD"
     CSS = """
-    #status-bar { height: 1; background: $panel; color: cyan; }
+    #status-bar { height: 1; background: $panel; color: $text-accent; }
     #activity {
         border: heavy $primary; height: auto; padding: 0 1;
         color: $text;
@@ -3972,27 +3973,33 @@ class ReviewDashboard(App):
     #context-pane { height: 40%; min-height: 3; border: solid $secondary; padding: 0 1; }
     #details, #context { height: auto; }
     #confirm-box {
-        border: heavy magenta; background: $surface;
+        border: heavy $text-accent; background: $surface;
         width: 1fr; max-width: 92%; max-height: 90%; overflow-y: auto;
         height: auto; padding: 1 2; margin: 1 2;
     }
-    #confirm-command, .confirm-command { color: magenta; text-style: bold; }
+    #confirm-command, .confirm-command { color: $text-accent; text-style: bold; }
     #steer { border: solid $secondary; height: 3; }
     #keys-reading, #keys-acting { height: 1; background: $panel; }
     #keys-reading { color: $text; }
-    #keys-acting { color: magenta; }
-    #diff-header { height: 1; background: $panel; color: cyan; text-style: bold; }
+    #keys-acting { color: $text-warning; }
+    #diff-header { height: 1; background: $panel; color: $text-accent; text-style: bold; }
     #review-card { border: solid $success; padding: 1 2; height: auto; color: $text; }
     #review-evidence.hidden, #review-log.hidden { display: none; }
     #diff-scroll { border: solid $secondary; background: $surface; }
     #diff-body { padding: 0 1; width: auto; }
-    #comments-header { height: 1; background: $panel; color: cyan; text-style: bold; }
+    #comments-header { height: 1; background: $panel; color: $text-accent; text-style: bold; }
     #comments-scroll { border: solid $secondary; background: $surface; }
     #comments-body { padding: 0 1; width: auto; }
     ListItem.selected { background: $primary-muted; }
-    ListItem.selected Label { color: magenta; text-style: bold; }
+    ListItem.selected Label { color: $text-primary; text-style: bold; }
+    #queue:focus > ListItem.-highlight {
+        background: $accent-muted; color: $text-primary; text-style: bold;
+    }
+    #queue:focus > ListItem.-highlight Label {
+        color: $text-primary; text-style: bold;
+    }
     #review-status { height: auto; padding: 0 1; background: $panel; }
-    #review-status.running { background: $panel; color: cyan; }
+    #review-status.running { background: $panel; color: $text-accent; }
     #review-status.complete { background: $success; color: $text; text-style: bold; }
     #review-status.incomplete { background: $warning; color: $text; text-style: bold; }
     #review-status.stale { background: $warning; color: $text; text-style: bold; }
@@ -4001,28 +4008,33 @@ class ReviewDashboard(App):
     }
     #review-log { border: solid $secondary; }
     #takeoff-box {
-        border: heavy cyan; background: $surface; width: 1fr; max-width: 92%;
+        border: heavy $text-accent; background: $surface; width: 1fr; max-width: 92%;
         max-height: 90%; overflow-y: auto; height: auto; padding: 1 2; margin: 1 2;
     }
     #help-box {
-        border: heavy cyan; background: $surface;
+        border: heavy $text-accent; background: $surface;
         width: 1fr; max-width: 76; max-height: 90%; overflow-y: auto;
         height: auto; padding: 1 2; margin: 1 2;
     }
-    #help-title { text-align: center; height: 1; margin-bottom: 1; border-bottom: solid $secondary; color: cyan; text-style: bold; }
+    #help-title { text-align: center; height: 1; margin-bottom: 1; border-bottom: solid $secondary; color: $text-accent; text-style: bold; }
     #help-columns { width: 100%; height: auto; }
     .help-col { width: 50%; height: auto; padding: 0 1; }
-    .help-section-title { margin-top: 1; margin-bottom: 0; color: magenta; text-style: bold; }
+    .help-section-title { margin-top: 1; margin-bottom: 0; color: $text-accent; text-style: bold; }
     .help-row { height: 1; }
     #help-footer { text-align: center; margin-top: 1; color: $text-muted; }
     #ci-failure-box {
         border: heavy $text-error; background: $surface;
         width: 90%; height: 90%; padding: 1 2; margin: 1 2;
     }
-    #ci-failure-evidence { height: auto; max-height: 45%; overflow-y: auto; }
+    #ci-failure-evidence-scroll {
+        height: auto; max-height: 45%; overflow-y: scroll;
+        border: solid $secondary;
+    }
+    #ci-failure-evidence { height: auto; }
     #ci-log-state { height: 1; color: $text-warning; }
     #ci-log { border: solid $secondary; height: 1fr; }
     #keys-reading, #keys-acting { overflow: hidden; }
+    ToastRack { margin-bottom: 9; }
     """
 
     BINDINGS = bindings_for("dashboard")
@@ -4281,6 +4293,7 @@ class ReviewDashboard(App):
             queue = self.query_one("#queue-pane")
             right = self.query_one("#right-pane")
             context = self.query_one("#context-pane")
+            activity = self.query_one("#activity")
             reading = self.query_one("#keys-reading")
             acting = self.query_one("#keys-acting")
         except NoMatches:
@@ -4292,8 +4305,10 @@ class ReviewDashboard(App):
         right.styles.width = "100%" if narrow else "55%"
         right.styles.height = "55%" if narrow else "1fr"
         context.styles.display = "none" if narrow else "block"
+        activity.styles.height = 5 if narrow else "auto"
         reading.styles.height = "auto" if narrow else 1
         acting.styles.height = "auto" if narrow else 1
+        self.refresh_activity()
 
     def on_resize(self, event) -> None:
         self._apply_responsive_layout(event.size.width)
@@ -5962,6 +5977,14 @@ class ReviewDashboard(App):
             f"Queued work: {len(queued_landings)}",
             f"Snapshot: {self._activity_freshness()}",
         ]
+        if self.size.width <= 100:
+            compact_lines = [
+                "AGENT ACTIVITY",
+                f"reviews {parent_reviews} · checks {check_workers} · landing {len(active_landings)}",
+                f"queued {len(queued_landings)} · {self._activity_freshness()}",
+            ]
+            panel.update("\n".join(escape(line) for line in compact_lines))
+            return
         lines.extend(self._review_activity_rows())
         rows = [f"Review — {self._activity_work([key])}" for key in active_reviews]
         rows.extend(
@@ -7064,7 +7087,16 @@ class ReviewDashboard(App):
         self._focus_evidence_pane(1)
 
     def _focus_evidence_pane(self, step: int) -> None:
-        panes = [self.query_one("#details-pane"), self.query_one("#context-pane")]
+        panes = [
+            pane
+            for pane in (
+                self.query_one("#details-pane"),
+                self.query_one("#context-pane"),
+            )
+            if pane.styles.display != "none"
+        ]
+        if not panes:
+            return
         focused = self.focused
         try:
             index = panes.index(focused)

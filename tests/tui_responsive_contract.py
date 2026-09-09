@@ -237,6 +237,80 @@ class ResponsiveTuiContractTests(unittest.TestCase):
         asyncio.run(exercise((120, 40)))
         asyncio.run(exercise((160, 50)))
 
+    def test_compact_focus_skips_hidden_context_pane(self):
+        async def exercise():
+            app = tui.ReviewDashboard()
+            app.load_queue = lambda: None
+            app.load_hive = lambda: None
+            app.discover_harness = lambda: None
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                queue = app.query_one("#queue")
+                details = app.query_one("#details-pane")
+                context = app.query_one("#context-pane")
+                details.focus()
+                await pilot.pause()
+                app.action_pane_next()
+                await pilot.pause()
+                self.assertIs(app.focused, details)
+                self.assertEqual(context.styles.display, "none")
+                queue.focus()
+                await pilot.pause()
+                app.action_pane_next()
+                await pilot.pause()
+                self.assertIs(app.focused, details)
+
+        asyncio.run(exercise())
+
+    def test_compact_layout_keeps_both_key_rows_on_screen(self):
+        async def exercise():
+            app = tui.ReviewDashboard()
+            app.load_queue = lambda: None
+            app.load_hive = lambda: None
+            app.discover_harness = lambda: None
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                for ident in ("#keys-reading", "#keys-acting"):
+                    widget = app.query_one(ident)
+                    self.assertGreater(widget.region.height, 0)
+                    self.assertLessEqual(
+                        widget.region.y + widget.region.height,
+                        app.size.height,
+                    )
+                self.assertIn("A", str(app.query_one("#keys-acting").render()))
+                self.assertIn("i", str(app.query_one("#keys-reading").render()))
+
+        asyncio.run(exercise())
+
+    def test_compact_notification_stays_above_steering_and_key_controls(self):
+        async def exercise():
+            app = tui.ReviewDashboard()
+            app.load_queue = lambda: None
+            app.load_hive = lambda: None
+            app.discover_harness = lambda: None
+            async with app.run_test(size=(80, 24), notifications=True) as pilot:
+                await pilot.pause()
+                app.notify("dispatch test message", timeout=5)
+                racks = []
+                for _ in range(20):
+                    await pilot.pause(0.05)
+                    racks = list(app.query("ToastRack"))
+                    if any(rack.children for rack in racks):
+                        break
+                self.assertTrue(racks)
+                self.assertEqual(racks[0].styles.margin.bottom, 9)
+                toast_bottom = max(
+                    child.region.y + child.region.height
+                    for rack in racks
+                    for child in rack.children
+                )
+                steer = app.query_one("#steer")
+                reading = app.query_one("#keys-reading")
+                self.assertLessEqual(toast_bottom, steer.region.y)
+                self.assertLessEqual(toast_bottom, reading.region.y)
+
+        asyncio.run(exercise())
+
     def test_editor_and_confirmation_keep_back_keys_and_input_isolated(self):
         async def exercise():
             root = ScreenHost(tui.ReviewBody(review_stop(), "comment"))
