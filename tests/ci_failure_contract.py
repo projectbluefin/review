@@ -398,6 +398,12 @@ class CIFailurePilotContractTests(unittest.TestCase):
         )
 
         class PilotDashboard(tui.ReviewDashboard):
+            def load_issues(self, *args, **kwargs):
+                return None
+
+            def discover_harness(self, *args, **kwargs):
+                return None
+
             def on_mount(self) -> None:
                 self.stops = [stop]
                 self.populate(self.stops)

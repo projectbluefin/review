@@ -33,7 +33,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal
 
+from rich.errors import MarkupError
 from rich.syntax import Syntax
+from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult, ScreenStackError
 from textual.binding import Binding
@@ -4885,8 +4887,7 @@ class ReviewDashboard(App):
         self.load_queue()
         pending_population = getattr(self, "_pending_population", None)
         if pending_population is not None:
-            self._pending_population = None
-            self.call_after_refresh(self.populate, *pending_population)
+            self.call_after_refresh(self._flush_pending_population)
         self.load_issues()
         self.load_hive()
         self.discover_harness()
@@ -6486,14 +6487,14 @@ class ReviewDashboard(App):
             None,
         )
         if landing_task is None:
-            suffix = f"{tag}{hive_rank_str} {marks} [{stop.action}]{failed}"
+            suffix = f"{tag}{hive_rank_str} {marks} {escape(f'[{stop.action}]')}{failed}"
         else:
             landing_mark = (
                 "⟳ LANDING"
                 if self._landing_task_active(landing_task)
                 else "… LANDING QUEUED"
             )
-            suffix = f"{tag}{hive_rank_str} {marks} {landing_mark} [{stop.action}]{failed}"
+            suffix = f"{tag}{hive_rank_str} {marks} {landing_mark} {escape(f'[{stop.action}]')}{failed}"
         title = self._fit_queue_title(stop, suffix, selected)
         body = (
             f"{selected}{link(stop.key, pr_url(stop.repository, stop.number))}: "
@@ -6513,7 +6514,11 @@ class ReviewDashboard(App):
         if width < 1:
             width = 80
         prefix = f"{selected}{stop.key}: "
-        available = max(1, width - len(prefix) - len(suffix))
+        try:
+            visible_suffix = Text.from_markup(suffix).plain
+        except MarkupError:
+            visible_suffix = suffix
+        available = max(1, width - len(prefix) - len(visible_suffix))
         if len(stop.title) <= available:
             return stop.title
         if available == 1:
@@ -6579,6 +6584,20 @@ class ReviewDashboard(App):
             return "[bold cyan]QUEUED[/bold cyan]"
         return "[dim]READY[/dim]"
 
+    def _flush_pending_population(self) -> None:
+        self._population_flush_scheduled = False
+        pending = getattr(self, "_pending_population", None)
+        if pending is None:
+            return
+        try:
+            queue = self.query_one("#queue", ListView)
+        except (NoMatches, ScreenStackError):
+            return
+        if not queue.is_attached:
+            return
+        self._pending_population = None
+        self.populate(*pending)
+
     def populate(
         self, stops: list[Stop], record_snapshot: dict[str, RunRecord] | None = None
     ) -> None:
@@ -6589,6 +6608,11 @@ class ReviewDashboard(App):
             return
         if not queue.is_attached:
             self._pending_population = (list(stops), record_snapshot)
+            if getattr(self, "is_attached", False) and not getattr(
+                self, "_population_flush_scheduled", False
+            ):
+                self._population_flush_scheduled = True
+                self.call_after_refresh(self._flush_pending_population)
             return
         queue.clear()
         if not stops:
@@ -6937,7 +6961,9 @@ class ReviewDashboard(App):
         ]
         rows = [*active, *queued, *reversed(completed)]
         visible = 0
-        total = sum(len(task.stops) for task in rows)
+        unique_keys = {stop.key for task in rows for stop in task.stops}
+        total = len(unique_keys)
+        seen_keys: set[str] = set()
         for task in rows:
             if visible >= MAX_LANDING_CONTROL_ROWS:
                 break
@@ -6953,6 +6979,9 @@ class ReviewDashboard(App):
             for stop in task.stops:
                 if visible >= MAX_LANDING_CONTROL_ROWS:
                     break
+                if stop.key in seen_keys:
+                    continue
+                seen_keys.add(stop.key)
                 event = events.get(stop.key, {})
                 phase = str(event.get("state") or fallback)
                 lines.append(f"{stop.key} — {phase} · {model}")

@@ -8278,6 +8278,13 @@ async def main() -> int:
             state = "findings"
             is_clean = False
             findings = [{"rule": "test-finding", "message": "issue found"}]
+            provenance = {
+                "repository": "projectbluefin/review",
+                "pull_request": 42,
+                "head_sha": "a2" + "0" * 38,
+            }
+            counts = {"high": 1}
+            raw_evidence = []
 
         stop.head_sha = "a2" + "0" * 38
         stop.live["baseRefOid"] = "a" * 40
