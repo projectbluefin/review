@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/logo.png" alt="Bluefin Review — a Bluefin-referenced raptor mark" width="180">
+  <img src="docs/images/logo.png" alt="Bluefin Review — a Bluefin-referenced raptor mark" width="240">
 </p>
 
 # Bluefin Review
