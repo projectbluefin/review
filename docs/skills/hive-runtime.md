@@ -61,6 +61,8 @@ credential handling ([`launcher.md`](launcher.md)).
    stale age. Hub-wide actionable and contributor counts are labeled
    separately from the worker's own state, and the Hive-owned tmux session
    remains authoritative.
+   Reader exceptions and explicit failures produce unavailable read evidence,
+   never the no-new-data sentinel used by a throttled refresh.
 2. Attach only to inspect or deliberately steer a live session:
 
    ```bash

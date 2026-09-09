@@ -195,6 +195,38 @@ class WorkerStatusContract(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_reader_exception_returns_unavailable_evidence_not_throttle_sentinel(self):
+        async def scenario():
+            async def read():
+                raise OSError("connection lost")
+
+            controller = worker_status.RefreshController(read, clock=lambda: 10.0)
+            result = await controller.refresh()
+            self.assertIsInstance(result, dict)
+            self.assertFalse(result["ok"])
+            self.assertFalse(await controller.refresh())
+
+        asyncio.run(scenario())
+
+    def test_reader_failure_is_distinct_from_throttling_and_can_recover(self):
+        async def scenario():
+            now = [10.0]
+            replies = iter([False, {"ok": True, "data": {}}])
+
+            async def read():
+                return next(replies)
+
+            controller = worker_status.RefreshController(read, clock=lambda: now[0])
+            result = await controller.refresh()
+            self.assertIsInstance(result, dict)
+            self.assertFalse(result["ok"])
+            self.assertFalse(await controller.refresh())
+            now[0] = 16.0
+            self.assertTrue((await controller.refresh())["ok"])
+            self.assertEqual(controller.delay, controller.base_delay)
+
+        asyncio.run(scenario())
+
     def test_attach_command_uses_the_selected_named_container(self):
         with patch.dict(os.environ, {"REVIEW_CONTAINER_NAME": "review-2"}, clear=False):
             self.assertEqual(
