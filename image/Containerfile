@@ -25,8 +25,6 @@ ARG CODEX_AARCH64_SHA256=eb677c80f666b1ab8b4b1d083b66e8d614b1281d960bb6f9fd8ca98
 ARG CODEX_CODE_MODE_HOST_X86_64_SHA256=0146adfaac8363ec9fcdb5895f7624db5b2e8617a283887938b7fb97a1dd4356
 ARG CODEX_CODE_MODE_HOST_AARCH64_SHA256=dfd4ff98ea4db30ed078af9c31b6f86e3da4836d0573aa87e225e5a5b54d3c7c
 ARG GOOSE_CHANNEL=canary
-ARG PI_VERSION=0.73.1
-ARG PI_SHA512=817421dd26999964df54c738028e7e2c66d578abf3c8eeeda25a24d272ec660abd9c68d9c7f10453734cf02faa52707836fb36aecc06e6a39580bcd092ad1f1d
 # `canary` is a mutable release tag, not an artifact identity. CI resolves
 # these from the release asset API for every build and passes them as build
 # inputs; these defaults keep a local build pinned to a known attested asset.
@@ -275,8 +273,6 @@ ARG GOOSE_CHANNEL
 ARG GOOSE_X86_64_SHA256
 ARG GOOSE_AARCH64_SHA256
 ARG HIVE_COMMIT
-ARG PI_VERSION
-ARG PI_SHA512
 # Preserve both architecture-specific asset identities in the image
 # configuration. Build provenance records the resolved build arguments too.
 LABEL io.projectbluefin.review.goose.channel="${GOOSE_CHANNEL}" \
@@ -309,20 +305,6 @@ RUN --mount=type=secret,id=github_token set -eu; \
     /usr/local/bin/goose --version; \
     /usr/local/bin/goose run --help >/dev/null
 
-# Pi is the only additional backend in this image. Download the exact npm
-# tarball and verify its registry integrity before npm installs it; no mutable
-# package tag or unverified executable is allowed into the contributor image.
-RUN set -eu; \
-    workdir="$(mktemp -d)"; \
-    trap 'rm -rf "$workdir"' EXIT; \
-    curl --fail --location --show-error --silent \
-      "https://registry.npmjs.org/@mariozechner/pi-coding-agent/-/pi-coding-agent-${PI_VERSION}.tgz" \
-      -o "$workdir/pi.tgz"; \
-    printf '%s  %s\n' "$PI_SHA512" "$workdir/pi.tgz" | sha512sum -c -; \
-    npm install --global --ignore-scripts --no-audit --no-fund "$workdir/pi.tgz"; \
-    command -v pi; \
-    pi --version
-
 COPY --chmod=0755 image/bin/bluefin-review /usr/local/bin/bluefin-review
 COPY --chmod=0755 image/bin/worktree-guard /usr/local/bin/worktree-guard
 
@@ -349,13 +331,9 @@ RUN set -eu; \
       "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-relay.sh" \
       -o /usr/local/bin/contributor-relay.sh; \
     curl --fail --location --show-error --silent \
-      "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/pi-backend.js" \
-      -o /usr/local/bin/pi-backend.js; \
-    curl --fail --location --show-error --silent \
       "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/config/backends.conf" \
       -o /usr/local/etc/hive/backends.conf; \
-    chmod 0755 /usr/local/bin/contributor-agent.sh /usr/local/bin/contributor-relay.sh; \
-    node -e 'require("/usr/local/bin/pi-backend.js")'
+    chmod 0755 /usr/local/bin/contributor-agent.sh /usr/local/bin/contributor-relay.sh
 
 # Create the non-root runtime user expected by the launcher and workflows.
 RUN set -eu; \
