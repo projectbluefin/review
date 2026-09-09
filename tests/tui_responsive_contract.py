@@ -198,8 +198,10 @@ class ResponsiveTuiContractTests(unittest.TestCase):
                     editor = screen.query_one(tui.TextArea)
                     editor.text = "preexisting body"
                     screen.action_generate()
-                    await screen.app.workers.wait_for_complete()
-                    await pilot.pause()
+                    for _ in range(200):
+                        if editor.text == "generated body":
+                            break
+                        await pilot.pause(0.01)
                     self.assertEqual(editor.text, "generated body")
 
             asyncio.run(exercise())
