@@ -156,6 +156,9 @@ class CIFailureEvidenceContractTests(unittest.TestCase):
 
     def test_failure_action_fetches_current_head_evidence_on_demand(self) -> None:
         class Dashboard(tui.ReviewDashboard):
+            def load_issues(self, *args, **kwargs):
+                return None
+
             def load_queue(self, *args, **kwargs):
                 return None
 
@@ -208,6 +211,9 @@ class CIFailureEvidenceContractTests(unittest.TestCase):
 
     def test_on_demand_failure_survives_a_failed_background_refresh(self) -> None:
         class Dashboard(tui.ReviewDashboard):
+            def load_issues(self, *args, **kwargs):
+                return None
+
             def load_queue(self, *args, **kwargs):
                 return None
 
@@ -261,6 +267,9 @@ class CIFailureEvidenceContractTests(unittest.TestCase):
 
     def test_background_refresh_cannot_erase_displayed_ci_head(self) -> None:
         class Dashboard(tui.ReviewDashboard):
+            def load_issues(self, *args, **kwargs):
+                return None
+
             def load_queue(self, *args, **kwargs):
                 return None
 
@@ -310,8 +319,16 @@ class CIFailureEvidenceContractTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_ci_drilldown_fixture_does_not_read_unrelated_github_sources(self) -> None:
+        with patch.object(tui, "gh", return_value=subprocess.CompletedProcess([], 0, "[]", "")) as unrelated_read:
+            self.test_failure_action_revalidates_cached_failure_before_display()
+        unrelated_read.assert_not_called()
+
     def test_failure_action_revalidates_cached_failure_before_display(self) -> None:
         class Dashboard(tui.ReviewDashboard):
+            def load_issues(self, *args, **kwargs):
+                return None
+
             def load_queue(self, *args, **kwargs):
                 return None
 

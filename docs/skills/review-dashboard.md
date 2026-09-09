@@ -76,6 +76,11 @@ Right-hand panes scroll evidence (`h`/`l`), `e` opens decisions, and `[u]` updat
 
 ## Textual Patterns
 
+Focused CI-evidence fixtures must disable unrelated mount-time queue, issue,
+Hive, and harness readers. An issue refresh can otherwise replace the synthetic
+PR selection while its CI callback is pending; keep an assertion that the
+fixture makes no unrelated GitHub calls rather than masking the race with sleeps.
+
 Verified against Context7 `/textualize/textual`:
 - **Bracket Escaping:** Always escape opening brackets in PR titles or git text via `escape(text)` so `[WIP]` or `[H]` do not corrupt Rich/Textual markup.
 - **Quoted Links:** Terminal OSC 8 links require quotes: `[link="https://..."]`.
