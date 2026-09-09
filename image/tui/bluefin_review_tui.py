@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Literal
 
 from rich.syntax import Syntax
 from textual import work
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, ScreenStackError
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.css.query import NoMatches
@@ -85,12 +85,14 @@ from tui.review_run import ReviewRun
 from tui.run_state import (
     FULL_SHA,
     IllegalRunTransition,
+    REVIEW_PROVIDER_TERMINALS,
     RunIdentity,
     RunRecord,
     RunState,
     RunStateStore,
     TerminalOutcome,
 )
+ReceiptIdentity = RunIdentity
 from tui.gh_client import (
     BreakerRegistry,
     BreakerState,
@@ -134,6 +136,9 @@ query($endCursor: String) {
         baseRefOid
         headRefOid
         mergeable
+        isDraft
+        isCrossRepository
+        maintainerCanModify
         commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
         reviews(first: 50) { nodes { author { login } state authorAssociation } }
       }
@@ -183,6 +188,10 @@ MAX_REVIEW_OUTPUT_LINES = int(os.environ.get("BLUEFIN_REVIEW_MAX_OUTPUT_LINES", 
 MAX_ACTIVITY_ROWS = 8
 MAX_ACTIVITY_WORK_KEYS = 2
 MAX_ACTIVITY_TEXT = 96
+MAX_RECENT_MERGES = 3
+PERSISTED_PR_KEY_PATTERN = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+#[1-9][0-9]*"
+)
 MUTATION_TIMEOUT = 60
 HIVE_TIMEOUT = 15
 MAX_CONCURRENT_LANDINGS = int(
@@ -281,7 +290,6 @@ COMMANDS = (
     CommandSpec("batch", "b", "batch", "batch select"),
     CommandSpec("select_all", "B", "select_all", "select/clear visible rows"),
     CommandSpec("toggle_advance", "space", "toggle_advance", "toggle and advance"),
-    CommandSpec("toggle_view", "tab", "toggle_view", "toggle PRs/issues"),
     CommandSpec("toggle_view_alias", "I", "toggle_view", "toggle PRs/issues"),
     CommandSpec("next_unreviewed", "n", "next_unreviewed", "next PR lacking my review"),
     CommandSpec("docs", "d", "docs", "update docs"),
@@ -320,7 +328,7 @@ def back_bindings(dismiss_action: str) -> list[Binding]:
 # changes anything on GitHub; everything on the second goes through the
 # typed-number gate.
 KEYS_READING = (
-    " [b]Tab[/b] issues/PRs"
+    " [b]I[/b] issues/PRs [b]Tab[/b] focus panes"
     " [b]r[/b] review [b]v[/b] diff [b]C[/b] comments [b]o[/b] open [b]h[/b] handoff"
     " [b]/[/b] steer [b]f[/b] filter [b]b[/b]/[b]B[/b] select"
     " [b]Space[/b] select+next [b]n[/b] next lacking my review"
@@ -401,6 +409,7 @@ MAINTAINER_ORDER = [
     "resolve-conflicts",
     "fix-ci",
     "investigate",
+    "triage",
 ]
 
 
@@ -426,7 +435,8 @@ REVIEW_SCOPE_VERSION = os.environ.get(
 LIVE_PR_FIELDS = (
     "author,state,baseRefOid,headRefOid,isDraft,mergeable,mergeStateStatus,"
     "reviewDecision,additions,deletions,changedFiles,updatedAt,body,"
-    "closingIssuesReferences,statusCheckRollup,labels,reviews"
+    "closingIssuesReferences,statusCheckRollup,labels,reviews,"
+    "isCrossRepository,maintainerCanModify"
 )
 
 # bluefin-review's exit status for a review whose checks did not all return a
@@ -854,7 +864,7 @@ def stop_style(action: str, mergeable: str, checks: str, review: str) -> str:
     if mergeable == "dirty":
         return "red"
     if checks == "failure":
-        return "yellow"
+        return "red"
     if action == "ready-for-human-merge":
         return "bold green"
     if action in ("review", "triage") or review == "approved":
@@ -1014,6 +1024,12 @@ def org_queue_item(node: dict) -> dict:
         "check_state": check_state,
         "base_sha": str(node.get("baseRefOid") or ""),
         "head_sha": str(node.get("headRefOid") or ""),
+        "isDraft": bool(node.get("isDraft", False)),
+        "is_draft": bool(node.get("isDraft", False)),
+        "isCrossRepository": bool(node.get("isCrossRepository", False)),
+        "is_cross_repository": bool(node.get("isCrossRepository", False)),
+        "maintainerCanModify": bool(node.get("maintainerCanModify", True)) if node.get("maintainerCanModify") is not None else True,
+        "maintainer_can_modify": bool(node.get("maintainerCanModify", True)) if node.get("maintainerCanModify") is not None else True,
         "reviews": reviews_nodes,
         "recommended_action": classify_action(check_state, mergeable_state, review_state),
     }
@@ -1135,6 +1151,7 @@ class QueueFilters:
     action: str = ""
     repository: str = ""
     live_repository: str = ""
+    kind: str = "prs"
 
     @property
     def live(self) -> bool:
@@ -1147,8 +1164,19 @@ class QueueFilters:
                 return False
         return True
 
+    def wants_kind(self, item: dict) -> bool:
+        is_issue = bool(item.get("is_issue", False))
+        if self.kind == "prs":
+            return not is_issue
+        if self.kind == "issues":
+            return is_issue
+        return True
+
     def wants(self, item: dict) -> bool:
-        if self.action and item.get("recommended_action", "") != self.action:
+        if not self.wants_kind(item):
+            return False
+        action = item.get("recommended_action") or item.get("action", "")
+        if self.action and action != self.action:
             return False
         return self.wants_repo(item)
 
@@ -1198,6 +1226,160 @@ class Stop:
     def mechanical(self) -> str | None:
         """The branch-update reason, from live evidence only."""
         return mechanical_reason(self.author, self.live)
+
+
+REVIEW_FAILURES = {
+    "failed",
+    "cancelled",
+    "missing",
+    "incomplete",
+    "unparsable",
+    "review_failed",
+    "review_missing",
+    "review_incomplete",
+    "review_unparsable",
+}
+
+QUEUE_STATE_RANK = {
+    "failed": 0,
+    "in progress": 1,
+    "queued": 2,
+    "ready": 3,
+    "done": 4,
+    "blocked": 5,
+}
+
+
+def classify_routability(stop: Stop, record: RunRecord | None = None) -> str | None:
+    """Pure classifier returning a concrete no-automated-path reason from established evidence."""
+    if stop.is_issue:
+        return "action applies to pull requests only"
+
+    live = stop.live if isinstance(stop.live, dict) else {}
+
+    # 1. Draft PR
+    if live.get("isDraft") is True or getattr(stop, "is_draft", False) is True:
+        return "pull request is a draft"
+
+    # 2. Cross-repository / fork PR that cannot be modified
+    if live.get("isCrossRepository") is True and live.get("maintainerCanModify") is False:
+        return "cross-repository fork cannot be modified by maintainers"
+
+    # 3. Durable current-head mutation failure due to push permission denial
+    if (
+        record is not None
+        and record.state == RunState.MUTATION_FAILED
+        and "push permission denied" in (record.reason or "").lower()
+    ):
+        return "push permission denied"
+    if stop.failure and "push permission denied" in stop.failure.lower():
+        return "push permission denied"
+
+    # 4. Durable human-review-required state
+    if (
+        record is not None
+        and record.state == RunState.HUMAN_REVIEW_MISSING
+    ):
+        return "human review required"
+    if stop.failure and "no human review" in stop.failure.lower():
+        has_human = False
+        reviews = live.get("reviews") or []
+        if isinstance(reviews, dict):
+            reviews = reviews.get("nodes", [])
+        if isinstance(reviews, list):
+            for r in reviews:
+                if isinstance(r, dict):
+                    author = r.get("author") or {}
+                    login = author.get("login") if isinstance(author, dict) else str(author)
+                    if login and not (login.endswith("[bot]") or login.endswith("-bot") or login in {"goose", "github-actions", "copilot"}):
+                        st = str(r.get("state") or "").upper()
+                        if st in {"APPROVED", "CHANGES_REQUESTED", "COMMENTED"}:
+                            has_human = True
+                            break
+        if not has_human:
+            return "human review required"
+
+    # 5. Durable head-changed state
+    if (
+        record is not None
+        and record.state == RunState.HEAD_CHANGED
+    ):
+        return "head changed between review and mutation"
+    if (
+        record is None
+        and stop.failure
+        and "head changed" in stop.failure.lower()
+        and stop.review_status != "unreviewed"
+    ):
+        if stop.head_identity:
+            m = re.search(r"\(reviewed\s+([0-9a-fA-F]+),\s*live\s+([0-9a-fA-F]+)\)", stop.failure)
+            if m:
+                rev_prefix, live_prefix = m.group(1).lower(), m.group(2).lower()
+                head_lower = stop.head_identity.lower()
+                if not (head_lower.startswith(rev_prefix) or head_lower.startswith(live_prefix)):
+                    return None
+        return "head changed between review and mutation"
+
+    # Ordinary transient review failures remain actionable (return None)
+    return None
+
+
+def parse_hive_ready_queue(data: Any) -> list[dict]:
+    if isinstance(data, dict):
+        q = data.get("queue") or data.get("items")
+        if isinstance(q, list):
+            return [it for it in q if isinstance(it, dict)]
+    elif isinstance(data, list):
+        return [it for it in data if isinstance(it, dict)]
+    return []
+
+
+def parse_hive_triage(data: Any) -> list[dict]:
+    if isinstance(data, dict):
+        g = data.get("groups") or data.get("stages")
+        if isinstance(g, list):
+            return [group for group in g if isinstance(group, dict)]
+    elif isinstance(data, list):
+        return [group for group in data if isinstance(group, dict)]
+    return []
+
+
+def build_hive_rank_map(ready_items: list[dict], triage_groups: list[dict]) -> dict[str, int]:
+    ranks: dict[str, int] = {}
+    rank = 0
+    for it in ready_items:
+        repo = it.get("repo") or it.get("repository") or ""
+        number = it.get("number")
+        if repo and isinstance(number, int) and number > 0:
+            key = f"{repo}#{number}"
+            if key not in ranks:
+                ranks[key] = rank
+                rank += 1
+    for group in triage_groups:
+        issues = group.get("issues") or group.get("items") or []
+        if isinstance(issues, list):
+            for it in issues:
+                if not isinstance(it, dict):
+                    continue
+                repo = it.get("repo") or it.get("repository") or ""
+                number = it.get("number")
+                if repo and isinstance(number, int) and number > 0:
+                    key = f"{repo}#{number}"
+                    if key not in ranks:
+                        ranks[key] = rank
+                        rank += 1
+    return ranks
+
+
+def clear_review_failure_mark(stop: Stop) -> None:
+    stop.review_failure = ""
+    if not stop.failure.startswith((
+        "review snapshot failed:",
+        "review snapshot stale:",
+        "review dispatch failed:",
+    )):
+        return
+    stop.failure = ""
 
 
 def live_review_context(live: dict, *, title: str = "") -> dict:
@@ -1689,7 +1871,7 @@ class BatchMutationConfirmation(ModalScreen[str | None]):
     def on_mount(self) -> None:
         try:
             self.query_one("#batch-confirmation", Input).focus()
-        except Exception:
+        except (NoMatches, ScreenStackError):
             pass
 
     def action_submit(self) -> None:
@@ -1697,6 +1879,49 @@ class BatchMutationConfirmation(ModalScreen[str | None]):
 
     def on_input_submitted(self, _event: Input.Submitted) -> None:
         self.action_submit()
+
+
+class SlayConfirmScreen(ModalScreen[bool]):
+    """Typed confirmation gate for $ slay operations.
+
+    Shows exact selected pull requests and their exact heads before creating
+    any review run records or dispatching fix/landing work.
+    Requires typing the expected confirmation (PR number for a single PR, or
+    "slay" for a batch).
+    """
+
+    BINDINGS = back_bindings("dismiss(False)")
+
+    def __init__(self, targets: list[Stop]) -> None:
+        super().__init__()
+        self.targets = list(targets)
+        if len(self.targets) == 1:
+            self.expected = str(self.targets[0].number)
+        else:
+            self.expected = "slay"
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-box"):
+            yield Label("Slay (review + fix + land) will execute for:", id="confirm-heading")
+            for stop in self.targets:
+                head = stop.head_identity or stop.head_sha or "?"
+                yield Static(f"  {stop.key} @ {head}", classes="confirm-command")
+            prompt_label = (
+                f"type the PR number ({self.expected}) to confirm; empty or Esc aborts"
+                if len(self.targets) == 1
+                else "type slay to confirm; empty or Esc aborts"
+            )
+            yield Label(prompt_label)
+            yield Input(placeholder=self.expected, id="confirm-input")
+
+    def on_mount(self) -> None:
+        try:
+            self.query_one(Input).focus()
+        except (NoMatches, ScreenStackError):
+            pass
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value.strip() == self.expected)
 
 
 class DashboardBatchReceiptLedger:
@@ -2606,6 +2831,7 @@ class ReviewScreen(Screen):
 
     def mark_running(self) -> None:
         stop = self.stop_record
+        clear_review_failure_mark(stop)
         self.query_one("#review-status", Static).update(
             f" reviewing {link(stop.key, pr_url(stop.repository, stop.number))}"
             f" — running; {escape(self.headroom_status_line)}; "
@@ -2690,10 +2916,10 @@ class ReviewScreen(Screen):
         decision_state = (
             DecisionState.STALE if identity_stale else card.state
         )
-        if error:
-            outcome, state = "error", f"FAILED to start: {error}"
-        elif self.stop_requested:
+        if self.stop_requested:
             outcome, state = "stopped", "STOPPED — you cancelled it. Nothing was submitted."
+        elif error:
+            outcome, state = "error", f"FAILED to start: {error}"
         elif code is not None and code < 0:
             outcome, state = "stopped", "STOPPED — the review was killed. Nothing was submitted."
         elif decision_state in (DecisionState.CLEAN, DecisionState.FINDINGS):
@@ -2995,12 +3221,21 @@ class ReviewScreen(Screen):
     def action_view_diff(self) -> None:
         self.app.push_screen(DiffScreen(self.stop_record))
 
+    def dismiss_to_queue(self, action=None) -> None:
+        self.dismiss()
+
+        def refresh_then_act() -> None:
+            self.app.refresh_rows()
+            if action is not None:
+                action()
+
+        self.app.call_after_refresh(refresh_then_act)
+
     def return_to_queue(self, action) -> None:
         if not self.finished:
             self.notify("review still running — [x] stops it")
             return
-        self.dismiss()
-        self.app.call_after_refresh(action)
+        self.dismiss_to_queue(action)
 
     def action_queue(self) -> None:
         self.return_to_queue(self.app.action_merge)
@@ -3038,7 +3273,7 @@ class ReviewScreen(Screen):
         task = landing.new_fix_task(self.stop_record, findings, self.app.self_login, steer=steer)
         self.app.enqueue_landing(task)
         self.notify(f"dispatched auto-fix & land for {self.stop_record.key} [w]")
-        self.dismiss()
+        self.dismiss_to_queue()
 
     def action_close(self) -> None:
         # A review takes minutes. Closing mid-run would throw that away with a
@@ -3046,7 +3281,7 @@ class ReviewScreen(Screen):
         if not self.finished:
             self.notify("review still running — [x] stops it")
             return
-        self.dismiss()
+        self.dismiss_to_queue()
 
 
 class ReviewDecisionScreen(ModalScreen[None]):
@@ -3084,7 +3319,6 @@ class ReviewDecisionScreen(ModalScreen[None]):
 class ReviewDashboard(App):
     """PROJECT BLUEFIN REVIEW DASHBOARD."""
 
-    view_mode: str = "prs"
     issues_items: list[dict] = []
     batch_mutation_in_flight: bool = False
     _current_batch_plan: action_plan.BatchActionPlan | None = None
@@ -3157,7 +3391,6 @@ class ReviewDashboard(App):
         self.run_store = run_store or RunStateStore()
         self.gh_client = gh_client or default_client
         self.observability = ReviewObservability.from_environment()
-        self.view_mode = "prs"
         self.issues_items = []
         self.stops: list[Stop] = []
         self.self_login = ""
@@ -3205,6 +3438,7 @@ class ReviewDashboard(App):
         # the next dispatch or refresh: a toast is gone in seconds and a
         # maintainer looks up late.
         self.last_landing_outcome = ""
+        self.recent_merges: list[str] = []
         # The session's final-review policy (#378): asked once before the
         # first dispatch, kept in memory only, changed with [p]. None means
         # the session has not been asked yet.
@@ -3213,6 +3447,10 @@ class ReviewDashboard(App):
         # The dashboard never blocks on it and never depends on it.
         self.lab_state = lab_client.LAB_OFF
         self.lab_detail = ""
+        self.pr_source_state = "loading"
+        self.pr_source_message = ""
+        self.issues_source_state = "loading"
+        self.issues_source_message = ""
         self.source_state = "loading"
         self.source_message = ""
         self.slay_frame = -1
@@ -3255,6 +3493,151 @@ class ReviewDashboard(App):
         self.fixer_advanced_heads: set[tuple[str, int, str]] = set()
         self.active_review_identities: dict[str, RunIdentity] = {}
         self.review_started_at: dict[str, float] = {}
+        self.hive_ranks = {}
+        self.hive_ready_queue = []
+        self.hive_triage_groups = []
+        self.hive_queue_unavailable = False
+        self.hive_queue_stale = False
+        self.hive_triage_unavailable = False
+        self.hive_triage_stale = False
+
+    def hive_rank_display(self, stop: Stop) -> str:
+        val = self.hive_ranks.get(stop.key)
+        if val is None:
+            return ""
+        is_stale = (self.hive_triage_stale if stop.is_issue else self.hive_queue_stale) or self.hive_unavailable
+        is_unavail = (self.hive_triage_unavailable if stop.is_issue else self.hive_queue_unavailable) or self.hive_unavailable
+        if is_stale or is_unavail:
+            age = activity_age(self.hive_snapshot_at)
+            status = f"retained {age}".strip() if age else "retained"
+            return f" [dim]#{val + 1} ({status})[/dim]"
+        return f" [cyan]#{val + 1}[/cyan]"
+
+    def stop_blocked_reason(
+        self, stop: Stop, record_snapshot: dict[str, RunRecord] | None = None
+    ) -> str | None:
+        if stop.is_issue:
+            return None
+        if getattr(self, "_repaint_blocked_cache", None) is not None and stop.key in self._repaint_blocked_cache:
+            return self._repaint_blocked_cache[stop.key]
+        rec = None
+        if hasattr(self, "run_store"):
+            try:
+                base_sha = str(stop.live.get("baseRefOid") or "")
+                head_sha = stop.head_identity
+                if FULL_SHA.fullmatch(base_sha) and FULL_SHA.fullmatch(head_sha):
+                    ident = self.run_identity(stop)
+                    if record_snapshot is not None:
+                        rec = record_snapshot.get(ident.cache_identity)
+                    elif getattr(self, "_repaint_record_snapshot", None) is not None:
+                        rec = self._repaint_record_snapshot.get(ident.cache_identity)
+                    else:
+                        rec = self.run_store.get(ident)
+                if rec is None and stop.review_result:
+                    prov = getattr(stop.review_result, "provenance", None)
+                    rev_head = (prov.get("head_sha") if isinstance(prov, dict) else None) or head_sha
+                    rev_model = prov.get("model") if isinstance(prov, dict) else None
+                    rev_effort = (prov.get("effort") or prov.get("reasoning_effort")) if isinstance(prov, dict) else None
+                    if rev_head and FULL_SHA.fullmatch(rev_head) and FULL_SHA.fullmatch(base_sha):
+                        rev_ident = self.run_identity(stop, head_sha=rev_head, model=rev_model, effort=rev_effort)
+                        if record_snapshot is not None:
+                            rec = record_snapshot.get(rev_ident.cache_identity)
+                        elif getattr(self, "_repaint_record_snapshot", None) is not None:
+                            rec = self._repaint_record_snapshot.get(rev_ident.cache_identity)
+                        else:
+                            rec = self.run_store.get(rev_ident)
+            except Exception:
+                rec = None
+        result = classify_routability(stop, record=rec)
+        if getattr(self, "_repaint_blocked_cache", None) is not None:
+            self._repaint_blocked_cache[stop.key] = result
+        return result
+
+    def _pr_action_targets(self) -> list[Stop] | None:
+        """Centralized PR-only action guard for batch/current targets."""
+        if self.view_mode == "issues":
+            self.notify("action applies to pull requests only", severity="warning")
+            return None
+        selected = [s for s in self.stops if s.selected]
+        if selected:
+            prs = [s for s in selected if not s.is_issue]
+            if len(prs) < len(selected):
+                self.notify("selected issues skipped; action applies to pull requests only", severity="warning")
+            if not prs:
+                return None
+            return prs
+        elif self.current:
+            if self.current.is_issue:
+                self.notify("action applies to pull requests only", severity="warning")
+                return None
+            return [self.current]
+        return None
+
+    @property
+    def view_mode(self) -> str:
+        return self.filters.kind
+
+    @view_mode.setter
+    def view_mode(self, value: str) -> None:
+        self.filters.kind = value
+
+    @property
+    def active_source_items(self) -> list[dict]:
+        items: list[dict] = []
+        if self.filters.wants_kind({"is_issue": False}):
+            items.extend(self.queue_items)
+        if self.filters.wants_kind({"is_issue": True}):
+            items.extend(self.issues_items)
+        return items
+
+    def _sync_source_state(self) -> None:
+        if self.view_mode == "issues":
+            self.source_state = self.issues_source_state
+            self.source_message = self.issues_source_message
+        elif self.view_mode == "prs":
+            self.source_state = self.pr_source_state
+            self.source_message = self.pr_source_message
+        elif self.filters.live:
+            if self.pr_source_state not in ("ready", "empty"):
+                self.source_state = self.pr_source_state
+                self.source_message = self.pr_source_message
+            elif self.issues_source_state not in ("ready", "empty"):
+                if self.active_source_items:
+                    self.source_state = "degraded"
+                    self.source_message = f"Issue source failed: {self.issues_source_message or self.issues_source_state}"
+                else:
+                    self.source_state = self.issues_source_state
+                    self.source_message = self.issues_source_message
+            elif not self.active_source_items:
+                self.source_state = "empty"
+                self.source_message = ""
+            else:
+                self.source_state = "ready"
+                self.source_message = ""
+        else:  # "mixed" org-wide
+            pr_ok = self.pr_source_state in ("ready", "empty")
+            issue_ok = self.issues_source_state in ("ready", "empty")
+            if pr_ok and issue_ok:
+                if not self.active_source_items:
+                    self.source_state = "empty"
+                else:
+                    self.source_state = "ready"
+                self.source_message = ""
+            elif not self.active_source_items:
+                self.source_state = self.pr_source_state if not pr_ok else self.issues_source_state
+                self.source_message = self.pr_source_message if not pr_ok else self.issues_source_message
+            elif pr_ok and not issue_ok:
+                self.source_state = "degraded"
+                self.source_message = f"Issue source failed: {self.issues_source_message or self.issues_source_state}"
+            elif not pr_ok and issue_ok:
+                self.source_state = "degraded"
+                self.source_message = f"PR source failed: {self.pr_source_message or self.pr_source_state}"
+            elif self.pr_source_state == "loading" or self.issues_source_state == "loading":
+                self.source_state = "loading"
+                self.source_message = ""
+            else:
+                self.source_state = self.pr_source_state if not pr_ok else self.issues_source_state
+                self.source_message = self.pr_source_message or self.issues_source_message
 
     def record_fixer_head(self, repository: str, number: int, head_sha: str) -> None:
         """Explicitly record that a head was produced and pushed by our fixer."""
@@ -3281,18 +3664,24 @@ class ReviewDashboard(App):
     ) -> RunIdentity:
         base_sha = str(stop.live.get("baseRefOid") or "")
         if not FULL_SHA.fullmatch(base_sha):
-            base_sha = "a" * 40
+            raise ValueError(f"invalid base_sha: {base_sha!r}; strict full lowercase 40-hex SHA required")
         if head_sha is None:
             head_sha = stop.head_identity
         if not FULL_SHA.fullmatch(head_sha):
-            head_sha = "b" * 40
+            raise ValueError(f"invalid head_sha: {head_sha!r}; strict full lowercase 40-hex SHA required")
+
+        ident_cache = getattr(self, "_repaint_ident_cache", None)
+        cache_key = (stop.key, head_sha, model, effort, base_sha) if ident_cache is not None else None
+        if cache_key and cache_key in ident_cache:
+            return ident_cache[cache_key]
+
         if model is None or effort is None:
             default_model, default_effort = self.review_profile(stop.repository)
             if model is None:
                 model = default_model
             if effort is None:
                 effort = default_effort
-        return RunIdentity(
+        result = RunIdentity(
             repository=stop.repository,
             pull_request=stop.number,
             base_sha=base_sha,
@@ -3302,6 +3691,22 @@ class ReviewDashboard(App):
             effort=effort,
             check_scope_version=self.review_scope_version,
         )
+        if cache_key is not None:
+            ident_cache[cache_key] = result
+        return result
+
+    def safe_run_identity(
+        self,
+        stop: Stop,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        head_sha: str | None = None,
+    ) -> RunIdentity | None:
+        try:
+            return self.run_identity(stop, model=model, effort=effort, head_sha=head_sha)
+        except ValueError:
+            return None
 
     @staticmethod
     def is_bot_login(login: str) -> bool:
@@ -3335,7 +3740,7 @@ class ReviewDashboard(App):
         return False
 
     def stop_lacks_my_review(self, stop: Stop) -> bool:
-        if not self.self_login:
+        if stop.is_issue or not self.self_login:
             return False
         reviews = stop.live.get("reviews") if isinstance(stop.live, dict) else None
         if isinstance(reviews, dict):
@@ -3404,6 +3809,7 @@ class ReviewDashboard(App):
             )
         self.refresh_status()
         self.load_queue()
+        self.load_issues()
         self.load_hive()
         self.discover_harness()
         # The lab is polled coarsely and off the UI thread (#379): 30 seconds
@@ -3466,6 +3872,10 @@ class ReviewDashboard(App):
                 f"Harness Autopilot — {result.availability.value} · "
                 "[Diagnostics] [Sign in] [Install] [Retry] · no fallback"
             )
+        try:
+            self.refresh_rows()
+        except Exception:
+            pass
 
     @work(thread=True, group="hive", exclusive=True)
     def load_hive(
@@ -3508,10 +3918,29 @@ class ReviewDashboard(App):
                 f"{status.data.get('actionable_items', '?')} actionable · "
                 f"{len(workers)} working"
             )
+            ready_res = hive_get("/api/contribute/queue")
+            ready_items = parse_hive_ready_queue(ready_res.data) if ready_res.ok else []
+            ready_ok = ready_res.ok and (
+                isinstance(ready_res.data, list)
+                or (isinstance(ready_res.data, dict) and ("queue" in ready_res.data or "items" in ready_res.data))
+            )
+
+            triage_res = hive_get("/api/contribute/triage")
+            triage_groups = parse_hive_triage(triage_res.data) if triage_res.ok else []
+            triage_ok = triage_res.ok and isinstance(triage_res.data, (dict, list))
+
             if get_current_worker().is_cancelled:
                 return
-            success = True
-            self.call_from_thread(self.hive_loaded, state, workers)
+            success = bool(status.ok and contributor_result.ok)
+            self.call_from_thread(
+                self.hive_loaded,
+                state,
+                workers,
+                ready_items,
+                triage_groups,
+                ready_ok,
+                triage_ok,
+            )
         finally:
             if reconciliation_request:
                 self.call_from_thread(
@@ -3522,13 +3951,47 @@ class ReviewDashboard(App):
                     success,
                 )
 
-    def hive_loaded(self, state: str, workers: list[dict]) -> None:
+    def hive_loaded(
+        self,
+        state: str,
+        workers: list[dict],
+        ready_items: list[dict] | None = None,
+        triage_groups: list[dict] | None = None,
+        ready_ok: bool = True,
+        triage_ok: bool = True,
+    ) -> None:
         self.hive_state = state
         self.hive_workers = workers
         self.hive_unavailable = False
         self.hive_workers_stale = False
         self.hive_snapshot_at = time.monotonic()
-        self.refresh_status()
+
+        if ready_items is not None or triage_groups is not None:
+            if ready_ok or triage_ok:
+                new_ready = ready_items if ready_ok else self.hive_ready_queue
+                new_triage = triage_groups if triage_ok else self.hive_triage_groups
+                self.hive_ranks = build_hive_rank_map(new_ready or [], new_triage or [])
+                if ready_ok:
+                    self.hive_ready_queue = new_ready or []
+                    self.hive_queue_unavailable = False
+                    self.hive_queue_stale = False
+                else:
+                    self.hive_queue_unavailable = True
+                    self.hive_queue_stale = bool(self.hive_ready_queue)
+                if triage_ok:
+                    self.hive_triage_groups = new_triage or []
+                    self.hive_triage_unavailable = False
+                    self.hive_triage_stale = False
+                else:
+                    self.hive_triage_unavailable = True
+                    self.hive_triage_stale = bool(self.hive_triage_groups)
+            else:
+                self.hive_queue_unavailable = True
+                self.hive_queue_stale = bool(self.hive_ready_queue or self.hive_ranks)
+                self.hive_triage_unavailable = True
+                self.hive_triage_stale = bool(self.hive_triage_groups or self.hive_ranks)
+
+        self.refresh_rows()
         stop = self.current
         if stop:
             self.render_context(stop)
@@ -3538,6 +4001,10 @@ class ReviewDashboard(App):
         self.hive_state = state
         self.hive_unavailable = True
         self.hive_workers_stale = bool(self.hive_workers)
+        self.hive_queue_unavailable = True
+        self.hive_queue_stale = bool(self.hive_ranks or self.hive_ready_queue)
+        self.hive_triage_unavailable = True
+        self.hive_triage_stale = bool(self.hive_ranks or self.hive_triage_groups)
         self.refresh_status()
         stop = self.current
         if stop:
@@ -3644,8 +4111,14 @@ class ReviewDashboard(App):
     def action_steer(self) -> None:
         """Focus the steering box: free text that rides along with the next
         review of the highlighted stop as maintainer instructions."""
+        if self.view_mode == "issues":
+            self.notify("action applies to pull requests only", severity="warning")
+            return
         if not self.current:
             self.notify("nothing highlighted to steer.", severity="warning")
+            return
+        if self.current.is_issue:
+            self.notify("action applies to pull requests only", severity="warning")
             return
         self.query_one("#steer", Input).focus()
 
@@ -3660,9 +4133,15 @@ class ReviewDashboard(App):
         stop = self.current
         if not stop or not steer:
             return
+        if stop.is_issue:
+            self.notify("action applies to pull requests only", severity="warning")
+            return
         self.start_review(stop, steer)
 
     def start_review(self, stop: Stop, steer: str = "") -> None:
+        if stop.is_issue:
+            self.notify("action applies to pull requests only", severity="warning")
+            return
         if ACTIVE_BACKEND == "codex":
             options = self.harness_options or discover_all()
             preferences = load_preferences()
@@ -3723,8 +4202,8 @@ class ReviewDashboard(App):
         current_by_key = {stop.key: stop for stop in self.stops}
         if not requested_keys.issubset(current_by_key):
             for stop in stops:
-                id_ = self.active_review_identities.get(stop.key) or self.run_identity(stop)
-                rec = self.run_store.get(id_)
+                id_ = self.active_review_identities.get(stop.key) or self.safe_run_identity(stop)
+                rec = self.run_store.get(id_) if id_ else None
                 if rec and rec.state in (RunState.REVIEWING, RunState.RE_REVIEWING):
                     self.run_store.transition(id_, RunState.REVIEW_FAILED, reason="queue changed")
             self.notify(
@@ -3735,10 +4214,14 @@ class ReviewDashboard(App):
         current_stops = [current_by_key[stop.key] for stop in stops]
         if not snapshot.ready:
             for stop in current_stops:
-                id_ = self.active_review_identities.get(stop.key) or self.run_identity(stop)
-                rec = self.run_store.get(id_)
-                if rec and rec.state in (RunState.REVIEWING, RunState.RE_REVIEWING):
-                    self.run_store.transition(id_, RunState.REVIEW_FAILED, reason="snapshot failed")
+                try:
+                    id_ = self.active_review_identities.get(stop.key) or self.run_identity(stop)
+                except ValueError:
+                    id_ = None
+                if id_:
+                    rec = self.run_store.get(id_)
+                    if rec and rec.state in (RunState.REVIEWING, RunState.RE_REVIEWING):
+                        self.run_store.transition(id_, RunState.REVIEW_FAILED, reason="snapshot failed")
                 failure = snapshot.failures.get(stop.key)
                 if failure:
                     stop.failure = f"review snapshot failed: {failure}"
@@ -3762,10 +4245,14 @@ class ReviewDashboard(App):
         ]
         if stale:
             for stop in stale:
-                id_ = self.active_review_identities.get(stop.key) or self.run_identity(stop)
-                rec = self.run_store.get(id_)
-                if rec and rec.state in (RunState.REVIEWING, RunState.RE_REVIEWING):
-                    self.run_store.revalidate_head(id_, by_key[stop.key].head_sha)
+                try:
+                    id_ = self.active_review_identities.get(stop.key) or self.run_identity(stop)
+                except ValueError:
+                    id_ = None
+                if id_:
+                    rec = self.run_store.get(id_)
+                    if rec and rec.state in (RunState.REVIEWING, RunState.RE_REVIEWING):
+                        self.run_store.revalidate_head(id_, by_key[stop.key].head_sha)
                 stop.failure = "review snapshot stale: head changed"
                 stop.failure_command = "gh pr view"
                 stop.review_status = "failed"
@@ -3796,7 +4283,7 @@ class ReviewDashboard(App):
             stop.live["number"] = stop.number
             stop.head_sha = item.head_sha
             stop.review_status = "running"
-            stop.review_failure = ""
+            clear_review_failure_mark(stop)
             stop.review_result = None
             stop.cached_age = ""
             stop.triage_state = "reviewed"
@@ -3828,10 +4315,13 @@ class ReviewDashboard(App):
                 self.review_started_at.pop(key, None)
             detail = bounded_detail(str(error) or type(error).__name__)
             for stop in current_stops:
-                id_ = self.run_identity(stop)
-                rec = self.run_store.get(id_)
-                if rec and rec.state == RunState.REVIEWING:
-                    self.run_store.transition(id_, RunState.REVIEW_FAILED, reason=detail)
+                try:
+                    id_ = self.run_identity(stop)
+                    rec = self.run_store.get(id_)
+                    if rec and rec.state == RunState.REVIEWING:
+                        self.run_store.transition(id_, RunState.REVIEW_FAILED, reason=detail)
+                except ValueError:
+                    pass
                 stop.review_status = "failed"
                 stop.review_failure = detail
                 stop.failure = f"review dispatch failed: {detail}"
@@ -3867,6 +4357,7 @@ class ReviewDashboard(App):
         )
         if stop is None:
             return
+        id_: RunIdentity | None = None
         if (
             event.batch_id
             and self.review_batch_ids.get(event.key) != event.batch_id
@@ -3888,8 +4379,8 @@ class ReviewDashboard(App):
             and stop.head_identity
             and expected_head != stop.head_identity
         ):
-            id_ = self.run_identity(stop)
-            rec = self.run_store.get(id_)
+            id_ = self.active_review_identities.get(event.key) or self.safe_run_identity(stop)
+            rec = self.run_store.get(id_) if id_ else None
             if rec and rec.state == RunState.REVIEWING:
                 self.run_store.revalidate_head(id_, stop.head_identity)
             if event.state in {
@@ -3901,6 +4392,7 @@ class ReviewDashboard(App):
             }:
                 self.review_expected_heads.pop(event.key, None)
                 self.review_batch_ids.pop(event.key, None)
+                self.active_review_identities.pop(event.key, None)
                 stop.review_status = ""
                 stop.review_result = None
                 stop.cached_age = ""
@@ -3940,8 +4432,8 @@ class ReviewDashboard(App):
             and stop.head_identity
             and batch_item.head_sha != stop.head_identity
         ):
-            id_ = self.run_identity(stop)
-            rec = self.run_store.get(id_)
+            id_ = self.active_review_identities.get(event.key) or self.safe_run_identity(stop)
+            rec = self.run_store.get(id_) if id_ else None
             if rec and rec.state == RunState.REVIEWING:
                 self.run_store.revalidate_head(id_, stop.head_identity)
             stop.review_status = ""
@@ -3950,8 +4442,8 @@ class ReviewDashboard(App):
             return
         if event.receipt:
             receipt_name = os.path.basename(event.receipt)
-            id_ = self.run_identity(stop)
-            rec = self.run_store.get(id_)
+            id_ = self.active_review_identities.get(event.key) or self.safe_run_identity(stop)
+            rec = self.run_store.get(id_) if id_ else None
             if receipt_name != event.receipt:
                 stop.review_status = "review_failed"
                 stop.review_failure = "invalid review receipt path"
@@ -4011,12 +4503,17 @@ class ReviewDashboard(App):
                         if rec and rec.state == RunState.REVIEWING:
                             self.run_store.transition(id_, RunState.REVIEW_FAILED, reason=stop.review_failure)
                     else:
+                        live_base = str(stop.live.get("baseRefOid") or "")
+                        base_mismatch = (
+                            receipt.identity.base_sha != live_base
+                            if live_base
+                            else (id_ is not None and receipt.identity.base_sha != id_.base_sha)
+                        )
                         if (
                             receipt.identity.repository != stop.repository
                             or receipt.identity.pull_request != stop.number
                             or receipt.identity.head_sha != stop.head_identity
-                            or receipt.identity.base_sha
-                            != str(stop.live.get("baseRefOid") or "")
+                            or base_mismatch
                         ):
                             if rec and rec.state == RunState.REVIEWING:
                                 if receipt.identity.head_sha != stop.head_identity:
@@ -4025,6 +4522,7 @@ class ReviewDashboard(App):
                                     self.run_store.transition(id_, RunState.REVIEW_FAILED, reason="receipt identity mismatch")
                             self.review_expected_heads.pop(event.key, None)
                             self.review_batch_ids.pop(event.key, None)
+                            self.active_review_identities.pop(event.key, None)
                             stop.review_status = ""
                             stop.review_result = None
                             stop.cached_age = ""
@@ -4063,8 +4561,25 @@ class ReviewDashboard(App):
             else:
                 stop.review_status = event.state
 
-        id_ = self.active_review_identities.pop(event.key, None) or self.run_identity(stop)
-        rec = self.run_store.get(id_)
+        terminal_states = {
+            "cached",
+            "complete",
+            "findings",
+            "failed",
+            "cancelled",
+            "missing",
+            "incomplete",
+            "unparsable",
+            "review_failed",
+            "review_missing",
+            "review_incomplete",
+            "review_unparsable",
+        }
+        if event.state in terminal_states or stop.review_status in terminal_states:
+            id_ = self.active_review_identities.pop(event.key, None) or id_ or self.safe_run_identity(stop)
+        else:
+            id_ = self.active_review_identities.get(event.key) or id_ or self.safe_run_identity(stop)
+        rec = self.run_store.get(id_) if id_ else None
         if rec and rec.state in (RunState.REVIEWING, RunState.RE_REVIEWING):
             if stop.review_status in {"cached", "complete", "findings"}:
                 self.review_expected_heads.pop(event.key, None)
@@ -4126,20 +4641,6 @@ class ReviewDashboard(App):
             self.review_batch_ids.pop(event.key, None)
         if batch is not None:
             self.sync_batch_headroom(batch)
-        terminal_states = {
-            "cached",
-            "complete",
-            "findings",
-            "failed",
-            "cancelled",
-            "missing",
-            "incomplete",
-            "unparsable",
-            "review_failed",
-            "review_missing",
-            "review_incomplete",
-            "review_unparsable",
-        }
         if event.state in terminal_states:
             started = self.review_started_at.pop(event.key, None)
             if started is not None:
@@ -4219,11 +4720,6 @@ class ReviewDashboard(App):
             event.stop()
             self.query_one("#queue", ListView).focus()
             return
-        if event.key == "tab" and len(self.screen_stack) <= 1 and not isinstance(self.focused, (Input, TextArea)):
-            event.stop()
-            self.action_toggle_view()
-            return
-
     def _dispatch_terminal_action(self, label: str, action) -> None:
         try:
             action()
@@ -4285,9 +4781,8 @@ class ReviewDashboard(App):
     def _apply_queue_snapshot(self, snapshot: dict) -> None:
         self.self_login = str(snapshot["self_login"])
         state = str(snapshot["state"])
-        if self.view_mode == "prs":
-            self.source_state = state
-            self.source_message = str(snapshot["message"])
+        self.pr_source_state = state
+        self.pr_source_message = str(snapshot.get("message", ""))
         if state in {"ready", "empty"}:
             self.all_items = snapshot["items"]
             self.queue_items = [
@@ -4296,8 +4791,8 @@ class ReviewDashboard(App):
                 if not (self.self_login and item.get("author") == self.self_login)
             ]
             self.queue_snapshot_at = time.monotonic()
-        if self.view_mode == "prs":
-            self.apply_filters()
+        self._sync_source_state()
+        self.apply_filters(refreshed_source="prs")
 
     def load_org_queue(self) -> dict:
         """Every open pull request in the organization, live from GitHub.
@@ -4452,6 +4947,20 @@ class ReviewDashboard(App):
                     if not isinstance(author_source["login"], str):
                         raise ValueError(f"pull {index} has invalid login")
                     author = author_source["login"]
+                is_cross = bool(pull.get("isCrossRepository", False))
+                if not is_cross:
+                    head_repo = (pull.get("head") or {}).get("repo") or {}
+                    base_repo = (pull.get("base") or {}).get("repo") or {}
+                    if head_repo and base_repo and head_repo.get("full_name") != base_repo.get("full_name"):
+                        is_cross = True
+                can_modify = pull.get("maintainerCanModify")
+                if can_modify is None:
+                    can_modify = pull.get("maintainer_can_modify")
+                if can_modify is None:
+                    can_modify = True
+                else:
+                    can_modify = bool(can_modify)
+                is_draft = bool(pull.get("draft") if "draft" in pull else pull.get("isDraft", False))
                 items.append({
                     "repository": repository,
                     "number": number,
@@ -4471,6 +4980,12 @@ class ReviewDashboard(App):
                         or (pull.get("head") or {}).get("sha")
                         or ""
                     ),
+                    "isDraft": is_draft,
+                    "is_draft": is_draft,
+                    "isCrossRepository": is_cross,
+                    "is_cross_repository": is_cross,
+                    "maintainerCanModify": can_modify,
+                    "maintainer_can_modify": can_modify,
                 })
             items_count = len(items)
         except ValueError as error:
@@ -4481,14 +4996,24 @@ class ReviewDashboard(App):
             )
         return finished("empty" if not items else "ready", "", items)
 
-    @work(thread=True, exclusive=True)
+    @work(thread=True, group="issues", exclusive=True)
     def load_issues(self) -> None:
         if self.filters.live:
             snapshot = self.load_live_issues(self.filters.live_repository)
         else:
             snapshot = self.load_org_issues()
-        self.issues_items = snapshot.get("items", [])
-        self.call_from_thread(self.apply_filters)
+        if get_current_worker().is_cancelled:
+            return
+        self.call_from_thread(self._apply_issues_snapshot, snapshot)
+
+    def _apply_issues_snapshot(self, snapshot: dict) -> None:
+        state = str(snapshot.get("state", "ready"))
+        self.issues_source_state = state
+        self.issues_source_message = str(snapshot.get("message", ""))
+        if state in {"ready", "empty"}:
+            self.issues_items = snapshot.get("items", [])
+        self._sync_source_state()
+        self.apply_filters(refreshed_source="issues")
 
     def load_org_issues(self) -> dict:
         """Every open issue in the organization, live from GitHub.
@@ -4501,22 +5026,27 @@ class ReviewDashboard(App):
                 "-f", f"query={ORG_ISSUES_QUERY}",
             )
         except (OSError, subprocess.TimeoutExpired) as error:
-            self.source_state = "error"
-            self.source_message = bounded_detail(
-                f"GitHub could not list the {GITHUB_ORG} issues: {error}"
-            )
-            return {"items": []}
+            return {
+                "state": "error",
+                "message": bounded_detail(
+                    f"GitHub could not list the {GITHUB_ORG} issues: {error}"
+                ),
+                "items": [],
+            }
         if result.returncode:
             detail = bounded_detail((result.stderr or result.stdout).strip())
             lowered = detail.lower()
             if ("authentication" in lowered or "login" in lowered
                     or "permission" in lowered or "forbidden" in lowered
                     or "not accessible" in lowered):
-                self.source_state = "inaccessible"
+                state = "inaccessible"
             else:
-                self.source_state = "error"
-            self.source_message = detail or f"GitHub could not list the {GITHUB_ORG} issues"
-            return {"items": []}
+                state = "error"
+            return {
+                "state": state,
+                "message": detail or f"GitHub could not list the {GITHUB_ORG} issues",
+                "items": [],
+            }
         try:
             pages = json.loads(result.stdout)
             if not isinstance(pages, list) or any(not isinstance(page, dict) for page in pages):
@@ -4533,40 +5063,51 @@ class ReviewDashboard(App):
                         continue
                     items.append(org_issue_item(node))
         except (json.JSONDecodeError, ValueError) as error:
-            self.source_state = "malformed"
-            self.source_message = bounded_detail(f"malformed GitHub response: {error}")
-            return {"items": []}
-        self.source_state = "empty" if not items else "ready"
-        self.source_message = ""
-        return {"items": items}
+            return {
+                "state": "malformed",
+                "message": bounded_detail(f"malformed GitHub response: {error}"),
+                "items": [],
+            }
+        return {
+            "state": "empty" if not items else "ready",
+            "message": "",
+            "items": items,
+        }
 
     def load_live_issues(self, repository: str) -> dict:
         if not re.fullmatch(r"[^/\s]+/[^/\s]+", repository):
-            self.source_state = "malformed"
-            self.source_message = bounded_detail(f"invalid repository '{repository}'; use owner/repo")
-            return {"items": []}
+            return {
+                "state": "malformed",
+                "message": bounded_detail(f"invalid repository '{repository}'; use owner/repo"),
+                "items": [],
+            }
         try:
             result = gh(
                 "api", "--paginate", "--slurp", "--method", "GET",
                 f"repos/{repository}/issues?state=open&per_page=100",
             )
         except (OSError, subprocess.TimeoutExpired) as error:
-            self.source_state = "error"
-            self.source_message = bounded_detail(f"GitHub could not read this repository: {error}")
-            return {"items": []}
+            return {
+                "state": "error",
+                "message": bounded_detail(f"GitHub could not read this repository: {error}"),
+                "items": [],
+            }
         if result.returncode:
             detail = bounded_detail((result.stderr or result.stdout).strip())
             lowered = detail.lower()
             if ("authentication" in lowered or "login" in lowered
                     or "permission" in lowered or "forbidden" in lowered
                     or "not accessible" in lowered):
-                self.source_state = "inaccessible"
+                state = "inaccessible"
             elif "not found" in lowered or "could not resolve" in lowered:
-                self.source_state = "missing"
+                state = "missing"
             else:
-                self.source_state = "error"
-            self.source_message = detail or "GitHub could not read this repository"
-            return {"items": []}
+                state = "error"
+            return {
+                "state": state,
+                "message": detail or "GitHub could not read this repository",
+                "items": [],
+            }
         try:
             pages = json.loads(result.stdout)
             if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
@@ -4575,9 +5116,11 @@ class ReviewDashboard(App):
             if any(not isinstance(issue, dict) for issue in raw_issues):
                 raise ValueError("GitHub returned a malformed issue entry")
         except (json.JSONDecodeError, ValueError) as error:
-            self.source_state = "malformed"
-            self.source_message = bounded_detail(f"malformed GitHub response: {error}")
-            return {"items": []}
+            return {
+                "state": "malformed",
+                "message": bounded_detail(f"malformed GitHub response: {error}"),
+                "items": [],
+            }
         try:
             items = []
             for index, issue in enumerate(raw_issues, 1):
@@ -4620,134 +5163,175 @@ class ReviewDashboard(App):
                     "updated_at": str(issue.get("updated_at", "") or ""),
                 })
         except ValueError as error:
-            self.source_message = bounded_detail(f"malformed GitHub response: {error}")
-            self.source_state = "malformed"
-            return {"items": []}
-        self.source_state = "empty" if not items else "ready"
-        self.source_message = ""
-        return {"items": items}
+            return {
+                "state": "malformed",
+                "message": bounded_detail(f"malformed GitHub response: {error}"),
+                "items": [],
+            }
+        return {
+            "state": "empty" if not items else "ready",
+            "message": "",
+            "items": items,
+        }
 
-    def apply_filters(self) -> None:
-        prior_stops = {stop.key: stop for stop in self.stops}
-        for stop in self.stops:
-            self.evidence_generation[stop.key] = (
-                self.evidence_generation.get(stop.key, 0) + 1
-            )
-        stops = []
-        if self.view_mode == "issues":
-            for item in self.issues_items:
-                if not self.filters.wants_repo(item):
+    def apply_filters(self, refreshed_source: str | None = None) -> None:
+        record_snapshot = (
+            self.run_store.snapshot()
+            if hasattr(self, "run_store") and hasattr(self.run_store, "snapshot")
+            else None
+        )
+        self._repaint_record_snapshot = record_snapshot
+        self._repaint_profile_cache = {}
+        self._repaint_ident_cache = {}
+        self._repaint_blocked_cache = {}
+        self._repaint_preferences = load_preferences()
+        try:
+            prior_stops = {stop.key: stop for stop in self.stops}
+            for stop in self.stops:
+                if refreshed_source in ("prs", "pr") and stop.is_issue:
                     continue
-                stop = Stop(
-                    repository=item["repository"],
-                    number=item["number"],
-                    action=item.get("action", "triage"),
-                    title=item.get("title", ""),
-                    author=item.get("author", "") or "",
-                    live={
-                        "labels": item.get("labels", []),
-                        "comments_count": item.get("comments_count", 0),
-                        "body": item.get("body", ""),
-                        "created_at": item.get("created_at", ""),
-                        "updated_at": item.get("updated_at", ""),
-                    },
-                    is_issue=True,
+                if refreshed_source in ("issues", "issue") and not stop.is_issue:
+                    continue
+                self.evidence_generation[stop.key] = (
+                    self.evidence_generation.get(stop.key, 0) + 1
                 )
-                stop.triage_state = self.triage.get(
-                    self.triage_key(stop), "unseen"
-                )
-                stops.append(stop)
-            stops.sort(key=lambda s: (s.repository, s.number))
+            stops: list[Stop] = []
+
+            if self.filters.wants_kind({"is_issue": False}):
+                for item in self.queue_items:
+                    if not self.filters.wants(item):
+                        continue
+                    head_sha = item.get("head_sha", "") or ""
+                    key = f"{item['repository']}#{item['number']}"
+                    is_draft = bool(item.get("isDraft") if "isDraft" in item else item.get("is_draft", False))
+                    is_cross = bool(item.get("isCrossRepository") if "isCrossRepository" in item else item.get("is_cross_repository", False))
+                    can_modify = item.get("maintainerCanModify") if "maintainerCanModify" in item else item.get("maintainer_can_modify", True)
+                    if can_modify is None:
+                        can_modify = True
+                    else:
+                        can_modify = bool(can_modify)
+                    stop = prior_stops.get(key)
+                    if stop is None or stop.is_issue:
+                        stop = Stop(
+                            repository=item["repository"],
+                            number=item["number"],
+                            action=item.get("recommended_action", ""),
+                            title=item.get("title", ""),
+                            author=item.get("author", "") or "",
+                            mergeable_state=item.get("mergeable_state", "") or "",
+                            check_state=item.get("check_state", "") or "",
+                            review_state=item.get("review_state", "") or "",
+                            live={
+                                "baseRefOid": item.get("base_sha", "") or "",
+                                "headRefOid": head_sha,
+                                "reviews": item.get("reviews", []),
+                                "isDraft": is_draft,
+                                "isCrossRepository": is_cross,
+                                "maintainerCanModify": can_modify,
+                            },
+                            head_sha=head_sha,
+                            is_issue=False,
+                        )
+                    else:
+                        stop.action = item.get("recommended_action", "")
+                        stop.title = item.get("title", "")
+                        stop.author = item.get("author", "") or ""
+                        stop.mergeable_state = item.get("mergeable_state", "") or ""
+                        stop.check_state = item.get("check_state", "") or ""
+                        stop.review_state = item.get("review_state", "") or ""
+                        stop.live.update({
+                            "baseRefOid": item.get("base_sha", "") or "",
+                            "headRefOid": head_sha,
+                            "reviews": item.get("reviews", []),
+                            "isDraft": is_draft,
+                            "isCrossRepository": is_cross,
+                            "maintainerCanModify": can_modify,
+                        })
+                        stop.head_sha = head_sha
+                    stop.triage_state = self.triage.get(
+                        self.triage_key(stop), "unseen"
+                    )
+                    stops.append(stop)
+
+            if self.filters.wants_kind({"is_issue": True}):
+                for item in self.issues_items:
+                    if not self.filters.wants(item):
+                        continue
+                    key = f"{item['repository']}#{item['number']}"
+                    stop = prior_stops.get(key)
+                    if stop is None or not stop.is_issue:
+                        stop = Stop(
+                            repository=item["repository"],
+                            number=item["number"],
+                            action=item.get("action", "triage"),
+                            title=item.get("title", ""),
+                            author=item.get("author", "") or "",
+                            live={
+                                "labels": item.get("labels", []),
+                                "comments_count": item.get("comments_count", 0),
+                                "body": item.get("body", ""),
+                                "created_at": item.get("created_at", ""),
+                                "updated_at": item.get("updated_at", ""),
+                            },
+                            is_issue=True,
+                        )
+                    else:
+                        stop.action = item.get("action", "triage")
+                        stop.title = item.get("title", "")
+                        stop.author = item.get("author", "") or ""
+                        stop.live.update({
+                            "labels": item.get("labels", []),
+                            "comments_count": item.get("comments_count", 0),
+                            "body": item.get("body", ""),
+                            "created_at": item.get("created_at", ""),
+                            "updated_at": item.get("updated_at", ""),
+                        })
+                    stop.triage_state = self.triage.get(
+                        self.triage_key(stop), "unseen"
+                    )
+                    stops.append(stop)
+
+            self.restore_landing_marks(stops)
             if self.reselect:
                 for stop in stops:
                     stop.selected = stop.key in self.reselect
                 self.reselect = set()
+
             self.stops = stops
-            self.populate(stops)
-            if self.current:
-                self.show_evidence(self.current)
-            elif not stops:
-                try:
-                    if self.source_state not in ("ready", "empty"):
-                        err = f"Could not load issues ({self.source_state})"
-                        if self.source_message:
-                            err += f": {self.source_message}"
-                        self.query_one("#details", Static).update(f"[bold red]{escape(err)}[/bold red]")
-                    elif self.issues_items:
-                        self.query_one("#details", Static).update("[dim]No open issues match the active filter.[/dim]")
-                    else:
-                        self.query_one("#details", Static).update("[dim]No open issues.[/dim]")
-                    self.query_one("#context", Static).update("")
-                except NoMatches:
-                    pass
-            return
-        for item in self.queue_items:
-            if not self.filters.wants(item):
-                continue
-            head_sha = item.get("head_sha", "") or ""
-            key = f"{item['repository']}#{item['number']}"
-            stop = prior_stops.get(key)
-            if stop is None:
-                stop = Stop(
-                    repository=item["repository"],
-                    number=item["number"],
-                    action=item.get("recommended_action", ""),
-                    title=item.get("title", ""),
-                    author=item.get("author", "") or "",
-                    mergeable_state=item.get("mergeable_state", "") or "",
-                    check_state=item.get("check_state", "") or "",
-                    review_state=item.get("review_state", "") or "",
-                    live={
-                        "baseRefOid": item.get("base_sha", "") or "",
-                        "headRefOid": head_sha,
-                        "reviews": item.get("reviews", []),
-                    },
-                    head_sha=head_sha,
-                )
-            else:
-                stop.action = item.get("recommended_action", "")
-                stop.title = item.get("title", "")
-                stop.author = item.get("author", "") or ""
-                stop.mergeable_state = item.get("mergeable_state", "") or ""
-                stop.check_state = item.get("check_state", "") or ""
-                stop.review_state = item.get("review_state", "") or ""
-                stop.live.update({
-                    "baseRefOid": item.get("base_sha", "") or "",
-                    "headRefOid": head_sha,
-                    "reviews": item.get("reviews", []),
-                })
-                stop.head_sha = head_sha
-            stop.triage_state = self.triage.get(
-                self.triage_key(stop), "unseen"
-            )
-            stops.append(stop)
-        stops.sort(
+            self._sort_stops(record_snapshot=record_snapshot)
+            empty_source = not self.active_source_items and self.source_state in ("empty", "ready")
+            if empty_source:
+                if self._had_nonempty_queue and self.slay_frame < 0:
+                    self.start_slay_sequence()
+                    return
+                elif not self._had_nonempty_queue and self.slay_frame < 0:
+                    self.slay_frame = len(SLAY_FRAMES) - 1
+            elif self.active_source_items:
+                self._had_nonempty_queue = True
+                self.slay_frame = -1
+
+            self.populate(stops, record_snapshot=record_snapshot)
+        finally:
+            self._repaint_record_snapshot = None
+            self._repaint_profile_cache = None
+            self._repaint_ident_cache = None
+            self._repaint_blocked_cache = None
+            self._repaint_preferences = None
+
+    def _sort_stops(
+        self, record_snapshot: dict[str, RunRecord] | None = None
+    ) -> None:
+        self.stops.sort(
             key=lambda stop: (
+                QUEUE_STATE_RANK.get(
+                    self._queue_state(stop, record_snapshot=record_snapshot), 99
+                ),
                 0 if self.stop_lacks_my_review(stop) else 1,
                 action_rank(stop.action),
                 stop.repository,
                 stop.number,
             )
         )
-        self.restore_landing_marks(stops)
-        if self.reselect:
-            for stop in stops:
-                stop.selected = stop.key in self.reselect
-            self.reselect = set()
-
-        self.stops = stops
-        empty_source = not self.queue_items and self.source_state in ("empty", "ready")
-        if empty_source:
-            if self._had_nonempty_queue and self.slay_frame < 0:
-                self.start_slay_sequence()
-                return
-            elif not self._had_nonempty_queue and self.slay_frame < 0:
-                self.slay_frame = len(SLAY_FRAMES) - 1
-        elif self.queue_items:
-            self._had_nonempty_queue = True
-            self.slay_frame = -1
-
-        self.populate(stops)
 
     def _advance_slay_frame(self) -> None:
         if 0 <= self.slay_frame < len(SLAY_FRAMES) - 1:
@@ -4760,9 +5344,14 @@ class ReviewDashboard(App):
     def start_slay_sequence(self) -> None:
         self.slay_frame = 0
         self.populate(self.stops)
-        self.set_timer(SLAY_DELAYS[0], self._advance_slay_frame)
+        try:
+            self.set_timer(SLAY_DELAYS[0], self._advance_slay_frame)
+        except RuntimeError:
+            pass
 
-    def row_markup(self, stop: Stop) -> str:
+    def row_markup(
+        self, stop: Stop, record_snapshot: dict[str, RunRecord] | None = None
+    ) -> str:
         # Selection is not colour-only: a ● leads the row and the whole row
         # carries a background, so the batch in progress reads at a glance.
         selected = "● " if stop.selected else "  "
@@ -4784,9 +5373,10 @@ class ReviewDashboard(App):
                 comments_count = stop.live.get("comments_count", 0)
             else:
                 comments_count = 0
+            hive_rank_str = self.hive_rank_display(stop)
             body = (
                 f"{selected}{link(stop.key, issue_url(stop.repository, stop.number))}: "
-                f"{escape(stop.title[:60])}{labels_str} "
+                f"{escape(stop.title[:60])}{labels_str}{hive_rank_str} "
                 f"({comments_count} comments) {escape('[triage]')}"
             )
             style = stop_style(stop.action, "", "", "")
@@ -4797,16 +5387,17 @@ class ReviewDashboard(App):
         # A stop that would not merge says so on its own row, so a failure in
         # the middle of a batch survives the notification that reported it.
         failed = " ✗ DID NOT MERGE" if stop.failure else ""
-        marks = self._review_badge(stop)
+        marks = self._review_badge(stop, record_snapshot=record_snapshot)
         checks = effective_check_state(stop.check_state, stop.live)
         if stop.mergeable_state == "dirty":
             marks += " ⚑ CONFLICTS"
         marks += f" {ci_marker(checks)}"
         if stop.review_state == "approved":
             marks += " ✓ approved"
+        hive_rank_str = self.hive_rank_display(stop)
         body = (
             f"{selected}{link(stop.key, pr_url(stop.repository, stop.number))}: "
-            f"{escape(stop.title[:60])}{tag} "
+            f"{escape(stop.title[:60])}{tag}{hive_rank_str} "
             f"{marks} {escape('[' + stop.action + ']')}{failed}"
         )
         style = stop_style(
@@ -4814,65 +5405,98 @@ class ReviewDashboard(App):
         )
         return f"[{style}]{body}[/{style}]" if style else body
 
-    @staticmethod
-    def _review_badge(stop: Stop) -> str:
-        if stop.review_status in {"queued", "running"}:
-            return "⏳ running"
-        if stop.review_status in {
-            "failed",
-            "cancelled",
-            "missing",
-            "incomplete",
-            "unparsable",
-            "review_failed",
-            "review_missing",
-            "review_incomplete",
-            "review_unparsable",
-        }:
-            status = stop.review_status.removeprefix("review_")
-            return f" ? {status}"
-        result = stop.review_result
-        if result is None:
-            return ""
-        if result.state == "complete" and result.is_clean:
-            badge = "✓"
-        elif result.state == "findings":
-            badge = "✗"
+    def _queue_state(
+        self_or_stop: Any,
+        maybe_stop: Stop | None = None,
+        record_snapshot: dict[str, RunRecord] | None = None,
+    ) -> str:
+        if maybe_stop is not None:
+            self = self_or_stop
+            stop = maybe_stop
         else:
-            badge = "?"
-        age = f" cached {stop.cached_age}" if stop.cached_age else ""
-        return f" {badge}{age}"
+            self = None
+            stop = self_or_stop
 
-    def populate(self, stops: list[Stop]) -> None:
+        blocked = (
+            self.stop_blocked_reason(stop, record_snapshot=record_snapshot)
+            if self is not None and hasattr(self, "stop_blocked_reason")
+            else classify_routability(stop)
+        )
+        if not stop.is_issue and blocked:
+            return "blocked"
+        if (
+            stop.failure
+            or stop.review_status in REVIEW_FAILURES
+            or stop.mergeable_state == "dirty"
+            or effective_check_state(stop.check_state, stop.live) == "failure"
+        ):
+            return "failed"
+        if stop.review_status in {"queued", "running"}:
+            return "in progress"
+        if stop.review_result is not None:
+            return "done"
+        if stop.selected:
+            return "queued"
+        return "ready"
+
+    def _review_badge(
+        self_or_cls: Any,
+        stop: Stop,
+        record_snapshot: dict[str, RunRecord] | None = None,
+    ) -> str:
+        state = (
+            self_or_cls._queue_state(stop, record_snapshot=record_snapshot)
+            if hasattr(self_or_cls, "_queue_state")
+            else ReviewDashboard._queue_state(stop, record_snapshot=record_snapshot)
+        )
+        age = f" {stop.cached_age}" if stop.cached_age else ""
+        if state == "blocked":
+            return "[bold yellow]⛔ BLOCKED[/bold yellow]"
+        if state == "failed":
+            return "[bold red]✗ FAILED[/bold red]"
+        if state == "in progress":
+            return f"[bold yellow]⏳ IN PROGRESS[/bold yellow]{age}"
+        if state == "done":
+            badge = "✓" if stop.review_result and stop.review_result.is_clean else "✗"
+            cached = f" cached {stop.cached_age}" if stop.cached_age else ""
+            return f"[bold green]{badge} DONE[/bold green]{cached}"
+        if state == "queued":
+            return "[bold cyan]QUEUED[/bold cyan]"
+        return "[dim]READY[/dim]"
+
+    def populate(
+        self, stops: list[Stop], record_snapshot: dict[str, RunRecord] | None = None
+    ) -> None:
         self.stops = stops
         try:
             queue = self.query_one("#queue", ListView)
-        except NoMatches:
+        except (NoMatches, ScreenStackError):
             return
         queue.clear()
         if not stops:
-            empty_source = not self.queue_items and self.source_state in ("empty", "ready")
-            if self.view_mode == "issues":
-                if self.source_state not in ("ready", "empty"):
-                    err = f"Could not load issues ({self.source_state})"
-                    if self.source_message:
-                        err += f": {self.source_message}"
-                    queue.append(ListItem(Static(f"[bold red]{escape(err)}[/bold red]")))
-                    try:
-                        details = self.query_one("#details", Static)
-                        details.update(f"[bold red]{escape(err)}[/bold red]")
-                        context = self.query_one("#context", Static)
-                        context.update("")
-                    except NoMatches:
-                        pass
-                elif not stops and self.issues_items:
+            empty_source = not self.active_source_items and self.source_state in ("empty", "ready")
+            if self.source_state not in ("ready", "empty"):
+                noun = "issues" if self.view_mode == "issues" else ("pull requests" if self.view_mode == "prs" else "workboard")
+                err = f"Could not load {noun} ({self.source_state})"
+                if self.source_message:
+                    err += f": {self.source_message}"
+                queue.append(ListItem(Static(f"[bold red]{escape(err)}[/bold red]")))
+                try:
+                    details = self.query_one("#details", Static)
+                    details.update(f"[bold red]{escape(err)}[/bold red]")
+                    context = self.query_one("#context", Static)
+                    context.update("")
+                except (NoMatches, ScreenStackError):
+                    pass
+            elif self.view_mode == "issues":
+                if not stops and self.issues_items:
                     queue.append(ListItem(Static("[dim]No issues match the active filter. Press [bold]f[/bold] to widen.[/dim]")))
                     try:
                         details = self.query_one("#details", Static)
                         details.update("[dim]No issues match the active filter.[/dim]")
                         context = self.query_one("#context", Static)
                         context.update("")
-                    except NoMatches:
+                    except (NoMatches, ScreenStackError):
                         pass
                 else:
                     queue.append(ListItem(Static("[dim]No open issues found.[/dim]")))
@@ -4881,7 +5505,7 @@ class ReviewDashboard(App):
                         details.update("[dim]No open issues.[/dim]")
                         context = self.query_one("#context", Static)
                         context.update("")
-                    except NoMatches:
+                    except (NoMatches, ScreenStackError):
                         pass
             elif empty_source and self.slay_frame >= 0:
                 frame_text = SLAY_FRAMES[self.slay_frame]
@@ -4889,30 +5513,98 @@ class ReviewDashboard(App):
                 try:
                     details = self.query_one("#details", Static)
                     details.update("[bold cyan]ALL SYSTEMS SLAY[/bold cyan]\n\n[green]★[/green] Review queue fully drained.\nEnjoy the victory.")
-                except NoMatches:
+                except (NoMatches, ScreenStackError):
                     pass
-            elif not stops and self.queue_items:
-                queue.append(ListItem(Static("[dim]No pull requests match the active filter. Press [bold]f[/bold] to widen.[/dim]")))
+            elif not stops and self.active_source_items:
+                queue.append(ListItem(Static("[dim]No items match the active filter. Press [bold]f[/bold] to widen.[/dim]")))
+            else:
+                queue.append(ListItem(Static("[dim]No open pull requests or issues found.[/dim]")))
         else:
             for stop in stops:
-                item = ListItem(Label(self.row_markup(stop)))
+                item = ListItem(Label(self.row_markup(stop, record_snapshot=record_snapshot)))
                 item.set_class(stop.selected, "selected")
                 queue.append(item)
             queue.index = 0
-        self.refresh_status()
+        self.refresh_status(record_snapshot=record_snapshot)
 
     def refresh_rows(self) -> None:
-        """Repaint the rows in place, keeping the highlight where it was."""
+        """Repaint queue lifecycle changes in their current priority order."""
         try:
             queue = self.query_one("#queue", ListView)
-        except NoMatches:
+        except (NoMatches, ScreenStackError):
             return
-        for stop, item in zip(self.stops, queue.children):
-            labels = item.query(Label)
-            if labels:
-                labels.first().update(self.row_markup(stop))
-            item.set_class(stop.selected, "selected")
-        self.refresh_status()
+        current = self.current
+        current_key = current.key if current else ""
+        prior_order = [stop.key for stop in self.stops]
+
+        record_snapshot = (
+            self.run_store.snapshot()
+            if hasattr(self, "run_store") and hasattr(self.run_store, "snapshot")
+            else None
+        )
+        self._repaint_record_snapshot = record_snapshot
+        self._repaint_profile_cache = {}
+        self._repaint_ident_cache = {}
+        self._repaint_blocked_cache = {}
+        self._repaint_preferences = load_preferences()
+        try:
+            self._sort_stops(record_snapshot=record_snapshot)
+            if (
+                prior_order == [stop.key for stop in self.stops]
+                and len(queue.children) == len(self.stops)
+                and all(list(item.query(Label)) for item in queue.children)
+            ):
+                for stop, item in zip(self.stops, queue.children):
+                    item.query(Label).first().update(
+                        self.row_markup(stop, record_snapshot=record_snapshot)
+                    )
+                    item.set_class(stop.selected, "selected")
+                self.refresh_status(record_snapshot=record_snapshot)
+                return
+            self.populate(self.stops, record_snapshot=record_snapshot)
+            if current_key:
+                queue.index = next(
+                    (
+                        index
+                        for index, stop in enumerate(self.stops)
+                        if stop.key == current_key
+                    ),
+                    0,
+                )
+        finally:
+            self._repaint_record_snapshot = None
+            self._repaint_profile_cache = None
+            self._repaint_ident_cache = None
+            self._repaint_blocked_cache = None
+            self._repaint_preferences = None
+
+    def refresh_selection_rows(self) -> None:
+        """Repaint batch markers without re-sorting the queue."""
+        try:
+            queue = self.query_one("#queue", ListView)
+        except (NoMatches, ScreenStackError):
+            return
+        record_snapshot = self.run_store.snapshot()
+        self._repaint_record_snapshot = record_snapshot
+        self._repaint_profile_cache = {}
+        self._repaint_ident_cache = {}
+        self._repaint_blocked_cache = {}
+        self._repaint_preferences = load_preferences()
+        try:
+            for stop, item in zip(self.stops, queue.children):
+                labels = item.query(Label)
+                if labels:
+                    labels.first().update(
+                        self.row_markup(stop, record_snapshot=record_snapshot)
+                    )
+                item.set_class(stop.selected, "selected")
+            self.refresh_status(record_snapshot=record_snapshot)
+        finally:
+            self._repaint_record_snapshot = None
+            self._repaint_profile_cache = None
+            self._repaint_ident_cache = None
+            self._repaint_blocked_cache = None
+            self._repaint_preferences = None
 
     def _activity_freshness(self) -> str:
         timestamps = [
@@ -4961,7 +5653,7 @@ class ReviewDashboard(App):
             if stop.review_status in {"queued", "running"}:
                 active.append(stop.key)
             result = stop.review_result
-            if result and stop.review_status in {"complete", "findings"}:
+            if result and stop.review_status in {"cached", "complete", "findings"}:
                 verdict = "clean" if result.is_clean else "findings"
                 drafts.append(f"{stop.key} ({verdict})")
             reviews = stop.live.get("reviews") or []
@@ -4969,14 +5661,20 @@ class ReviewDashboard(App):
                 reviews = reviews.get("nodes") or []
             if not isinstance(reviews, list):
                 continue
+            submitted_state = ""
             for review in reviews:
                 if not isinstance(review, dict):
                     continue
                 login = (review.get("author") or {}).get("login")
                 state = str(review.get("state") or "").upper()
-                if login == self.self_login and state:
-                    submitted.append(f"{stop.key} ({state})")
-                    break
+                if login != self.self_login:
+                    continue
+                if state in {"APPROVED", "CHANGES_REQUESTED"}:
+                    submitted_state = state
+                elif state == "COMMENTED" and not submitted_state:
+                    submitted_state = state
+            if submitted_state:
+                submitted.append(f"{stop.key} ({submitted_state})")
         rows = []
         if active:
             rows.append(f"Remote analysis: {self._activity_work(active)}")
@@ -4990,7 +5688,7 @@ class ReviewDashboard(App):
         """Render current lifecycle state without discovering new work."""
         try:
             panel = self.query_one("#activity", Static)
-        except NoMatches:
+        except (NoMatches, ScreenStackError):
             return
         active_reviews: list[str] = []
         parent_reviews = 0
@@ -5063,24 +5761,14 @@ class ReviewDashboard(App):
             ]
         panel.update("\n".join(escape(line) for line in [*lines, *rows]))
 
-    def refresh_status(self) -> None:
+    def refresh_status(
+        self, record_snapshot: dict[str, RunRecord] | None = None
+    ) -> None:
         selected = sum(1 for s in self.stops if s.selected)
         failed = sum(1 for s in self.stops if s.failure)
         stuck = f" | {failed} did not merge" if failed else ""
         review_failed = sum(
-            1
-            for stop in self.stops
-            if stop.review_status in {
-                "failed",
-                "cancelled",
-                "missing",
-                "incomplete",
-                "unparsable",
-                "review_failed",
-                "review_missing",
-                "review_incomplete",
-                "review_unparsable",
-            }
+            1 for stop in self.stops if stop.review_status in REVIEW_FAILURES
         )
         review_failures = (
             f" | {review_failed} review failed"
@@ -5123,7 +5811,8 @@ class ReviewDashboard(App):
                 breaker_parts.append(f" | {dep.value} breaker: blocked{retry_detail}")
         breakers = "".join(breaker_parts)
         shown = len(self.stops)
-        total = len(self.queue_items)
+        active_items = self.active_source_items
+        total = len(active_items)
         scope = self.filters.action or "all"
         # Say how much of the queue is hidden. A filtered view that looks like
         # the whole queue is how a maintainer concludes there are five open
@@ -5134,14 +5823,29 @@ class ReviewDashboard(App):
             if self.last_landing_outcome
             else ""
         )
+        recent_merges = (
+            f" | last merged: {escape(', '.join(self.recent_merges))}"
+            if self.recent_merges
+            else ""
+        )
         breakdown = ", ".join(
             f"{count} {action}"
             for action, count in sorted(
                 Counter(
-                    item.get("recommended_action", "") for item in self.queue_items
+                    (item.get("recommended_action") or item.get("action", ""))
+                    for item in active_items
                 ).items(),
                 key=lambda pair: action_rank(pair[0]),
             )
+        )
+        states = Counter(
+            self._queue_state(stop, record_snapshot=record_snapshot)
+            for stop in self.stops
+        )
+        queue_status = (
+            f"queue: {states['ready']} ready, {states['queued']} queued, "
+            f"{states['in progress']} in progress, "
+            f"{states['done']} done, {states['failed']} failed"
         )
         hive = escape(self.hive_state or "asking…")
         if self.hive_unavailable:
@@ -5182,9 +5886,17 @@ class ReviewDashboard(App):
         self.refresh_activity()
         try:
             status_bar = self.query_one("#status-bar", Static)
-        except NoMatches:
+        except (NoMatches, ScreenStackError):
             return
-        view_tag = f"{escape('[Tab]')} Issues view | " if self.view_mode == "issues" else f"{escape('[Tab]')} PR view | "
+        view_tag = (
+            f"{escape('[I]')} Mixed view | "
+            if self.view_mode == "mixed"
+            else (
+                f"{escape('[I]')} PR view | "
+                if self.view_mode == "prs"
+                else f"{escape('[I]')} Issues view | "
+            )
+        )
         if self.view_mode == "issues":
             status_bar.update(
                 f" {view_tag}Issues: {shown} open "
@@ -5193,19 +5905,32 @@ class ReviewDashboard(App):
                 f"| batch: {selected}{reconciliation}"
                 f"{reviews}{breakers}{countme} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
             )
-        else:
+        elif self.view_mode == "prs":
             status_bar.update(
-                f" {view_tag}Queue: {shown} PRs{held_back} | filter {scope} | {breakdown} "
+                f" {view_tag}Queue: {shown} PRs{held_back} | {queue_status} "
+                f"| filter {scope} | {breakdown} "
                 f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
                 f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
-                f"| batch: {selected}{reconciliation}{stuck}{review_failures}{agents}{landed}{policy}"
+                f"| batch: {selected}{reconciliation}{stuck}{review_failures}{agents}{landed}{recent_merges}{policy}"
+                f"{reviews}{breakers}{countme} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
+            )
+        else:
+            pr_shown = sum(1 for s in self.stops if not s.is_issue)
+            issue_shown = sum(1 for s in self.stops if s.is_issue)
+            status_bar.update(
+                f" {view_tag}Board: {shown} items ({pr_shown} PRs, {issue_shown} issues){held_back} | {queue_status} "
+                f"| filter {scope} | {breakdown} "
+                f"| {('source ' + self.source_state + (' — ' + escape(self.source_message) if self.source_message else ''))} "
+                f"| {('org ' + GITHUB_ORG) if not self.filters.live else 'repository ' + self.filters.live_repository} | as {self.self_login or 'unknown'} "
+                f"| batch: {selected}{reconciliation}{stuck}{review_failures}{agents}{landed}{recent_merges}{policy}"
                 f"{reviews}{breakers}{countme} | {headroom}{headroom_reduction} | {lab} | Hive: {hive}"
             )
 
     def action_filter(self) -> None:
         """Cycle the action filter: every action, then one at a time."""
+        active_items = self.active_source_items
         present = [a for a in MAINTAINER_ORDER if any(
-            item.get("recommended_action") == a for item in self.queue_items
+            (item.get("recommended_action") or item.get("action")) == a for item in active_items
         )]
         scopes = [""] + present
         try:
@@ -5214,11 +5939,15 @@ class ReviewDashboard(App):
             nxt = ""
         self.filters.action = nxt
         self.apply_filters()
-        self.notify(f"filter: {nxt or 'all actions'} — {len(self.stops)} PRs")
+        noun = "items" if self.view_mode == "mixed" else ("issues" if self.view_mode == "issues" else "PRs")
+        self.notify(f"filter: {nxt or 'all actions'} — {len(self.stops)} {noun}")
 
     @property
     def current(self) -> Stop | None:
-        index = self.query_one("#queue", ListView).index
+        try:
+            index = self.query_one("#queue", ListView).index
+        except (NoMatches, ScreenStackError):
+            return None
         if index is None or not (0 <= index < len(self.stops)):
             return None
         return self.stops[index]
@@ -5237,7 +5966,10 @@ class ReviewDashboard(App):
     ) -> None:
         generation = self.evidence_generation.get(stop.key, 0) + 1
         self.evidence_generation[stop.key] = generation
-        self.fetch_evidence(stop, generation, open_decision)
+        try:
+            self.fetch_evidence(stop, generation, open_decision)
+        except RuntimeError:
+            pass
 
     @work(thread=True)
     def fetch_evidence(
@@ -5391,18 +6123,9 @@ class ReviewDashboard(App):
             self.merge_rights[stop.repository] = merge_rights
             _bound_map(self.merge_rights, MAX_MERGE_RIGHTS_ENTRIES)
         current_base = str(stop.live.get("baseRefOid") or "")
-        result_base = str(
-            (stop.review_result.provenance if stop.review_result else {}).get(
-                "base_sha"
-            )
-            or ""
-        )
-        result_head = str(
-            (stop.review_result.provenance if stop.review_result else {}).get(
-                "head_sha"
-            )
-            or ""
-        )
+        provenance = getattr(stop.review_result, "provenance", None) or {}
+        result_base = str(provenance.get("base_sha") or "")
+        result_head = str(provenance.get("head_sha") or "")
         identity_changed = (
             (previous_base and previous_base != current_base)
             or (previous_head and previous_head != stop.head_identity)
@@ -5426,6 +6149,8 @@ class ReviewDashboard(App):
             self.push_screen(ReviewDecisionScreen(stop))
 
     def annotate_cached_review(self, stop: Stop) -> None:
+        if stop.review_status in REVIEW_FAILURES:
+            return
         base_sha = str(stop.live.get("baseRefOid") or "")
         head_sha = stop.head_identity
         if not (
@@ -5498,13 +6223,29 @@ class ReviewDashboard(App):
                 os.environ.get("GOOSE_MODEL", "gemini-3.8-flash"),
                 os.environ.get("GOOSE_THINKING_EFFORT", "max"),
             )
-        options = self.harness_options or discover_all()
-        preferences = load_preferences()
+        if getattr(self, "_repaint_profile_cache", None) is not None and repository in self._repaint_profile_cache:
+            return self._repaint_profile_cache[repository]
+
+        options = self.harness_options
+        if not options:
+            result = ("gemini-3.8-flash", "max")
+            if getattr(self, "_repaint_profile_cache", None) is not None:
+                self._repaint_profile_cache[repository] = result
+            return result
+
+        preferences = (
+            getattr(self, "_repaint_preferences", None)
+            if getattr(self, "_repaint_preferences", None) is not None
+            else load_preferences()
+        )
         selected = choose_option(
             repository, preferences, options
         )
         if selected is None:
-            return "gemini-3.8-flash", "max"
+            result = ("gemini-3.8-flash", "max")
+            if getattr(self, "_repaint_profile_cache", None) is not None:
+                self._repaint_profile_cache[repository] = result
+            return result
         preference = next(
             (
                 candidate
@@ -5518,10 +6259,20 @@ class ReviewDashboard(App):
             ),
             None,
         )
-        return (
+        supported_efforts = tuple(getattr(selected.harness, "SUPPORTED_EFFORTS", ())) or ("low", "medium", "high", "max")
+        default_effort = "low" if "low" in supported_efforts else (getattr(selected.harness, "effort", None) or supported_efforts[0])
+        if preference and preference.effort in supported_efforts:
+            effort = preference.effort
+        else:
+            raw_reasoning = getattr(selected.discovery, "reasoning", None) or getattr(selected.discovery, "reasoning_effort", None)
+            effort = raw_reasoning if (raw_reasoning and raw_reasoning in supported_efforts) else default_effort
+        result = (
             preference.model if preference else selected.discovery.model,
-            preference.effort if preference else "low",
+            effort,
         )
+        if getattr(self, "_repaint_profile_cache", None) is not None:
+            self._repaint_profile_cache[repository] = result
+        return result
 
     def repo_pulls(self, repo: str) -> list[dict]:
         if repo not in self.pulls_cache:
@@ -5638,7 +6389,11 @@ class ReviewDashboard(App):
             body_display = escape(body) if body else "[dim]No description provided.[/dim]"
             issue_link = link(stop.key, issue_url(stop.repository, stop.number))
 
-            self.query_one("#details", Static).update(
+            try:
+                details = self.query_one("#details", Static)
+            except NoMatches:
+                return
+            details.update(
                 f"[b]{issue_link}[/b]  {escape(title)}\n"
                 f"author     {link(author, f'https://github.com/{author}')}\n"
                 f"state      {escape(state)}\n"
@@ -6056,13 +6811,7 @@ class ReviewDashboard(App):
         if not stop:
             return
         stop.selected = not stop.selected
-        item = self.query_one("#queue", ListView).highlighted_child
-        if item:
-            item.set_class(stop.selected, "selected")
-            labels = item.query(Label)
-            if labels:
-                labels.first().update(self.row_markup(stop))
-        self.refresh_status()
+        self.refresh_selection_rows()
 
     def action_select_all(self) -> None:
         should_select = (
@@ -6071,30 +6820,36 @@ class ReviewDashboard(App):
         )
         for stop in self.stops:
             stop.selected = should_select
-        self.refresh_rows()
+        self.refresh_selection_rows()
 
     def action_toggle_advance(self) -> None:
+        queue = self._queue()
+        index = queue.index
         stop = self.current
         if stop is None:
             return
+        successor = (
+            self.stops[index + 1]
+            if index is not None and index + 1 < len(self.stops)
+            else None
+        )
         stop.selected = not stop.selected
-        self.refresh_rows()
-        self._queue().action_cursor_down()
+        self.refresh_selection_rows()
+        if successor is not None:
+            queue.index = self.stops.index(successor)
 
     def action_toggle_view(self) -> None:
         if self.view_mode == "prs":
             self.view_mode = "issues"
             self.notify("switched to issues view")
-            if not self.issues_items:
-                self.stops = []
-                self.populate([])
-                self.load_issues()
-            else:
-                self.apply_filters()
+        elif self.view_mode == "issues":
+            self.view_mode = "mixed"
+            self.notify("switched to mixed workboard view")
         else:
             self.view_mode = "prs"
             self.notify("switched to pull requests view")
-            self.apply_filters()
+        self._sync_source_state()
+        self.apply_filters()
         if self.current:
             self.show_evidence(self.current)
 
@@ -6118,11 +6873,11 @@ class ReviewDashboard(App):
         return stop.triage_key
 
     def action_review(self) -> None:
-        if self.view_mode == "issues" or (self.current and self.current.is_issue):
-            self.notify("action applies to pull requests only", severity="warning")
+        targets = self._pr_action_targets()
+        if not targets:
             return
-        batch = [stop for stop in self.stops if stop.selected]
-        if batch:
+        if any(s.selected for s in self.stops) or len(targets) > 1:
+            batch = targets
             keys = {stop.key for stop in batch}
             active = {
                 item.key
@@ -6138,43 +6893,179 @@ class ReviewDashboard(App):
                 return
             self.review_pending_keys.update(keys)
             self.start_review_batch(batch)
-        elif self.current:
-            self.start_review(self.current)
+        else:
+            self.start_review(targets[0])
 
     def action_slay_pr(self) -> None:
         """`$`: slay a pull request (review if unreviewed, fix if findings, land in batch)."""
-        if self.view_mode == "issues" or (self.current and self.current.is_issue):
+        if self.view_mode == "issues":
             self.notify("action applies to pull requests only", severity="warning")
             return
         if not self.self_login:
             self.notify("your GitHub login is unknown; needed for landing.", severity="warning")
             return
-        targets = [s for s in self.stops if s.selected] or ([self.current] if self.current else [])
-        if not targets:
+
+        selected = [s for s in self.stops if s.selected]
+        if selected:
+            prs = [s for s in selected if not s.is_issue]
+            if len(prs) < len(selected):
+                self.notify("selected issues skipped; action applies to pull requests only", severity="warning")
+            if not prs:
+                return
+            targets = prs
+        elif self.current:
+            if self.current.is_issue:
+                self.notify("action applies to pull requests only", severity="warning")
+                return
+            targets = [self.current]
+        else:
             self.notify("nothing selected to slay", severity="warning")
             return
+
+        actionable = []
+        for stop in targets:
+            reason = self.stop_blocked_reason(stop)
+            if reason:
+                self.notify(f"[$] {stop.key} cannot be slayed: {reason}", severity="warning")
+                continue
+            actionable.append(stop)
+
+        if not actionable:
+            return
+
+        def confirmed(ok: bool) -> None:
+            if not ok:
+                return
+            self._execute_slay(actionable)
+
+        self.push_screen(SlayConfirmScreen(actionable), confirmed)
+
+    def _execute_slay(self, targets: list[Stop]) -> None:
         review_targets = []
         for stop in targets:
-            identity = self.run_identity(stop)
-            record = self.run_store.get(identity)
-            if record is not None:
-                if record.in_flight:
-                    self.notify(f"[$] {stop.key} is already being slayed", severity="warning")
-                    continue
-                if record.is_terminal:
-                    self.notify(
-                        f"[$] {stop.key} at {identity.head_sha[:8]} already reached terminal state {record.state.value}; head must advance to re-slay",
-                        severity="warning",
-                    )
-                    continue
-            else:
-                record = self.run_store.create(identity)
-
             has_review = (
                 stop.review_status in {"cached", "complete", "findings"}
                 or stop.review_result is not None
             )
-            if has_review:
+            prov = getattr(stop.review_result, "provenance", None) if stop.review_result else None
+            reviewed_head = (
+                (prov.get("head_sha") if isinstance(prov, dict) else None)
+                or stop.head_identity
+            )
+            rev_model = prov.get("model") if isinstance(prov, dict) else None
+            rev_effort = (prov.get("effort") or prov.get("reasoning_effort")) if isinstance(prov, dict) else None
+            reviewed_identity = None
+            if has_review and reviewed_head and FULL_SHA.fullmatch(reviewed_head):
+                try:
+                    reviewed_identity = self.run_identity(
+                        stop, head_sha=reviewed_head, model=rev_model, effort=rev_effort
+                    )
+                except ValueError as error:
+                    self.notify(f"[$] {stop.key}: {error}", severity="error")
+                    continue
+
+            try:
+                live_data = self.fetch_live_pr(stop.repository, stop.number, force=True)
+                stop.live.update(live_data)
+            except Exception:
+                live_data = {}
+
+            reason = self.stop_blocked_reason(stop)
+            if reason:
+                self.notify(f"[$] {stop.key} cannot be slayed: {reason}", severity="warning")
+                continue
+
+            live_head_sha = str(stop.live.get("headRefOid") or live_data.get("headRefOid") or "")
+            if not FULL_SHA.fullmatch(live_head_sha):
+                live_head_sha = reviewed_head if (has_review and reviewed_head) else stop.head_identity
+
+            if has_review and reviewed_identity is not None:
+                record = self.run_store.get(reviewed_identity)
+                if live_head_sha != reviewed_identity.head_sha:
+                    if record is not None and record.is_terminal:
+                        if record.state == RunState.HEAD_CHANGED:
+                            stop.failure = f"landing aborted: head changed (reviewed {reviewed_identity.head_sha[:12]}, live {live_head_sha[:12]})"
+                            stop.failure_command = "gh pr view"
+                            self.notify(
+                                f"[$] {stop.key}: head changed between review and mutation; landing aborted",
+                                severity="error",
+                            )
+                        else:
+                            self.notify(
+                                f"[$] {stop.key}: cannot land — run state {record.state.value} cannot mutate",
+                                severity="error",
+                            )
+                        self.refresh_rows()
+                        continue
+                    stop.review_result = None
+                    stop.review_status = ""
+                    fixer_advanced = self.is_fixer_head(stop.repository, stop.number, live_head_sha)
+                    if record is None:
+                        record = self.run_store.create(reviewed_identity)
+                        self.run_store.transition(reviewed_identity, RunState.REVIEWING)
+                        self.run_store.transition(reviewed_identity, RunState.REVIEW_CLEAN)
+                    record = self.run_store.revalidate_head(
+                        reviewed_identity, live_head_sha, fixer_advanced=fixer_advanced
+                    )
+                    if record.state == RunState.HEAD_CHANGED:
+                        stop.failure = f"landing aborted: head changed (reviewed {reviewed_identity.head_sha[:12]}, live {live_head_sha[:12]})"
+                        stop.failure_command = "gh pr view"
+                        self.notify(
+                            f"[$] {stop.key}: head changed between review and mutation; landing aborted",
+                            severity="error",
+                        )
+                        self.refresh_rows()
+                        continue
+                    elif record.state == RunState.ESCALATION_REQUIRED:
+                        esc_backend, esc_model, esc_effort = self.escalation_profile(stop)
+                        new_id = self.run_identity(
+                            stop, head_sha=live_head_sha, model=esc_model, effort=esc_effort
+                        )
+                        new_rec = self.run_store.get(new_id)
+                        if new_rec is None:
+                            new_rec = self.run_store.create(new_id)
+                        if new_rec.state != RunState.RE_REVIEWING:
+                            self.run_store.transition(new_id, RunState.RE_REVIEWING)
+                        stop.head_sha = live_head_sha
+                        stop.live["headRefOid"] = live_head_sha
+                        stop.review_status = "running"
+                        stop.review_result = None
+                        self.active_review_identities[stop.key] = new_id
+                        self.notify(
+                            f"[$] {stop.key}: head advanced by fixer ({live_head_sha[:8]}) — triggering fresh strong review ({esc_model})…",
+                        )
+                        review_targets.append((stop, esc_model, esc_effort))
+                        continue
+
+                identity = reviewed_identity
+                if record is not None:
+                    if record.in_flight:
+                        self.notify(f"[$] {stop.key} is already being slayed", severity="warning")
+                        continue
+                    if record.is_terminal:
+                        if record.state in REVIEW_PROVIDER_TERMINALS:
+                            self.run_store.retry_review(identity)
+                            self.notify(f"[$] retrying review for {stop.key}…")
+                            review_targets.append((stop, identity.model, identity.effort))
+                            continue
+                        elif record.state == RunState.HEAD_CHANGED:
+                            stop.failure = f"landing aborted: head changed (reviewed {identity.head_sha[:12]}, live {live_head_sha[:12]})"
+                            stop.failure_command = "gh pr view"
+                            self.notify(
+                                f"[$] {stop.key}: head changed between review and mutation; landing aborted",
+                                severity="error",
+                            )
+                            self.refresh_rows()
+                            continue
+                        else:
+                            self.notify(
+                                f"[$] {stop.key} at {identity.head_sha[:8]} already reached terminal state {record.state.value}; head must advance to re-slay",
+                                severity="warning",
+                            )
+                            continue
+                else:
+                    record = self.run_store.create(identity)
+
                 findings = list(stop.review_result.findings if stop.review_result else [])
                 target_state = (
                     RunState.REVIEW_FINDINGS
@@ -6185,11 +7076,38 @@ class ReviewDashboard(App):
                     self.run_store.transition(identity, RunState.REVIEWING)
                     record = self.run_store.transition(identity, target_state)
                 self._dispatch_slay_landing(stop, identity=identity)
+                continue
+
+            try:
+                identity = self.run_identity(stop, head_sha=live_head_sha)
+            except ValueError as error:
+                self.notify(f"[$] {stop.key}: {error}", severity="error")
+                continue
+
+            record = self.run_store.get(identity)
+            if record is not None:
+                if record.in_flight:
+                    self.notify(f"[$] {stop.key} is already being slayed", severity="warning")
+                    continue
+                if record.is_terminal:
+                    if record.state in REVIEW_PROVIDER_TERMINALS:
+                        self.run_store.retry_review(identity)
+                        self.notify(f"[$] retrying review for {stop.key}…")
+                        review_targets.append((stop, identity.model, identity.effort))
+                        continue
+                    else:
+                        self.notify(
+                            f"[$] {stop.key} at {identity.head_sha[:8]} already reached terminal state {record.state.value}; head must advance to re-slay",
+                            severity="warning",
+                        )
+                        continue
             else:
-                if record.state == RunState.PENDING:
-                    self.run_store.transition(identity, RunState.REVIEWING)
-                self.notify(f"[$] slaying {stop.key}: running review…")
-                review_targets.append(stop)
+                record = self.run_store.create(identity)
+
+            if record.state == RunState.PENDING:
+                self.run_store.transition(identity, RunState.REVIEWING)
+            self.notify(f"[$] slaying {stop.key}: running review…")
+            review_targets.append((stop, None, None))
         if not review_targets:
             return
         active = {
@@ -6198,8 +7116,8 @@ class ReviewDashboard(App):
             if review_batch.running
             for item in review_batch.items
         }
-        ready = []
-        for stop in review_targets:
+        ready: list[tuple[Stop, str | None, str | None]] = []
+        for stop, model, effort in review_targets:
             if stop.key in (active | self.review_pending_keys):
                 # The claim in run_store stays: the review already
                 # running will complete, and its event handler lands it.
@@ -6208,12 +7126,24 @@ class ReviewDashboard(App):
                     severity="warning",
                 )
             else:
-                ready.append(stop)
+                ready.append((stop, model, effort))
         if not ready:
             return
-        ready_keys = {stop.key for stop in ready}
+
+        batches_by_profile: dict[tuple[str | None, str | None], list[Stop]] = {}
+        for stop, model, effort in ready:
+            batches_by_profile.setdefault((model, effort), []).append(stop)
+
+        ready_keys = {stop.key for stop, _, _ in ready}
         self.review_pending_keys.update(ready_keys)
-        self.start_review_batch(ready)
+
+        for (model, effort), stops in batches_by_profile.items():
+            if model is not None and effort is not None:
+                self.start_review_batch(stops, model=model, effort=effort)
+            elif model is not None:
+                self.start_review_batch(stops, model=model)
+            else:
+                self.start_review_batch(stops)
 
     def _dispatch_slay_landing(
         self, stop: Stop, identity: RunIdentity | None = None
@@ -6223,21 +7153,31 @@ class ReviewDashboard(App):
             return
         if identity is None:
             identity = self.run_identity(stop)
+
+        try:
+            live_data = self.fetch_live_pr(stop.repository, stop.number, force=True)
+            stop.live.update(live_data)
+        except Exception as error:
+            self.notify(
+                f"[$] {stop.key}: live re-fetch failed: {error}",
+                severity="error",
+            )
+            return
+
+        reason = self.stop_blocked_reason(stop)
+        if reason:
+            self.notify(
+                f"[$] {stop.key} cannot be slayed: {reason}",
+                severity="warning",
+            )
+            return
+
         record = self.run_store.get(identity)
         if record is None:
             record = self.run_store.create(identity)
         if not record.may_mutate():
             self.notify(
                 f"[$] {stop.key}: cannot land — run state {record.state.value} cannot mutate",
-                severity="error",
-            )
-            return
-
-        try:
-            live_data = self.fetch_live_pr(stop.repository, stop.number, force=True)
-        except Exception as error:
-            self.notify(
-                f"[$] {stop.key}: live re-fetch failed: {error}",
                 severity="error",
             )
             return
@@ -6267,14 +7207,18 @@ class ReviewDashboard(App):
             new_id = self.run_identity(
                 stop, head_sha=live_head_sha, model=esc_model, effort=esc_effort
             )
-            self.run_store.create(new_id)
-            self.run_store.transition(new_id, RunState.RE_REVIEWING)
+            new_rec = self.run_store.get(new_id)
+            if new_rec is None:
+                new_rec = self.run_store.create(new_id)
+            if new_rec.state != RunState.RE_REVIEWING:
+                self.run_store.transition(new_id, RunState.RE_REVIEWING)
             stop.head_sha = live_head_sha
             stop.live["headRefOid"] = live_head_sha
             stop.review_status = "running"
             stop.review_result = None
             self.active_review_identities[stop.key] = new_id
             if stop.key not in self.review_pending_keys:
+                self.review_pending_keys.add(stop.key)
                 self.start_review_batch([stop], model=esc_model, effort=esc_effort)
             self.notify(
                 f"[$] {stop.key}: head advanced by fixer ({live_head_sha[:8]}) — triggering fresh strong review ({esc_model})…",
@@ -6307,12 +7251,16 @@ class ReviewDashboard(App):
             new_id = self.run_identity(
                 stop, head_sha=live_head_sha, model=esc_model, effort=esc_effort
             )
-            self.run_store.create(new_id)
-            self.run_store.transition(new_id, RunState.RE_REVIEWING)
+            new_rec = self.run_store.get(new_id)
+            if new_rec is None:
+                new_rec = self.run_store.create(new_id)
+            if new_rec.state != RunState.RE_REVIEWING:
+                self.run_store.transition(new_id, RunState.RE_REVIEWING)
             stop.review_status = "running"
             stop.review_result = None
             self.active_review_identities[stop.key] = new_id
             if stop.key not in self.review_pending_keys:
+                self.review_pending_keys.add(stop.key)
                 self.start_review_batch([stop], model=esc_model, effort=esc_effort)
             self.notify(
                 f"[$] {stop.key}: clean first pass ({identity.model}) cannot authorise merge — triggering strong review ({esc_model})…",
@@ -6468,9 +7416,9 @@ class ReviewDashboard(App):
         self.reselect = {stop.key for stop in self.stops if stop.selected}
         self.last_landing_outcome = ""
         self.notify("refreshing the queue…")
-        if self.view_mode == "issues":
+        if self.view_mode in ("mixed", "issues"):
             self.load_issues()
-        else:
+        if self.view_mode in ("mixed", "prs"):
             request = (
                 self._reconciliation_request
                 if self._reconciliation_waiting
@@ -6493,12 +7441,7 @@ class ReviewDashboard(App):
         in one pass. A real conflict still cannot be resolved this way, and
         GitHub says so rather than pretending otherwise.
         """
-        if self.view_mode == "issues" or (self.current and self.current.is_issue):
-            self.notify("action applies to pull requests only", severity="warning")
-            return
-        batch = [s for s in self.stops if s.selected]
-        if not batch and self.current:
-            batch = [self.current]
+        batch = self._pr_action_targets()
         if not batch:
             return
         updateable = []
@@ -7005,19 +7948,27 @@ class ReviewDashboard(App):
             self._request_reconciliation()
 
     def action_merge(self) -> None:
-        if self.view_mode == "issues" or (self.current and self.current.is_issue):
-            self.notify("action applies to pull requests only", severity="warning")
+        batch = self._pr_action_targets()
+        if not batch:
             return
-        batch = [s for s in self.stops if s.selected]
-        if len(batch) > 1:
-            self.batch_queue_automerge(batch)
+        if len(batch) > 1 or any(s.selected for s in self.stops):
+            if len(batch) > 1:
+                self.batch_queue_automerge(batch)
+                return
+            stop = batch[0]
+            if self.batch_mutation_in_flight:
+                self.notify("a batch mutation is already in flight", severity="warning")
+                return
+            if not stop.live:
+                self.notify(f"{stop.key}: no live evidence yet; select it first.")
+                return
+            if self._queueable(stop):
+                self._queue_automerge(stop)
             return
         if self.batch_mutation_in_flight:
             self.notify("a batch mutation is already in flight", severity="warning")
             return
-        stop = self.current
-        if not stop:
-            return
+        stop = batch[0]
         if not stop.live:
             self.notify(f"{stop.key}: no live evidence yet; select it first.")
             return
@@ -7032,15 +7983,23 @@ class ReviewDashboard(App):
         batch plan gate. Without a selection there is nothing to land; the
         read-only batch queue this key used to open lives on [w].
         """
-        if self.view_mode == "issues" or (self.current and self.current.is_issue):
+        if self.view_mode == "issues":
             self.notify("action applies to pull requests only", severity="warning")
             return
-        batch = [s for s in self.stops if s.selected]
-        if not batch:
+        selected = [s for s in self.stops if s.selected]
+        if not selected:
+            if self.current and self.current.is_issue:
+                self.notify("action applies to pull requests only", severity="warning")
+                return
             self.notify(
                 "nothing selected — [b] marks rows for the batch.",
                 severity="warning",
             )
+            return
+        batch = [s for s in selected if not s.is_issue]
+        if len(batch) < len(selected):
+            self.notify("selected issues skipped; action applies to pull requests only", severity="warning")
+        if not batch:
             return
         self.plan_landing(batch)
 
@@ -7098,7 +8057,6 @@ class ReviewDashboard(App):
                 return
             for task in tasks:
                 self.enqueue_landing(task)
-            self.push_screen(LandingScreen(self))
 
         self.push_screen(BatchPlanScreen(tasks if should_partition else tasks[0]), finish)
 
@@ -7390,6 +8348,7 @@ class ReviewDashboard(App):
         self.observability.operation(f"landing.{outcome}", duration)
         # Set before refresh_rows: refresh_status renders it onto the bar.
         self.last_landing_outcome = message
+        self.restore_recent_merges()
         self.refresh_rows()
         self.notify(message, severity=severity)
         if done:
@@ -7503,6 +8462,7 @@ class ReviewDashboard(App):
         but the record only helps if the rows show it. Only the failure
         marking is restored; selecting a batch stays the maintainer's."""
         events = landing.persisted_events()
+        self.restore_recent_merges(events)
         if not events:
             return
         for stop in stops:
@@ -7515,6 +8475,24 @@ class ReviewDashboard(App):
                     f"{state}: "
                     f"{bounded_detail(str(event.get('note', 'no reason given')))}"
                 )
+
+    def restore_recent_merges(self, events: dict[str, dict] | None = None) -> None:
+        events = landing.persisted_events() if events is None else events
+        merged: list[tuple[int, int, str]] = []
+        for order, (key, event) in enumerate(events.items()):
+            timestamp = event.get("ts")
+            if (
+                event.get("state") == "merged"
+                and PERSISTED_PR_KEY_PATTERN.fullmatch(key)
+                and isinstance(timestamp, int)
+                and not isinstance(timestamp, bool)
+                and timestamp >= 0
+            ):
+                merged.append((timestamp, order, key))
+        merged.sort(key=lambda item: (-item[0], -item[1]))
+        self.recent_merges = [
+            key for _, _, key in merged[:MAX_RECENT_MERGES]
+        ]
 
     def action_agents(self) -> None:
         if not self.landing_queue:
@@ -7539,12 +8517,9 @@ class ReviewDashboard(App):
         checks still refuses, and that refusal is reported rather than worked
         around.
         """
-        if self.view_mode == "issues" or (self.current and self.current.is_issue):
-            self.notify("action applies to pull requests only", severity="warning")
+        batch = self._pr_action_targets()
+        if not batch:
             return
-        batch = [s for s in self.stops if s.selected]
-        if not batch and self.current:
-            batch = [self.current]
         queue = [stop for stop in batch if self._mergeable_now(stop)]
         if not queue:
             return
@@ -7612,6 +8587,7 @@ class ReviewDashboard(App):
             # Supersede any persisted failure, or the next refresh folds
             # it back onto a row the maintainer just merged (#290).
             landing.record_event(stop.key, "merged", f"merged directly by @{self.self_login or 'maintainer'}")
+            self.restore_recent_merges()
             self.refresh_rows()
             if then:
                 then()
@@ -7678,7 +8654,7 @@ class ReviewDashboard(App):
                     it for it in self.issues_items
                     if not (it.get("repository") == stop.repository and it.get("number") == stop.number)
                 ]
-                self.apply_filters()
+                self.apply_filters(refreshed_source="issues")
             then = on_issue_closed
 
         self.mutate_all(

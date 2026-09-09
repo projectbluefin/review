@@ -344,6 +344,7 @@ fi
 # review_snapshot_contract.py imports bluefin_review_tui for Stop, so it needs
 # the Textual venv rather than the stdlib-only step in validate.yml.
 "${venv}/bin/python" "$repo_root/tests/review_snapshot_contract.py"
+"${venv}/bin/python" "$repo_root/tests/mixed_workboard_contract.py"
 "${venv}/bin/python" "$repo_root/tests/dashboard_pilot.py"
 
 # Fails when a file under tests/ is not reachable from validate.yml, so a new

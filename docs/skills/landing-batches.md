@@ -53,8 +53,8 @@ or cluster scale-out (`cluster-workers.md`).
 
 ## `[$]` is a state machine
 
-`[$]` takes one exact-list confirmation and then mutates pull requests without
-further human input. Everything it does afterwards is therefore a safety
+`[$]` takes one typed `slay` confirmation for a batch (or the pull request
+number for one pull request) and then mutates pull requests without further human input. Everything it does afterwards is therefore a safety
 property, and safety properties cannot live in membership sets scattered across
 the dashboard: a key added to one set and dropped on an early return is a pull
 request that is permanently stuck or, worse, permanently in flight.

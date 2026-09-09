@@ -21,13 +21,23 @@ beside it. Persistent state stays limited to launcher configuration and the
 review-queue landing record the launcher mounts for the dashboard.
 
 The interactive recipes run the image runtime in the foreground of the
-terminal that launched them, and Ctrl-C stops them. The one permitted
-background path is the detached worker: `REVIEW_DETACH=1` labels the
-container `review.owner=detached`, a later launch refuses to reclaim it, and
-`just review-stop` is its explicit lifecycle verb. No launch path may
-background a run implicitly — no `nohup`, no unlabeled `podman run -d`, no
-job that silently outlives the terminal. Cleanup of interactive runs remains
+terminal that launched them, and Ctrl-C stops them. Detached contributor
+containers are not supported; `REVIEW_DETACH=1` is rejected. No launch path may
+background a container run — no `nohup`, no unlabeled `podman run -d`,
+no `REVIEW_DETACH=1`, and no job that silently outlives the terminal. Cluster
+workers run in Kubernetes and are stopped with `just review-stop` (or
+`just review-stop cluster`). Cleanup of interactive runs remains
 a startup concern: a launch reclaims whatever a previous run left behind.
+
+When an operator configures an SSH-backed default Podman system connection, the
+launcher stages the selected `0600` Hive contributor registration to a unique
+per-run private `0700` directory on the remote engine host for the duration of the
+container run, and removes only that private staging path on exit. Remote canonical
+configuration (`~/.config/hive` and `contributor.env`) is never altered or deleted.
+Operator control remains explicit through Podman connection configuration; no
+credential values, SSH targets, or endpoints appear in arguments, logs, or committed
+files. Preserve `--userns keep-id` for rootless Podman access to the `0600` Hive
+contributor credential; never loosen that file's permissions as a workaround.
 
 That rule scopes how the launcher starts the container; it is not a ban
 on `&` anywhere in the repository. Backgrounding is required where it is what
