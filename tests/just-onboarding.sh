@@ -2323,7 +2323,7 @@ fi
 begin "static: remote Hive staging never alters canonical paths and validates cleanup"
 stage_func="$(sed -n '/^stage_hive_registration_for_remote_podman()/,/^}/p' "$code")"
 cleanup_func="$(sed -n '/^cleanup_remote_hive_registration()/,/^}/p' "$code")"
-if grep -q '\$HOME/\.config/hive' <<<"$stage_func"; then
+if grep -q "\$HOME/\.config/hive" <<<"$stage_func"; then
   fail "remote Hive staging must not target remote canonical \$HOME/.config/hive"
 fi
 grep -q 'mktemp -d /tmp/review-hive-registration' <<<"$stage_func" ||
