@@ -373,6 +373,18 @@ KEYS_ACTING = (
     " [b]L[/b] leave review [b]a[/b] approve+queue [b]A[/b] land batch [b]m[/b] merge [b]$[/b] slay"
     " [b]u[/b] update clean branch [b]U[/b] select mechanical [b]x[/b] reject [b]M[/b] dupes"
 )
+KEYS_READING_COMPACT = (
+    " [b]j/k[/b] move  [b]b/B[/b] select  [b]/[/b] steer  [b]i[/b] CI"
+    "  [b]w[/b] batches  [b]R[/b] refresh  [b]q[/b]/Esc back"
+)
+KEYS_ACTING_COMPACT = (
+    " [b]A[/b] land  [b]a[/b] approve  [b]L[/b] review  [b]m[/b] merge"
+    "  [b]x[/b] reject  [b]u[/b] update  [b]$[/b] slay"
+)
+STEER_PLACEHOLDER = (
+    "[/] steer the review of the highlighted PR — enter runs it, esc returns to the queue"
+)
+STEER_PLACEHOLDER_COMPACT = "[/] steer highlighted PR · Enter run · Esc back"
 
 # The bot whose pull requests can be classified as mechanical. The login is
 # configurable because the Renovate installation differs per deployment: this
@@ -4318,8 +4330,7 @@ class ReviewDashboard(App):
                 with ScrollableContainer(id="context-pane"):
                     yield Static("", id="context")
         yield Input(
-            placeholder="[/] steer the review of the highlighted PR — "
-            "enter runs it, esc returns to the queue",
+            placeholder=STEER_PLACEHOLDER,
             id="steer",
         )
         # Two lines, not Textual's one-line Footer. Fourteen bindings do not
@@ -4337,6 +4348,7 @@ class ReviewDashboard(App):
             right = self.query_one("#right-pane")
             context = self.query_one("#context-pane")
             activity = self.query_one("#activity")
+            steer = self.query_one("#steer", Input)
             reading = self.query_one("#keys-reading")
             acting = self.query_one("#keys-acting")
         except NoMatches:
@@ -4352,8 +4364,13 @@ class ReviewDashboard(App):
         right.styles.height = "55%" if narrow else "1fr"
         context.styles.display = "none" if narrow else "block"
         activity.styles.height = 5 if narrow else "auto"
-        reading.styles.height = "auto" if narrow else 1
-        acting.styles.height = "auto" if narrow else 1
+        steer.placeholder = (
+            STEER_PLACEHOLDER_COMPACT if narrow else STEER_PLACEHOLDER
+        )
+        reading.update(KEYS_READING_COMPACT if narrow else KEYS_READING)
+        acting.update(KEYS_ACTING_COMPACT if narrow else KEYS_ACTING)
+        reading.styles.height = 1
+        acting.styles.height = 1
         self.refresh_activity()
 
     def on_resize(self, event) -> None:
@@ -6055,12 +6072,28 @@ class ReviewDashboard(App):
                 f"… {len(rows) - (MAX_ACTIVITY_ROWS - 1)} more active assignments"
             ]
         if self.size.width <= 100:
+            active_landing_keys = [
+                key
+                for task in active_landings
+                for key in task.keys
+            ]
+            if active_landing_keys:
+                active_detail = (
+                    f"active landing: {self._activity_work(active_landing_keys)}"
+                )
+            elif active_reviews:
+                active_detail = (
+                    f"active review: {self._activity_work(active_reviews)}"
+                )
+            else:
+                active_detail = "active work: none"
             compact_lines = [
                 "AGENT ACTIVITY",
                 f"reviews {parent_reviews} · checks {check_workers} · landing {len(active_landings)}",
+                active_detail,
                 f"queued {len(queued_landings)} · {self._activity_freshness()}",
             ]
-            rendered_lines = [*compact_lines, *lines, *rows]
+            rendered_lines = compact_lines
         else:
             rendered_lines = [*lines, *rows]
         panel.update("\n".join(escape(line) for line in rendered_lines))
@@ -7752,7 +7785,6 @@ class ReviewDashboard(App):
             self.notify("CI failure logs apply to pull requests only", severity="warning")
             return
         expected_head = stop.head_identity
-        self.notify("loading current-head CI failure evidence…")
         self.load_ci_failure_evidence(stop, expected_head)
 
     @work(thread=True, exclusive=True, group="ci")

@@ -521,6 +521,60 @@ class ResponsiveTuiContractTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_compact_activity_and_controls_keep_active_landing_context(self):
+        with tempfile.TemporaryDirectory() as root:
+            task = tui.landing.LandingTask(
+                "compact-landing",
+                [tui.Stop("projectbluefin/review", 151, "review", "landing")],
+                "reviewer",
+                status_path=str(Path(root) / "status.jsonl"),
+                process=object(),
+            )
+            app = tui.ReviewDashboard()
+            app.load_queue = lambda: None
+            app.load_hive = lambda: None
+            app.discover_harness = lambda: None
+            app.landing_queue.append(task)
+
+            async def exercise():
+                async with app.run_test(size=(80, 24)) as pilot:
+                    await pilot.pause()
+                    activity = app.query_one("#activity", tui.Static)
+                    visible_activity = "\n".join(
+                        "".join(segment.text for segment in activity.render_line(row))
+                        for row in range(activity.region.height)
+                    )
+                    self.assertIn("projectbluefin/review#151", visible_activity)
+                    steer = app.query_one("#steer", tui.Input)
+                    self.assertIn("Enter", steer.placeholder)
+                    self.assertIn("Esc", steer.placeholder)
+                    self.assertLessEqual(
+                        len(steer.placeholder), steer.content_region.width
+                    )
+                    reading = app.query_one("#keys-reading", tui.Static)
+                    acting = app.query_one("#keys-acting", tui.Static)
+                    self.assertEqual(reading.region.height, 1)
+                    self.assertEqual(acting.region.height, 1)
+                    reading_text = "".join(
+                        segment.text for segment in reading.render_line(0)
+                    )
+                    acting_text = "".join(
+                        segment.text for segment in acting.render_line(0)
+                    )
+                    self.assertIn("i CI", reading_text)
+                    self.assertIn("A land", acting_text)
+
+            asyncio.run(exercise())
+
+    def test_ci_evidence_fetch_does_not_leave_a_covering_toast(self):
+        stop = review_stop()
+        app = tui.ReviewDashboard()
+        app.load_ci_failure_evidence = lambda *_args: None
+        notices = []
+        app.notify = lambda message, *args, **kwargs: notices.append(str(message))
+        app.open_ci_failure_logs(stop)
+        self.assertEqual(notices, [])
+
     def test_editor_and_confirmation_keep_back_keys_and_input_isolated(self):
         async def exercise():
             root = ScreenHost(tui.ReviewBody(review_stop(), "comment"))
