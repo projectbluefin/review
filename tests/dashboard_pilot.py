@@ -1876,7 +1876,8 @@ async def main() -> int:
                 screen.poll()
                 rows = str(screen.query_one("#landing-rows", tui.Static).render())
                 check(
-                    rows.count("merged") == 2,
+                    "projectbluefin/bluefinctl#31  ✓ merged" in rows
+                    and "projectbluefin/common#7  ✓ merged" in rows,
                     f"the queue must show each landed PR, got {rows!r}",
                 )
                 check(
@@ -4968,6 +4969,8 @@ async def main() -> int:
         stop = app.stops[0]
         stop.live = {
             "isDraft": False,
+            "baseRefOid": "a" * 40,
+            "headRefOid": "b" * 40,
             "reviews": [
                 {
                     "author": {"login": "hanthor"},
