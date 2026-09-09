@@ -7305,6 +7305,23 @@ async def main() -> int:
             await pilot.pause(0.05)
         check(late_options, "the late-discovery Pilot needs real harness options")
         late_app.exit()
+    late_queue_snapshot = {
+        "self_login": "fixture-user",
+        "state": "ready",
+        "message": "",
+        "items": [SNAPSHOT["items"][0]],
+    }
+    try:
+        late_app._apply_queue_snapshot(late_queue_snapshot)
+        check(
+            True,
+            "a queue snapshot arriving after dashboard teardown must be ignored safely",
+        )
+    except Exception as error:
+        check(
+            False,
+            f"a queue snapshot arriving after dashboard teardown raised {error!r}",
+        )
     try:
         late_app.harness_loaded(late_options)
         check(True, "late harness discovery after unmount must be harmless")

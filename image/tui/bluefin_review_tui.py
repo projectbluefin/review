@@ -3809,6 +3809,10 @@ class ReviewDashboard(App):
             )
         self.refresh_status()
         self.load_queue()
+        pending_population = getattr(self, "_pending_population", None)
+        if pending_population is not None:
+            self._pending_population = None
+            self.call_after_refresh(self.populate, *pending_population)
         self.load_issues()
         self.load_hive()
         self.discover_harness()
@@ -5471,6 +5475,9 @@ class ReviewDashboard(App):
         try:
             queue = self.query_one("#queue", ListView)
         except (NoMatches, ScreenStackError):
+            return
+        if not queue.is_attached:
+            self._pending_population = (list(stops), record_snapshot)
             return
         queue.clear()
         if not stops:
