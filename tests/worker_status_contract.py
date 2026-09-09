@@ -223,6 +223,10 @@ class WorkerStatusContract(unittest.TestCase):
                 )
                 self.assertIn("Project Bluefin Review", rendered)
                 self.assertIn("WORKER STATUS", rendered)
+                self.assertIn(
+                    "WORKING",
+                    str(app.query_one("#state-badge").render()),
+                )
                 self.assertIn("WORKING", rendered)
                 for ident in (
                     "#connection-section",

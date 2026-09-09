@@ -357,10 +357,10 @@ if Static is not None:
                 render_brand(color=self.use_color)
             )
             badge = self.query_one("#state-badge", Static)
-            badge.update(render_state_badge(self.projection, color=self.use_color))
             for class_name in ("active", "idle", "starting", "warning", "error"):
                 badge.remove_class(class_name)
             badge.add_class(_state_presentation(self.projection)[2])
+            badge.update(render_state_badge(self.projection, color=self.use_color))
             for name, content in sections.items():
                 self.query_one(f"#{name}-section Static", Static).update(content)
 
