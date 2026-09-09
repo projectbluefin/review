@@ -6496,6 +6496,16 @@ class ReviewDashboard(App):
             ),
             None,
         )
+        if (
+            landing_task is not None
+            and self._landing_task_active(landing_task)
+            and not stop.failure
+            and stop.review_status not in REVIEW_FAILURES
+            and stop.mergeable_state != "dirty"
+        ):
+            # The landing marker already names the active operation; repeating
+            # the generic review badge consumes the action suffix on compact rows.
+            marks = ""
         if landing_task is None:
             suffix = f"{tag}{hive_rank_str} {marks} {escape(f'[{stop.action}]')}{failed}"
         else:

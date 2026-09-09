@@ -725,6 +725,12 @@ class ResponsiveTuiContractTests(unittest.TestCase):
                     self.assertEqual(app._queue_state(stop), "in progress")
                     status = str(app.query_one("#status-bar").render())
                     self.assertIn("1 in progress", status)
+                    row = "".join(
+                        segment.text
+                        for segment in app.query_one("#queue Label").render_line(0)
+                    )
+                    self.assertIn("[review]", row)
+                    self.assertNotIn("IN PROGRESS", row)
 
             asyncio.run(exercise())
 

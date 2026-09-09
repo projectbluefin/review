@@ -177,6 +177,8 @@ async def capture(args: argparse.Namespace) -> list[Path]:
                                 raise RuntimeError(
                                     "landing-progress scenario did not focus the landing controls"
                                 )
+                        if app.current is not None:
+                            app.render_evidence(app.current)
                         stem = f"{scenario}-{dimensions[0]}x{dimensions[1]}"
                         svg = output / f"{stem}.svg"
                         write_safe(svg, app.export_screenshot(title=stem))
@@ -208,6 +210,37 @@ async def capture(args: argparse.Namespace) -> list[Path]:
 def apply_scenario(
     app: Any, scenario: str, dimensions: tuple[int, int], landing: Any
 ) -> None:
+    evidence = {
+        "review": ("REVIEW_REQUIRED", "MERGEABLE", "SUCCESS"),
+        "fix-ci": ("REVIEW_REQUIRED", "MERGEABLE", "FAILURE"),
+        "investigate": ("REVIEW_REQUIRED", "UNKNOWN", "SUCCESS"),
+    }
+    # The capture is a bounded local fixture journey. Keep the details pane's
+    # live-shaped state aligned with the queue fixture instead of letting the
+    # stubbed GitHub enrichment replace it with an empty response.
+    for candidate in app.stops:
+        review, mergeable, conclusion = evidence[candidate.action]
+        candidate.check_state = (
+            "failure" if conclusion == "FAILURE" else "success"
+        )
+        candidate.live = {
+            **candidate.live,
+            "repository": candidate.repository,
+            "number": candidate.number,
+            "headRefOid": candidate.head_sha,
+            "state": "OPEN",
+            "isDraft": False,
+            "mergeable": mergeable,
+            "mergeStateStatus": "CLEAN",
+            "reviewDecision": review,
+            "statusCheckRollup": [{
+                "name": "fixture-ci",
+                "state": "COMPLETED",
+                "conclusion": conclusion,
+                "headSha": candidate.head_sha,
+            }],
+        }
+    app.show_evidence = lambda selected, open_decision=False: app.render_evidence(selected)
     app.refresh_rows()
     if scenario == "landing-progress":
         stop = next(
@@ -221,6 +254,14 @@ def apply_scenario(
         stop.check_state = "pending"
         stop.live = {
             **stop.live,
+            "repository": stop.repository,
+            "number": stop.number,
+            "headRefOid": stop.head_sha,
+            "state": "OPEN",
+            "isDraft": False,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "reviewDecision": "REVIEW_REQUIRED",
             "statusCheckRollup": [{
                 "name": "fixture-ci",
                 "state": "IN_PROGRESS",
