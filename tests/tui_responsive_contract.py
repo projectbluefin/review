@@ -395,6 +395,12 @@ class ResponsiveTuiContractTests(unittest.TestCase):
             app = tui.ReviewDashboard()
             app.self_login = "reviewer"
             app.final_policy = "automatic"
+            # This contract supplies its own landing fixture. Keep the
+            # dashboard's mount-time live queue and auxiliary probes from
+            # replacing that identity with the host's authentication result.
+            app.load_queue = lambda: None
+            app.load_hive = lambda: None
+            app.discover_harness = lambda: None
             app.enqueue_landing = lambda task: app.landing_queue.append(task)
             notices = []
 
