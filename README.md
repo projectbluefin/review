@@ -117,7 +117,7 @@ Review is the human review experience plus a Hive contributor appliance:
 - `BLUEFIN_REVIEW_BACKEND=codex` preselects Codex for a maintainer review; it
   never changes the worker backend. Use `TOOL=codex` for workers.
 
-`review` comes with Goose, the official Codex CLI, and Pi prebundled and
+`review` comes with Goose and the official Codex CLI prebundled and
 passes through only the credential each selected client needs.
 
 **These are NOT anonymous "donations"** - it's tied to the person's github account, reputation in the queue is based on your real life reputation in the project. The cream will rise to the top.

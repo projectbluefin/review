@@ -64,8 +64,8 @@ Goose, or image build skill documents.
    an optional TLS `HIVE_HUB` URL, mounts
    `${XDG_STATE_HOME:-~/.local/state}/bluefin-review` with shared `rw,z`, and
    passes `BLUEFIN_REVIEW_INSTANCE`; `REVIEW_HIVE` selects a named registration.
-4. Keep Goose as the default backend (`TOOL=goose`); Codex (`TOOL=codex`) and
-   Codex (`TOOL=codex`) is the explicit alternate backend. Profiles set defaults:
+4. Keep Goose as the default backend (`TOOL=goose`); Codex (`TOOL=codex`) is
+   the explicit alternate backend. Profiles set defaults:
    `gemini` (`gemini-3.8-flash`, max effort), `sol` (`gpt-5.6-sol`, medium),
    `opus5` (`claude-opus-5`, high, 264k context), `k3` (`kimi-k3`, max, 264k).
    Environment `GOOSE_*` always wins.
