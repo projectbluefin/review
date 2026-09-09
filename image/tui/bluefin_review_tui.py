@@ -1123,6 +1123,8 @@ def ci_failure_evidence(
     """Normalize current-head failed checks for an evidence-first diagnosis."""
     failures: list[dict] = []
     head_sha = str(live.get("headRefOid") or "")
+    if not FULL_SHA.fullmatch(head_sha):
+        return failures
     repository = repository or str(live.get("repository") or live.get("repositoryName") or "")
     number = number or _check_integer(live.get("number"))
     for check in authoritative_checks(live):
@@ -4379,6 +4381,8 @@ class ReviewDashboard(App):
         reading.styles.height = 1
         acting.styles.height = 1
         self.refresh_activity()
+        if self.stops:
+            self.refresh_rows()
 
     def on_resize(self, event) -> None:
         self._apply_responsive_layout(event.size.width)
@@ -5802,11 +5806,6 @@ class ReviewDashboard(App):
         marks += f" {ci_marker(checks)}"
         if stop.review_state == "approved":
             marks += " ✓ approved"
-        body = (
-            f"{selected}{link(stop.key, pr_url(stop.repository, stop.number))}: "
-            f"{escape(stop.title[:60])}{tag} "
-            f"{marks} {escape('[' + stop.action + ']')}{failed}"
-        )
         landing_task = next(
             (
                 task
@@ -5815,21 +5814,40 @@ class ReviewDashboard(App):
             ),
             None,
         )
-        if landing_task is not None:
+        if landing_task is None:
+            suffix = f"{tag} {marks} [{stop.action}]{failed}"
+        else:
             landing_mark = (
                 "⟳ LANDING"
                 if self._landing_task_active(landing_task)
                 else "… LANDING QUEUED"
             )
-            body = (
-                f"{selected}{link(stop.key, pr_url(stop.repository, stop.number))}: "
-                f"{escape(stop.title[:60])}{tag} {marks} {landing_mark} "
-                f"{escape('[' + stop.action + ']')}{failed}"
-            )
+            suffix = f"{tag} {marks} {landing_mark} [{stop.action}]{failed}"
+        title = self._fit_queue_title(stop, suffix, selected)
+        body = (
+            f"{selected}{link(stop.key, pr_url(stop.repository, stop.number))}: "
+            f"{escape(title)}{escape(suffix)}"
+        )
         style = stop_style(
             stop.action, stop.mergeable_state, checks, stop.review_state
         )
         return f"[{style}]{body}[/{style}]" if style else body
+
+    def _fit_queue_title(self, stop: Stop, suffix: str, selected: str) -> str:
+        """Reserve visible room for state and action evidence in each row."""
+        try:
+            width = self.query_one("#queue", ListView).content_region.width
+        except NoMatches:
+            width = 80
+        if width < 1:
+            width = 80
+        prefix = f"{selected}{stop.key}: "
+        available = max(1, width - len(prefix) - len(suffix))
+        if len(stop.title) <= available:
+            return stop.title
+        if available == 1:
+            return "…"
+        return stop.title[: available - 1] + "…"
 
     @staticmethod
     def _review_badge(stop: Stop) -> str:
@@ -7548,7 +7566,26 @@ class ReviewDashboard(App):
             "closingIssuesReferences,statusCheckRollup,labels,reviews,title",
         )
         if live.returncode == 0:
-            data = json.loads(live.stdout) if (live.stdout and live.stdout.strip()) else {}
+            if not live.stdout or not live.stdout.strip():
+                if force:
+                    raise RuntimeError(
+                        f"live PR response was empty for {repository}#{number}"
+                    )
+                return stop.live if stop else {}
+            try:
+                data = json.loads(live.stdout)
+            except json.JSONDecodeError as error:
+                raise RuntimeError(
+                    f"live PR response was malformed for {repository}#{number}"
+                ) from error
+            if not isinstance(data, dict):
+                raise RuntimeError(
+                    f"live PR response was not an object for {repository}#{number}"
+                )
+            if force and not FULL_SHA.fullmatch(str(data.get("headRefOid") or "")):
+                raise RuntimeError(
+                    f"live PR response is missing an exact head for {repository}#{number}"
+                )
             if stop:
                 if data:
                     merged = dict(stop.live)
@@ -7833,7 +7870,13 @@ class ReviewDashboard(App):
         ):
             return
         live_head = str(live.get("headRefOid") or "")
-        if live_head and live_head != expected_head:
+        if not FULL_SHA.fullmatch(live_head):
+            self.notify(
+                "CI evidence unavailable: live response missing exact head",
+                severity="warning",
+            )
+            return
+        if live_head != expected_head:
             self.notify("CI evidence is stale; the pull request head changed", severity="warning")
             return
         if live:

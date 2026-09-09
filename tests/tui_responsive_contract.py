@@ -551,7 +551,7 @@ class ResponsiveTuiContractTests(unittest.TestCase):
                     "projectbluefin/review",
                     101,
                     "review",
-                    "fix: queue row",
+                    "fix: " + ("long queue title " * 6),
                     check_state="success",
                     live={"headRefOid": "1" * 40},
                 )

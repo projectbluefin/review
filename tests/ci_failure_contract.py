@@ -83,6 +83,35 @@ class CIFailureEvidenceContractTests(unittest.TestCase):
         self.assertEqual(failure["annotations"][0]["path"], "tests/test_widgets.py")
         self.assertEqual(failure["annotations"][0]["start_line"], "17")
 
+    def test_forced_live_refresh_rejects_empty_or_headless_success(self) -> None:
+        class EmptyClient:
+            def __init__(self, stdout: str):
+                self.stdout = stdout
+
+            def read(self, *args: str):
+                return subprocess.CompletedProcess(
+                    ["gh", *args], 0, self.stdout, ""
+                )
+
+        for stdout in ("{}\n", '{"repository":"acme/widgets"}\n'):
+            stop = tui.Stop(
+                "acme/widgets",
+                42,
+                "fix-ci",
+                "failing check",
+                head_sha=HEAD,
+                live={
+                    "headRefOid": HEAD,
+                    "statusCheckRollup": [
+                        {"name": "linux", "conclusion": "FAILURE"}
+                    ],
+                },
+            )
+            app = tui.ReviewDashboard(gh_client=EmptyClient(stdout))
+            app.stops = [stop]
+            with self.assertRaises(RuntimeError):
+                app.fetch_live_pr("acme/widgets", 42, force=True)
+
     def test_missing_fields_render_as_unknown_and_stale_heads_are_ignored(self) -> None:
         live = {
             "repository": "acme/widgets",
