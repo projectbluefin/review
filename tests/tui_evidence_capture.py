@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any
 
 
@@ -142,6 +143,7 @@ def svg_to_png(svg: Path, png: Path) -> None:
 async def capture(args: argparse.Namespace) -> list[Path]:
     sys.path.insert(0, str(TUI_DIR.parent))
     import tui.bluefin_review_tui as tui  # type: ignore
+    from tui import landing  # type: ignore
 
     output = Path(args.output).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -150,7 +152,11 @@ async def capture(args: argparse.Namespace) -> list[Path]:
         stub_dir = Path(temporary)
         make_gh_stub(stub_dir)
         old_path = os.environ.get("PATH", "")
+        old_state_home = os.environ.get("XDG_STATE_HOME")
+        old_instance = os.environ.get("BLUEFIN_REVIEW_INSTANCE")
         os.environ["PATH"] = f"{stub_dir}{os.pathsep}{old_path}"
+        os.environ["XDG_STATE_HOME"] = str(stub_dir / "state")
+        os.environ["BLUEFIN_REVIEW_INSTANCE"] = "tui-evidence"
         os.environ.pop("HIVE_API_BASE", None)
         try:
             for size_name in args.sizes:
@@ -162,8 +168,15 @@ async def capture(args: argparse.Namespace) -> list[Path]:
                         await pilot.pause()
                         if not app.stops:
                             raise RuntimeError("fixture queue did not reach the real app")
-                        apply_scenario(app, scenario, dimensions)
+                        apply_scenario(app, scenario, dimensions, landing)
                         await pilot.pause()
+                        if scenario == "landing-progress":
+                            app.action_agents()
+                            await pilot.pause()
+                            if not app.query_one("#landing-pause").has_focus:
+                                raise RuntimeError(
+                                    "landing-progress scenario did not focus the landing controls"
+                                )
                         stem = f"{scenario}-{dimensions[0]}x{dimensions[1]}"
                         svg = output / f"{stem}.svg"
                         write_safe(svg, app.export_screenshot(title=stem))
@@ -172,17 +185,60 @@ async def capture(args: argparse.Namespace) -> list[Path]:
                         artifacts.extend((svg, png))
                         meta = output / f"{stem}.json"
                         data = provenance(scenario, size_name, dimensions, " ".join(sys.argv))
+                        data["interaction"] = (
+                            "action_agents -> persistent landing control focus"
+                            if scenario == "landing-progress"
+                            else "real Textual Pilot app with bounded local fixture state"
+                        )
                         write_safe(meta, json.dumps(data, indent=2) + "\n")
                         artifacts.append(meta)
         finally:
             os.environ["PATH"] = old_path
+            if old_state_home is None:
+                os.environ.pop("XDG_STATE_HOME", None)
+            else:
+                os.environ["XDG_STATE_HOME"] = old_state_home
+            if old_instance is None:
+                os.environ.pop("BLUEFIN_REVIEW_INSTANCE", None)
+            else:
+                os.environ["BLUEFIN_REVIEW_INSTANCE"] = old_instance
     return artifacts
 
 
-def apply_scenario(app: Any, scenario: str, dimensions: tuple[int, int]) -> None:
+def apply_scenario(
+    app: Any, scenario: str, dimensions: tuple[int, int], landing: Any
+) -> None:
     app.refresh_rows()
     if scenario == "landing-progress":
-        app.last_landing_outcome = "landing #101: RUNNING · local fixture"
+        stop = app.stops[0]
+        task = landing.new_task([stop], "fixture-user")
+        task.model = "fixture-model"
+        task.process = object()
+        task.started = time.monotonic() - 7
+        Path(task.status_path).write_text(
+            json.dumps(
+                {
+                    "pr": stop.key,
+                    "state": "waiting-ci",
+                    "note": "CI is still running",
+                    "watch": {
+                        "repository": stop.repository,
+                        "pull_request": stop.number,
+                        "head_sha": stop.head_sha,
+                        "run_id": 101,
+                        "attempt": 1,
+                        "status": "in_progress",
+                        "observed_at": time.time() - 2,
+                        "deadline": time.time() + 300,
+                    },
+                    "ts": int(time.time()),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        app.landing_queue.append(task)
+        app.refresh_status()
     elif scenario == "ci-failure":
         app.current.failure = "CI failed · local fixture"
         app.render_evidence(app.current)

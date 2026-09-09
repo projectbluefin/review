@@ -6498,7 +6498,7 @@ class ReviewDashboard(App):
         title = self._fit_queue_title(stop, suffix, selected)
         body = (
             f"{selected}{link(stop.key, pr_url(stop.repository, stop.number))}: "
-            f"{escape(title)}{escape(suffix)}"
+            f"{escape(title)}{suffix}"
         )
         style = stop_style(
             stop.action, stop.mergeable_state, checks, stop.review_state
@@ -7822,7 +7822,7 @@ class ReviewDashboard(App):
                 if counts.get(key)
             )
             lines.append(
-                f"[b]merge queue[/b] {escape(stop.repository)} — {total} open"
+                f"[b]merge queue[/b]  {escape(stop.repository)} — {total} open"
             )
             lines.append(f"  {meter_bar(counts)}")
             lines.append(f"  {summary}")
