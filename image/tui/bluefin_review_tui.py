@@ -6130,7 +6130,7 @@ class ReviewDashboard(App):
         # pull requests when there are a hundred and twenty-one.
         held_back = f" (of {total}; [f] widens)" if shown != total else ""
         landed = (
-            f" | last {self.last_landing_outcome}"
+            f" | last {self.last_landing_outcome} | "
             if self.last_landing_outcome
             else ""
         )

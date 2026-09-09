@@ -378,6 +378,7 @@ class ResponsiveTuiContractTests(unittest.TestCase):
                         segment.text for segment in status_bar.render_line(0)
                     )
                     self.assertIn("last dispatched", visible_status)
+                    self.assertIn("review queue remains open | [Tab]", visible_status)
 
             asyncio.run(exercise())
 
