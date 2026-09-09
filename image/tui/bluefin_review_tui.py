@@ -1049,7 +1049,7 @@ def stop_style(action: str, mergeable: str, checks: str, review: str) -> str:
     if no_color_requested():
         return ""
     if mergeable == "dirty":
-        return "red"
+        return ""
     if checks == "failure":
         return "red"
     if action == "ready-for-human-merge":
@@ -6508,8 +6508,15 @@ class ReviewDashboard(App):
             else self._review_badge(stop, record_snapshot=record_snapshot)
         )
         if stop.mergeable_state == "dirty":
-            marks += " ⚑ CONFLICTS"
-        marks += f" {ci_marker(checks)}"
+            if not stop.failure and stop.review_status not in REVIEW_FAILURES:
+                marks = ""
+            marks += (" ⚑ CONFLICTS" if no_color_requested()
+                      else " [bold red]⚑ CONFLICTS[/bold red]")
+        ci_text = ci_marker(checks)
+        ci_style = {"success": "green", "failure": "red", "pending": "yellow"}.get(checks)
+        if ci_style and not no_color_requested():
+            ci_text = f"[{ci_style}]{ci_text}[/{ci_style}]"
+        marks += f" {ci_text}"
         if stop.review_state == "approved":
             marks += " ✓ approved"
         hive_rank_str = self.hive_rank_display(stop)

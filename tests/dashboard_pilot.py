@@ -2975,9 +2975,9 @@ async def main() -> int:
         notices: list[str] = []
         real_notify = app.notify
 
-        def record(message, *args, **kwargs):
-            notices.append(str(message))
-            real_notify(message, *args, **kwargs)
+        def record(message, *args, _notices=notices, _notify=real_notify, **kwargs):
+            _notices.append(str(message))
+            _notify(message, *args, **kwargs)
 
         app.notify = record
         await pilot.press("A")
@@ -3073,9 +3073,9 @@ async def main() -> int:
         notices: list[tuple[str, str]] = []
         real_notify = app.notify
 
-        def record(message, *args, **kwargs):
-            notices.append((str(message), kwargs.get("severity", "information")))
-            real_notify(message, *args, **kwargs)
+        def record(message, *args, _notices=notices, _notify=real_notify, **kwargs):
+            _notices.append((str(message), kwargs.get("severity", "information")))
+            _notify(message, *args, **kwargs)
 
         app.notify = record
         for stop in app.stops:
@@ -3166,9 +3166,9 @@ async def main() -> int:
         notices = []
         real_notify = app.notify
 
-        def record(message, *args, **kwargs):
-            notices.append((str(message), kwargs.get("severity", "information")))
-            real_notify(message, *args, **kwargs)
+        def record(message, *args, _notices=notices, _notify=real_notify, **kwargs):
+            _notices.append((str(message), kwargs.get("severity", "information")))
+            _notify(message, *args, **kwargs)
 
         app.notify = record
         for stop in app.stops:
@@ -3245,9 +3245,9 @@ async def main() -> int:
         notices = []
         real_notify = app.notify
 
-        def record(message, *args, **kwargs):
-            notices.append((str(message), kwargs.get("severity", "information")))
-            real_notify(message, *args, **kwargs)
+        def record(message, *args, _notices=notices, _notify=real_notify, **kwargs):
+            _notices.append((str(message), kwargs.get("severity", "information")))
+            _notify(message, *args, **kwargs)
 
         app.notify = record
         for stop in app.stops:
@@ -3330,9 +3330,9 @@ async def main() -> int:
         notices = []
         real_notify = app.notify
 
-        def record(message, *args, **kwargs):
-            notices.append((str(message), kwargs.get("severity", "information")))
-            real_notify(message, *args, **kwargs)
+        def record(message, *args, _notices=notices, _notify=real_notify, **kwargs):
+            _notices.append((str(message), kwargs.get("severity", "information")))
+            _notify(message, *args, **kwargs)
 
         app.notify = record
         for stop in app.stops:
@@ -3391,9 +3391,9 @@ async def main() -> int:
             notices = []
             real_notify = app.notify
 
-            def record(message, *args, **kwargs):
-                notices.append((str(message), kwargs.get("severity", "information")))
-                real_notify(message, *args, **kwargs)
+            def record(message, *args, _notices=notices, _notify=real_notify, **kwargs):
+                _notices.append((str(message), kwargs.get("severity", "information")))
+                _notify(message, *args, **kwargs)
 
             app.notify = record
             for stop in app.stops:
@@ -5835,8 +5835,8 @@ async def main() -> int:
 
     # ── two key lines, colour by state, refresh, and update-branch ───────
     check(
-        tui.stop_style("review", "dirty", "success", "approved") == "red",
-        "a conflicted pull request must be red whatever else is true of it",
+        tui.stop_style("review", "dirty", "success", "approved") == "",
+        "a conflict must not color the entire row as a failed inference",
     )
     check(
         tui.stop_style("review", "clean", "failure", "unknown") == "red",
@@ -5873,6 +5873,14 @@ async def main() -> int:
     check(
         text_rows["conflict"].index("⚑ CONFLICTS") < text_rows["conflict"].index("[review]"),
         "conflict text must outrank the healthy queue presentation",
+    )
+    check(
+        not text_rows["conflict"].startswith("[red]"),
+        "a conflict row body must remain neutral rather than whole-row red",
+    )
+    check(
+        "[bold red]⚑ CONFLICTS[/bold red]" in text_rows["conflict"],
+        "the conflict marker itself must retain meaningful red emphasis",
     )
     check(
         text_rows["failure"].index("✗ CI FAILED") < text_rows["failure"].index("[review]"),
@@ -8444,9 +8452,9 @@ async def main() -> int:
         notices: list[str] = []
         real_notify = app.notify
 
-        def record_notice(message, *args, **kwargs):
-            notices.append(message)
-            real_notify(message, *args, **kwargs)
+        def record_notice(message, *args, _notices=notices, _notify=real_notify, **kwargs):
+            _notices.append(message)
+            _notify(message, *args, **kwargs)
 
         app.notify = record_notice
         await slay_and_confirm()

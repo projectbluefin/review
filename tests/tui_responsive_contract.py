@@ -74,6 +74,43 @@ def review_stop() -> tui.Stop:
 
 
 class ResponsiveTuiContractTests(unittest.TestCase):
+    def test_pilot_notification_recorders_keep_their_original_sinks(self):
+        import ast
+
+        source = Path(__file__).with_name("dashboard_pilot.py").read_text()
+        recorders = [
+            node for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.FunctionDef) and node.name in {"record", "record_notice"}
+            and any(isinstance(item, ast.Name) and item.id in {"notices", "_notices"}
+                    for item in ast.walk(node))
+        ]
+        self.assertTrue(recorders)
+        for recorder in recorders:
+            with self.subTest(line=recorder.lineno):
+                original, later = [], []
+                forwarded = []
+                namespace = {"notices": original,
+                             "real_notify": lambda *args, **kwargs: forwarded.append(args)}
+                exec(compile(ast.Module(body=[recorder], type_ignores=[]), "dashboard_pilot.py", "exec"), namespace)
+                callback = namespace[recorder.name]
+                namespace["notices"] = later
+                namespace["real_notify"] = lambda *args, **kwargs: self.fail("late notification reached another app")
+                callback("late notification")
+                self.assertTrue(original)
+                self.assertEqual(later, [])
+                self.assertEqual(forwarded, [("late notification",)])
+
+    def test_conflict_row_does_not_color_passing_ci_red(self):
+        app = tui.ReviewDashboard()
+        stop = tui.Stop("projectbluefin/review", 42, "resolve-conflicts", "conflicted PR",
+                        mergeable_state="dirty", check_state="success")
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NO_COLOR", None)
+            rendered = app.row_markup(stop)
+        self.assertFalse(rendered.startswith("[red]"))
+        self.assertIn("[bold red]⚑ CONFLICTS[/bold red]", rendered)
+        self.assertIn("[green]✓ CI GREEN[/green]", rendered)
+
     def test_harness_banner_uses_selected_backend_model_and_effort(self):
         app = tui.ReviewDashboard.__new__(tui.ReviewDashboard)
         label = mock.MagicMock()
