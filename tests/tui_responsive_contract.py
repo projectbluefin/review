@@ -495,6 +495,32 @@ class ResponsiveTuiContractTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_standard_queue_keeps_ci_and_action_suffix_visible(self):
+        async def exercise():
+            app = tui.ReviewDashboard()
+            app.load_queue = lambda: None
+            app.load_hive = lambda: None
+            app.discover_harness = lambda: None
+            async with app.run_test(size=(120, 40)) as pilot:
+                stop = tui.Stop(
+                    "projectbluefin/review",
+                    101,
+                    "review",
+                    "fix: queue row",
+                    check_state="success",
+                    live={"headRefOid": "1" * 40},
+                )
+                app.stops = [stop]
+                app.populate(app.stops)
+                await pilot.pause()
+                self.assertGreaterEqual(app.query_one("#queue-pane").size.width, 60)
+                label = app.query_one("#queue Label")
+                visible = "".join(segment.text for segment in label.render_line(0))
+                self.assertIn("CI GREEN", visible)
+                self.assertIn("[review]", visible)
+
+        asyncio.run(exercise())
+
     def test_editor_and_confirmation_keep_back_keys_and_input_isolated(self):
         async def exercise():
             root = ScreenHost(tui.ReviewBody(review_stop(), "comment"))

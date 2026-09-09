@@ -4342,11 +4342,13 @@ class ReviewDashboard(App):
         except NoMatches:
             return
         narrow = width <= 100
-        wide = width >= 160
         main.styles.layout = "vertical" if narrow else "horizontal"
-        queue.styles.width = "100%" if narrow else ("55%" if wide else "45%")
+        # The queue carries identity, CI, and action evidence in one row;
+        # standard 120-column terminals need the same 55% allocation as the
+        # desktop layout to keep that suffix visible.
+        queue.styles.width = "100%" if narrow else "55%"
         queue.styles.height = "45%" if narrow else "1fr"
-        right.styles.width = "100%" if narrow else ("45%" if wide else "55%")
+        right.styles.width = "100%" if narrow else "45%"
         right.styles.height = "55%" if narrow else "1fr"
         context.styles.display = "none" if narrow else "block"
         activity.styles.height = 5 if narrow else "auto"

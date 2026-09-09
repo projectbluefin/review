@@ -33,7 +33,9 @@ The waiting count covers only explicit CI or publication waits; a pull request
 without a report is shown as `? unreported` rather than being counted as
 waiting. The landing viewer keeps only its batch controls visible in the
 clickable footer so the key labels remain readable at 120 columns; the CI
-failure hint likewise keeps its literal `i` and `Esc` controls.
+failure hint likewise keeps its literal `i` and `Esc` controls. Standard and
+desktop layouts reserve 55% for queue rows so identity, CI, and action suffixes
+stay together.
 
 ## When to Use
 
