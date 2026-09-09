@@ -5853,7 +5853,26 @@ class ReviewDashboard(App):
             for task in self.landing_queue
             if not task.phase and task not in active and task not in queued
         ]
-        rows = [*active, *queued, *reversed(completed)]
+        # A final review-and-fix round rides the landing lane with the SAME
+        # stops and status record as the batch it reviews. Listing its stops
+        # again would show every landed pull request twice while the round
+        # runs (a race the pilot caught on fast machines), so a round is one
+        # batch-level line and per-PR rows come from landing tasks alone.
+        rounds = [task for task in (*active, *queued) if task.phase]
+        for task in rounds:
+            round_state = "running" if task in active else "queued"
+            model = task.model or os.environ.get(
+                "GOOSE_MODEL", "gemini-3.8-flash"
+            )
+            lines.append(
+                f"final {task.phase} round {task.round}"
+                f"/{landing.FINAL_ROUND_LIMIT} — {round_state} · {model}"
+            )
+        rows = [
+            *(task for task in active if not task.phase),
+            *(task for task in queued if not task.phase),
+            *reversed(completed),
+        ]
         visible = 0
         total = sum(len(task.stops) for task in rows)
         for task in rows:

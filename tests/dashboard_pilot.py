@@ -2045,6 +2045,30 @@ async def main() -> int:
             "agents 1/6" in control_rows,
             f"phase rounds must consume displayed landing capacity, got {control_rows!r}",
         )
+        # A round rides the batch's own stops and status record; listing its
+        # stops per-PR doubled every landed pull request while the round ran.
+        landed_round = blocking_task(
+            "acme/paused", 1, workdir / "landed-round.started", workdir / "landed-round.release"
+        )
+        landed_round.phase = "final-review"
+        landed_round.round = 1
+        landed_round.stops = list(paused_task.stops)
+        landed_round.status_path = paused_task.status_path
+        landed_round.process = object()
+        app.landing_queue.append(landed_round)
+        app.refresh_status()
+        control_rows = str(
+            app.query_one("#landing-control-status", tui.Static).render()
+        )
+        check(
+            control_rows.count("acme/paused#1") == 1,
+            f"a running round must not relist its batch's pull requests, got {control_rows!r}",
+        )
+        check(
+            "final final-review round 1" in control_rows,
+            f"a running round must appear as one batch-level line, got {control_rows!r}",
+        )
+        app.landing_queue.remove(landed_round)
 
     app = tui.ReviewDashboard(tui.QueueFilters(action=""))
     async with app.run_test() as pilot:
