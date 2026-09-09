@@ -18,6 +18,9 @@ metadata:
 ---
 # Image Build
 ## When to Use
+
+For build commands and image architecture, see the
+[image and development guide](../image-and-development.md).
 Load this before changing `image/Containerfile`, `image/config/`, image pins,
 or published contributor-image behavior.
 
