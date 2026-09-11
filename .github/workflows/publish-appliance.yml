@@ -524,7 +524,7 @@ jobs:
 
       - name: Publish GitHub Release assets
         if: needs.metadata.outputs.release == 'true'
-        uses: softprops/action-gh-release@c95fe1489396fe8a9ec87484f746654261073809 # v2.2.1
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           name: v${{ needs.metadata.outputs.version }}
           tag_name: v${{ needs.metadata.outputs.version }}
