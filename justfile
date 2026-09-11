@@ -74,7 +74,7 @@ tool_env := env("TOOL", "")
 hive_repo_url := "https://github.com/hivecommons/hive"
 # origin/v4 via `git ls-remote --heads https://github.com/hivecommons/hive v4`
 # on 2026-09-06.
-hive_commit := "ebd5db6adf95c2eceb77c1a4376f137af0836d4b"
+hive_commit := "8195ba132d054a635a9549b0f331bc2f2dd55d91"
 gemini_model := "gemini-3.8-flash"
 # Contributor runs are automated in practice — Hive keeps feeding the session —
 # so a large window is money spent on context nobody reads. Opus and Kimi are
