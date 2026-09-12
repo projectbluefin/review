@@ -93,18 +93,32 @@ fi
 # runtime-owned file and the image's controlled policy must remain separate.
 export GOOSE_PATH_ROOT="${REVIEW_GOOSE_ROOT:-/opt/bluefin/goose}"
 
-# Goose resolves environment before file, so the launcher's passthrough wins
-# over anything in the controlled config. Goose is Copilot-only; Pi gets its
-# own selected provider credential below.
-if [ "$selected_backend" = goose ]; then
-  export GOOSE_PROVIDER=github_copilot
+# Prefer the backend selected by Hive's contributor registration if present.
+# The launcher may also pass AGENT_BACKEND; prefer the mounted contributor.env
+# selection so the image truly consumes Hive's decision rather than enforcing
+# a local default.
+if [ -f "${hive_config}/contributor.env" ]; then
+  # Parse AGENT_BACKEND from the registration file if present.
+  parsed_backend="$(awk -F= '$1=="AGENT_BACKEND" {sub(/^[^=]*=/, ""); print; exit}' "${hive_config}/contributor.env" 2>/dev/null | tr -d "\"' " || true)"
+  if [ -n "${parsed_backend}" ]; then
+    selected_backend="${parsed_backend}"
+  fi
 fi
+# Fallback to a sensible default when neither the registration nor env set it.
+if [ -z "${selected_backend}" ]; then
+  selected_backend="goose"
+fi
+
+# Do not force a particular Goose provider here. Hive owns assignment and the
+# contributor registration; the image should consume that selection rather
+# than enforcing GitHub Copilot unconditionally. The launcher may pass
+# GOOSE_PROVIDER explicitly if needed.
 
 # Goose refuses to start without a model. Keep the direct-image fallback in
 # sync with the launcher's default for users who invoke this image directly.
 if [ -z "${GOOSE_MODEL:-}" ]; then
   GOOSE_MODEL="gemini-3.8-flash"
-  note "GOOSE_MODEL not set; defaulting to ${GOOSE_MODEL} for GitHub Copilot"
+  note "GOOSE_MODEL not set; defaulting to ${GOOSE_MODEL}"
 fi
 export GOOSE_MODEL
 
