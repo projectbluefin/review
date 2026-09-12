@@ -31,21 +31,20 @@ import datetime
 import errno
 import fcntl
 import hashlib
-import hmac
 import json
 import os
 import re
-import signal
-import socketserver
 import subprocess
 import sys
-import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-PROTOCOL_VERSION = 1
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import broker_protocol as protocol
+
+PROTOCOL_VERSION = protocol.PROTOCOL_VERSION
 
 # Three actions, and no fourth. An earlier draft carried a `capabilities`
 # call and a `list_profiles` call; design review collapsed both into
@@ -55,15 +54,13 @@ PROTOCOL_VERSION = 1
 # tells it whether asking is worthwhile.
 ACTIONS = ("status", "health", "submit")
 
-MAX_REQUEST_BYTES = 65536
-MAX_RESPONSE_BYTES = 262144
+MAX_REQUEST_BYTES = protocol.MAX_REQUEST_BYTES
+MAX_RESPONSE_BYTES = protocol.MAX_RESPONSE_BYTES
 
 # A client that connects and says nothing must not hold a worker thread, and
 # a client that stops reading must not hold one either.
 READ_TIMEOUT_SECONDS = 5.0
 WRITE_TIMEOUT_SECONDS = 30.0
-RECV_CHUNK_BYTES = 8192
-MAX_DRAIN_BYTES = 4 * 1024 * 1024
 
 KUBECTL_TIMEOUT_SECONDS = 15
 ARGO_TIMEOUT_SECONDS = 60
@@ -236,13 +233,7 @@ REDACTIONS = (
 )
 
 
-class Rejected(Exception):
-    """A request the protocol refuses. Carries the wire error code."""
-
-    def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
+Rejected = protocol.Rejected
 
 
 class BrokerContext:
@@ -327,16 +318,10 @@ def ok_payload(**fields) -> dict:
 
 
 def error_payload(code: str, detail: str) -> dict:
-    return {
-        "version": PROTOCOL_VERSION,
-        "ok": False,
-        "error": code,
-        "detail": brief(detail),
-    }
+    return protocol.error_payload(code, brief(detail))
 
 
-def json_line(payload) -> bytes:
-    return json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n"
+json_line = protocol.json_line
 
 
 def bounded_response(payload: dict) -> bytes:
@@ -552,33 +537,7 @@ def require_profile(request: dict) -> str:
 
 
 def decode_request(raw: bytes, context: BrokerContext) -> dict:
-    if len(raw) > MAX_REQUEST_BYTES:
-        raise Rejected("bad-request", f"request exceeds {MAX_REQUEST_BYTES} bytes")
-    try:
-        request = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        raise Rejected("bad-request", "request is not valid JSON")
-    if not isinstance(request, dict):
-        raise Rejected("bad-request", "request is not a JSON object")
-    version = request.get("version")
-    if not isinstance(version, int) or isinstance(version, bool):
-        raise Rejected("bad-request", "version is missing or not an integer")
-    if version != PROTOCOL_VERSION:
-        raise Rejected("unsupported-version", f"this broker speaks version {PROTOCOL_VERSION}")
-    action = request.get("action")
-    if not isinstance(action, str) or not action:
-        raise Rejected("bad-request", "action is missing or not a string")
-    if action not in ACTIONS:
-        raise Rejected("unknown-action", "actions are status, health, submit")
-    session = request.get("session")
-    if not isinstance(session, str) or not session:
-        raise Rejected("bad-request", "session is missing or not a string")
-    # The session id is the only thing distinguishing this container's
-    # requests from another's on a shared host, so it is compared without a
-    # timing signal.
-    if not hmac.compare_digest(session, context.session):
-        raise Rejected("wrong-session", "request session does not match this broker")
-    return request
+    return protocol.decode_request(raw, session=context.session, actions=ACTIONS)
 
 
 def handle_status(context: BrokerContext, request: dict) -> dict:
@@ -1306,116 +1265,20 @@ def dispatch(context: BrokerContext, raw: bytes) -> dict:
         return error_payload("unavailable", f"broker error: {type(failure).__name__}")
 
 
-def read_request_line(connection) -> bytes:
-    """Read one newline-terminated request, capped and drained.
+read_request_line = protocol.read_request_line
 
-    Accumulation stops one byte past the cap so `decode_request` can answer
-    `bad-request`, but the rest of the line is still read: a client that is
-    told its request is too large should hear that, not a reset connection.
-    """
-    buffer = bytearray()
-    drained = 0
-    received = False
-    while True:
-        chunk = connection.recv(RECV_CHUNK_BYTES)
-        if not chunk:
-            # Nothing at all means the peer connected and left; an empty
-            # line is a request, and gets a protocol error like any other
-            # unreadable one.
-            return bytes(buffer) if received else None
-        received = True
-        drained += len(chunk)
-        newline = chunk.find(b"\n")
-        if newline >= 0:
-            chunk = chunk[:newline]
-        room = MAX_REQUEST_BYTES + 1 - len(buffer)
-        if room > 0:
-            buffer.extend(chunk[:room])
-        if newline >= 0 or drained > MAX_DRAIN_BYTES:
-            return bytes(buffer)
-
-
-class BrokerHandler(socketserver.BaseRequestHandler):
-    def handle(self) -> None:
-        connection = self.request
-        try:
-            connection.settimeout(READ_TIMEOUT_SECONDS)
-            raw = read_request_line(connection)
-        except OSError:
-            return
-        if raw is None:
-            return
-        payload = dispatch(self.server.context, raw)
-        line = bounded_response(payload)
-        try:
-            # Gathering evidence can outlast the read timeout, so the write
-            # deadline is its own budget rather than the one the request
-            # arrived under.
-            connection.settimeout(WRITE_TIMEOUT_SECONDS)
-            connection.sendall(line)
-        except OSError:
-            return
-
-
-class BrokerServer(socketserver.ThreadingUnixStreamServer):
-    # A slow or absent handler must not stall the next caller: the dashboard
-    # polls `status` while a `health` call is still gathering evidence.
-    daemon_threads = True
-    allow_reuse_address = False
-
-    def __init__(self, path: str, context: BrokerContext) -> None:
-        self.context = context
-        super().__init__(path, BrokerHandler)
-
-    def handle_error(self, request, client_address) -> None:
-        # Handlers already answer with a protocol error; nothing about a
-        # connection belongs on the maintainer's terminal.
-        return
-
-
-def prepare_socket_path(path: str) -> None:
-    directory = os.path.dirname(os.path.abspath(path)) or "."
-    os.makedirs(directory, mode=0o700, exist_ok=True)
-    if os.path.exists(path):
-        # A previous run that was killed leaves the inode behind; bind()
-        # would fail with EADDRINUSE on a socket nobody is listening to.
-        with contextlib.suppress(OSError):
-            os.unlink(path)
+prepare_socket_path = protocol.prepare_socket_path
 
 
 def serve(path: str, context: BrokerContext) -> int:
-    prepare_socket_path(path)
-    # bind() honours the umask, so the socket is never briefly reachable by
-    # anyone else; the chmod afterwards states the intent regardless of the
-    # inherited mask.
-    previous_umask = os.umask(0o177)
-    try:
-        server = BrokerServer(path, context)
-    finally:
-        os.umask(previous_umask)
-    os.chmod(path, 0o600)
-
-    def stop(_signum, _frame) -> None:
-        # shutdown() blocks until serve_forever() returns, which would
-        # deadlock if called from the thread running it.
-        threading.Thread(target=server.shutdown, daemon=True).start()
-
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
-    print(
-        json.dumps(
-            {"version": PROTOCOL_VERSION, "ready": True, "session": context.session},
-            separators=(",", ":"),
-        ),
-        flush=True,
+    return protocol.serve(
+        path,
+        context,
+        dispatch,
+        read_timeout=READ_TIMEOUT_SECONDS,
+        write_timeout=WRITE_TIMEOUT_SECONDS,
+        encode_response=bounded_response,
     )
-    try:
-        server.serve_forever(poll_interval=0.2)
-    finally:
-        server.server_close()
-        with contextlib.suppress(OSError):
-            os.unlink(path)
-    return 0
 
 
 def probe(timeout: int) -> int:
