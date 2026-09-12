@@ -1567,7 +1567,7 @@ assert_not_contains "super-secret-registration-token" "$OUT"
 assert_not_contains "named-secret-token" "$OUT"
 assert_file_not_contains "named-secret-token" "$runner_log"
 reset_logs
-run_recipe review-container GH_READY=1  REVIEW_CONTAINER_NAME=review-container-2
+run_recipe review-container GH_READY=1 REVIEW_CONTAINER_NAME=review-container-2
 assert_file_contains "--replace --name review-container-2 " "$runner_log"
 assert_file_contains "--volume ${home}/.config/hive/contributor.${repo_registration}.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
 assert_file_not_exists "$home/.config/hive/contributor.env"
@@ -1587,7 +1587,7 @@ assert_contains "REVIEW_HIVE=${repo_root##*/}" "$OUT"
 
 begin "hive selection: fallback guidance names a checkout not called review"
 reset_logs
-run_recipe review-container GH_READY=1  \
+run_recipe review-container GH_READY=1 \
   FAKE_GIT_TOPLEVEL=/home/maintainer/checkouts/not-review
 assert_contains "hive: wss://example.invalid/contribute (default registration)" "$OUT"
 assert_contains "REVIEW_HIVE=not-review" "$OUT"
@@ -1598,21 +1598,21 @@ reset_logs
 cp "$home/.config/hive/contributor.env" "$home/.config/hive/contributor.otherhive.env"
 sed -i 's|wss://example.invalid/contribute|wss://other-hive.invalid/contribute|' \
   "$home/.config/hive/contributor.otherhive.env"
-run_recipe review-container GH_READY=1  REVIEW_HIVE=otherhive
+run_recipe review-container GH_READY=1 REVIEW_HIVE=otherhive
 assert_file_contains "--volume ${home}/.config/hive/contributor.otherhive.env:/home/dev/.config/hive/contributor.env:ro,z" "$runner_log"
 assert_contains "hive: wss://other-hive.invalid/contribute (registration 'otherhive')" "$OUT"
 rm -f "$home/.config/hive/contributor.otherhive.env"
 
 begin "hive selection: an invalid REVIEW_HIVE is one actionable error"
 reset_logs
-run_recipe review-container GH_READY=1  REVIEW_HIVE='bad;name'
+run_recipe review-container GH_READY=1 REVIEW_HIVE='bad;name'
 assert_nonzero_status "$STATUS" "an invalid REVIEW_HIVE must fail the launch"
 assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
 assert_contains "REVIEW_HIVE='bad;name' is not a valid registration name" "$OUT"
 
 begin "hive selection: an unregistered REVIEW_HIVE names the fix when unattended"
 reset_logs
-run_recipe review-container GH_READY=1  REVIEW_HIVE=unregistered
+run_recipe review-container GH_READY=1 REVIEW_HIVE=unregistered
 assert_nonzero_status "$STATUS" "an unregistered REVIEW_HIVE cannot register without a terminal"
 assert_contains "no hive registration named 'unregistered'" "$OUT"
 assert_contains "REVIEW_HIVE=unregistered just review-container" "$OUT"
@@ -1623,7 +1623,7 @@ begin "review-container: a GitHub identity is inherited, never mounted"
 # login' (which the Hive wrapper blocks in contributor mode) and stops.
 reset_logs
 run_recipe review-container GH_READY=1 \
-   \
+  \
   FAKE_GH_TOKEN=gho-test-token
 assert_contains "GitHub identity passed to the agent" "$OUT"
 assert_file_contains "--env GH_TOKEN" "$runner_log"
@@ -1637,7 +1637,7 @@ assert_not_contains "gho-test-token" "$OUT"
 begin "review-container: the blast radius is named, the token is not"
 reset_logs
 run_recipe review-container GH_READY=1 \
-   \
+  \
   FAKE_GH_TOKEN=gho-test-token FAKE_GH_SCOPES="'admin:org', 'repo', 'workflow'"
 assert_contains "admin:org" "$OUT"
 assert_contains "REVIEW_GH_TOKEN" "$OUT"
@@ -1646,7 +1646,7 @@ assert_not_contains "gho-test-token" "$OUT"
 begin "review-container: an explicit scoped PAT beats the desktop login"
 reset_logs
 run_recipe review-container GH_READY=1 \
-   \
+  \
   FAKE_GH_TOKEN=gho-desktop-token REVIEW_GH_TOKEN=gho-scoped-pat
 assert_file_contains "--env GH_TOKEN" "$runner_log"
 assert_file_not_contains "GH_TOKEN=gho-scoped-pat" "$runner_log"
@@ -1655,7 +1655,7 @@ assert_file_not_contains "gho-desktop-token" "$runner_log"
 
 begin "review-container: no GitHub token says so plainly and names the fix"
 reset_logs
-run_recipe review-container GH_READY=1 \
+run_recipe review-container GH_READY=1
 
 assert_contains "no GitHub token found" "$OUT"
 assert_contains "gh auth login" "$OUT"
@@ -1664,7 +1664,7 @@ assert_file_not_contains "GH_TOKEN=" "$runner_log"
 begin "review-container: an unobtainable image is one actionable error"
 reset_logs
 run_recipe review-container GH_READY=1 \
-   \
+  \
   FAKE_PODMAN_IMAGE_MISSING=1
 assert_nonzero_status "$STATUS" "an unobtainable contributor image must fail the run"
 assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR line"
@@ -1679,7 +1679,7 @@ begin "review-container: an immutable reference is not re-pulled"
 # work on every launch; only moving tags need the pull.
 reset_logs
 run_recipe review-container GH_READY=1 \
-   \
+  \
   REVIEW_CONTRIBUTOR_IMAGE=ghcr.io/projectbluefin/review-contributor:sha-deadbeef
 assert_file_contains "image exists" "$image_log"
 assert_file_not_contains "pull" "$image_log"
@@ -1689,7 +1689,7 @@ begin "review-container: an orphaned run is reclaimed without a second command"
 # the launch takes the name back instead of demanding manual cleanup.
 reset_logs
 run_recipe review-container GH_READY=1 \
-   \
+  \
   FAKE_PODMAN_RUNNING=1
 assert_contains "reclaiming" "$OUT"
 assert_not_contains "ERROR:" "$OUT"
@@ -1718,7 +1718,7 @@ reset_logs
 bash -c 'trap "exit 0" TERM; sleep 30' --name review-container &
 owner_pid=$!
 run_recipe review-container GH_READY=1 \
-   \
+  \
   FAKE_PODMAN_RUNNING=1 \
   "FAKE_PODMAN_OWNER_LABEL=${boot_id}:${owner_pid}"
 kill "$owner_pid" 2>/dev/null || true
@@ -1739,7 +1739,7 @@ begin "review-container: a marked run whose owner is gone is reclaimed"
 reset_logs
 dead_owner="$(bash -c 'echo $$')"
 run_recipe review-container GH_READY=1 \
-   \
+  \
   FAKE_PODMAN_RUNNING=1 \
   "FAKE_PODMAN_OWNER_LABEL=${boot_id}:${dead_owner}"
 assert_contains "reclaiming" "$OUT"
@@ -1749,7 +1749,7 @@ assert_file_contains "--replace --name review-container" "$runner_log"
 begin "review-container: a marker from a previous boot is never trusted"
 reset_logs
 run_recipe review-container GH_READY=1 \
-   \
+  \
   FAKE_PODMAN_RUNNING=1 \
   "FAKE_PODMAN_OWNER_LABEL=00000000-0000-0000-0000-000000000000:1"
 assert_contains "reclaiming" "$OUT"
@@ -1762,7 +1762,7 @@ begin "review-container: an unmarked running container is an orphan, never a liv
 # unmarked container cannot have survived this boot with an owner.
 reset_logs
 run_recipe review-container GH_READY=1 \
-   \
+  \
   FAKE_PODMAN_RUNNING=1
 assert_contains "reclaiming" "$OUT"
 assert_not_contains "press Ctrl-C in the terminal that owns it." "$OUT"
@@ -1781,7 +1781,7 @@ assert_contains "podman exec -it review-container tmux attach" "$OUT"
 
 begin "review-container: REVIEW_CONTAINER_NAME runs a second, differently-named instance"
 reset_logs
-run_recipe review-container GH_READY=1  \
+run_recipe review-container GH_READY=1 \
   REVIEW_CONTAINER_NAME=review-container-2
 assert_eq "$(wc -l <"$runner_log")" 1 "expected exactly one podman invocation"
 assert_file_contains "--replace --name review-container-2 " "$runner_log"
@@ -1794,7 +1794,7 @@ assert_contains "podman exec -it review-container-2 tmux attach" "$OUT"
 
 begin "review-container: an invalid REVIEW_CONTAINER_NAME is one actionable error"
 reset_logs
-run_recipe review-container GH_READY=1  \
+run_recipe review-container GH_READY=1 \
   'REVIEW_CONTAINER_NAME=-bad name; rm -rf /'
 assert_nonzero_status "$STATUS" "an invalid container name must stop the launch"
 assert_eq "$(error_line_count "$OUT")" 1 "expected exactly one ERROR: line"
@@ -1803,7 +1803,7 @@ assert_eq "$(wc -c <"$runner_log")" 0 "an invalid name must never reach podman"
 
 begin "review-container: orphan reclaim is per-name"
 reset_logs
-run_recipe review-container GH_READY=1  \
+run_recipe review-container GH_READY=1 \
   REVIEW_CONTAINER_NAME=review-container-2 \
   FAKE_PODMAN_RUNNING=1
 assert_contains "reclaiming review-container-2" "$OUT"
@@ -1816,7 +1816,7 @@ begin "review-container: a named instance with a live owner is never replaced"
 reset_logs
 bash -c 'trap "exit 0" TERM; sleep 30' --name review-container-2 &
 named_owner_pid=$!
-run_recipe review-container GH_READY=1  \
+run_recipe review-container GH_READY=1 \
   REVIEW_CONTAINER_NAME=review-container-2 \
   FAKE_PODMAN_RUNNING=1 \
   "FAKE_PODMAN_OWNER_LABEL=${boot_id}:${named_owner_pid}"
