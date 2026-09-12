@@ -29,14 +29,14 @@ forbid() {
   return 0
 }
 
-grep -qE '^ARG FSDK_BASE_IMAGE=ghcr\.io/projectbluefin/base(:[^@[:space:]]+)?@sha256:[0-9a-f]{64}$' image/Containerfile ||
+grep -qE '^ARG FSDK_RUNNER_IMAGE=ghcr\.io/projectbluefin/lab-runner(:[^@[:space:]]+)?@sha256:[0-9a-f]{64}$' image/Containerfile ||
   {
-    echo "::error file=image/Containerfile::FSDK_BASE_IMAGE must be digest-pinned"
+    echo "::error file=image/Containerfile::FSDK_RUNNER_IMAGE must be digest-pinned"
     fail=1
   }
 # shellcheck disable=SC2016
 require image/Containerfile \
-  'FROM ${FSDK_BASE_IMAGE}' \
+  'FROM ${FSDK_RUNNER_IMAGE}' \
   'ARG HIVE_COMMIT=' \
   'ARG NODE_VERSION=' \
   'ARG GH_VERSION=' \

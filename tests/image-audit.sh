@@ -8,7 +8,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-base_image="$(sed -nE 's/^ARG FSDK_BASE_IMAGE=(.*)$/\1/p' image/Containerfile)"
+base_image="$(sed -n 's/^ARG FSDK_RUNNER_IMAGE=\(.*\)$/\1/p' image/Containerfile)"
 derived_image=""
 report_file=""
 require_oci=false
@@ -120,7 +120,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$base_image" ]] || {
-  echo "could not read FSDK_BASE_IMAGE from image/Containerfile" >&2
+  echo "could not read FSDK_RUNNER_IMAGE from image/Containerfile" >&2
   exit 1
 }
 if ! "$verify_base_evidence"; then

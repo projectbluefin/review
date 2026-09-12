@@ -25,18 +25,19 @@ Load this before changing `image/Containerfile`, `image/config/`, image pins,
 or published contributor-image behavior.
 
 ## Ownership Boundary
-The contributor and review containers are owned directly by this repository,
-deriving strictly from Project Bluefin's authentic FSDK base (`ghcr.io/projectbluefin/base`),
-never repurposing the lab-runner image. Important non-OMP components (Python runtime,
-core utilities) are built and carved via BuildStream (BST) elements rather than
-inline ad-hoc Containerfile package layers.
+Image *content* is owned upstream in `projectbluefin/fsdk-containers`, not
+here. `image/Containerfile` derives from `ghcr.io/projectbluefin/lab-runner`,
+which BuildStream assembles from `elements/lab-runner/lab-runner-stack.bst`
+composed of `freedesktop-sdk.bst:components/*.bst`. Adding a userland tool
+means adding or updating a BST element there, not patching the Containerfile.
 
-## Base Discipline
-1. Always derive from `ghcr.io/projectbluefin/base` (or distroless BST siblings),
-   never reusing `lab-runner` as a substitute base.
-2. Compose non-OMP dependencies (Python, core toolchains) via upstream BST element
-   definitions (`projectbluefin/fsdk-containers`), maintaining clean distroless provenance.
-3. Do not accumulate ad-hoc inline shims or unpinned packages in Dockerfiles.
+This repository's only lever is the `FSDK_RUNNER_IMAGE` build arg, which pins
+the resulting digest. Four substitutes have each been proposed and rejected:
+a Containerfile package overlay, a multi-stage `COPY` out of a third-party
+image such as busybox, a `curl` of a prebuilt binary, and a new intermediate
+`review-base` image. Adding the component upstream and bumping the digest is
+the whole fix; reach for nothing else.
+
 ## Base Gaps Are Filed Upstream
 
 When the base is missing a utility, **open an issue on `projectbluefin/fsdk-containers`
