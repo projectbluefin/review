@@ -229,7 +229,7 @@ is tracked in [#135](https://github.com/projectbluefin/review/issues/135).
 <details>
 <summary>Image provenance</summary>
 
-The compatibility image layers the pinned Hive runtime at `ebd5db6adf95c2eceb77c1a4376f137af0836d4b`. `ghcr.io/projectbluefin/contribute` is the separate distroless Hive + OMP worker; the review appliance remains the maintainer-facing OMP image.
+The compatibility image layers the pinned Hive runtime at `1b676894fcf74668c80ae6c5d61fd0aac6e7940a`. `ghcr.io/projectbluefin/contribute` is the separate distroless Hive + OMP worker; the review appliance remains the maintainer-facing OMP image.
 See [image architecture and validation](docs/image-and-development.md).
 
 </details>
