@@ -1,7 +1,7 @@
 ---
 name: review-dashboard
-version: "3.1"
-last_updated: 2026-09-09
+version: "3.2"
+last_updated: 2026-09-12
 id: review-dashboard
 one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
 entry_point: docs/skills/review-dashboard.md
@@ -182,6 +182,15 @@ Batch landings partition across independent repository lanes via background agen
 - Remote-sourced state must always display its age.
 - Headless tests verify logic; Pilot verifies live interaction and state transitions.
 ## Verification
+
+`tests/dashboard_terminal_smoke.py` complements Pilot with an OS pseudo-terminal.
+It launches the shipped Python module with a local `gh` fixture, drives the help
+and issue views entirely by keyboard, resizes while active, and exits cleanly.
+The matrix covers 80x24, a narrower explicit-degradation case, true color with
+reduced motion, and no color. Local key feedback has a deliberately generous
+one-second ceiling and fixture queue hydration a six-second ceiling; neither
+budget includes GitHub or provider work, and both are wide enough to detect a
+blocked UI thread without measuring rendering microtimings.
 
 ```bash
 bash tests/dashboard-contract.sh     # static contract + the Textual pilot

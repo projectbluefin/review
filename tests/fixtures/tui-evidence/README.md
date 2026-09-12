@@ -17,3 +17,9 @@ uv run --with-requirements image/tui/requirements.lock \
 foreground with no network and a bounded smoke input; without it, PTY evidence
 is reported as skipped. Prompt bodies, tokens, and secrets are rejected before
 any artifact is written.
+
+The required terminal acceptance path lives in `tests/dashboard_terminal_smoke.py`.
+It uses an OS pseudo-terminal rather than captured pipes, exercises the locked
+Textual runtime with fake GitHub operations, and fails if its keyboard journey
+invokes a browser or mutation command. `tests/dashboard-contract.sh` runs it in
+CI; this evidence helper remains an optional diagnostic-artifact producer.

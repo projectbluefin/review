@@ -358,6 +358,8 @@ fi
 "${venv}/bin/python" "$repo_root/tests/ci_failure_contract.py"
 "${venv}/bin/python" "$repo_root/tests/review_action_comparison_contract.py"
 "${venv}/bin/python" "$repo_root/tests/tui_responsive_contract.py"
+BLUEFIN_REVIEW_TUI_PYTHON="${venv}/bin/python" \
+  "${venv}/bin/python" "$repo_root/tests/dashboard_terminal_smoke.py"
 "${venv}/bin/python" "$repo_root/tests/tui_evidence_capture.py" --self-check
 # These current-main suites remain in the pinned Textual environment.
 "${venv}/bin/python" "$repo_root/tests/slay_state_contract.py"
