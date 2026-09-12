@@ -94,7 +94,9 @@ require "$containerfile" \
   'sha256sum --check --status' \
   'USER 65532:65532' \
   'WORKDIR /workspace' \
-  'ENTRYPOINT ["/usr/bin/omp", "--profile", "review", "--extension", "/usr/share/bluefin/review/extension"]' \
+  'ENTRYPOINT ["/usr/bin/bluefin-review-appliance"]' \
+  'COPY --chmod=0755 image/appliance/entrypoint.sh /out/usr/bin/bluefin-review-appliance' \
+  'COPY image/appliance/config.yml /out/usr/share/bluefin/review/appliance-config.yml' \
   'io.projectbluefin.review.appliance="true"' \
   'org.opencontainers.image.version="${REVIEW_VERSION}"' \
   'org.opencontainers.image.revision="${REVIEW_REVISION}"'
@@ -136,6 +138,29 @@ require .github/workflows/publish-appliance.yml \
   'tests/appliance-contract.sh' \
   'IMAGE: ghcr.io/projectbluefin/review'
 
+# Exercise the launcher independently of a container engine. A fake omp makes
+# the profile boundary observable and proves that update never reaches omp.
+entrypoint_tmp="$(mktemp -d)"
+trap 'rm -rf "$entrypoint_tmp"' EXIT
+cat >"$entrypoint_tmp/omp" <<'EOF'
+#!/usr/bin/bash
+printf '%s\n' "$@"
+EOF
+chmod +x "$entrypoint_tmp/omp"
+default_args="$(PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
+grep -qx 'bluefin-review-appliance' <<<"$default_args" ||
+  fail "the appliance entrypoint did not select its isolated profile"
+inherited_args="$(BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1 PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
+grep -qx 'review' <<<"$inherited_args" ||
+  fail "the explicit host omp configuration opt-in did not select the review profile"
+if PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh update >"$entrypoint_tmp/update.out" 2>&1; then
+  fail "the immutable appliance accepted an in-place update"
+fi
+grep -q 'immutable appliance' "$entrypoint_tmp/update.out" ||
+  fail "the rejected update did not explain appliance replacement"
+rm -rf "$entrypoint_tmp"
+trap - EXIT
+
 if [[ -n "$expect_version" && "$expect_version" != "$version" ]]; then
   fail "expected version ${expect_version}, derived ${version}"
 fi
@@ -167,7 +192,7 @@ test "$(inspect '{{.Config.User}}')" = "65532:65532" ||
   fail "image must run as the numeric nonroot uid; kubelet rejects named users under runAsNonRoot"
 test "$(inspect '{{.Config.WorkingDir}}')" = "/workspace"
 test "$(inspect '{{json .Config.Entrypoint}}')" = \
-  '["/usr/bin/omp","--profile","review","--extension","/usr/share/bluefin/review/extension"]'
+  '["/usr/bin/bluefin-review-appliance"]'
 test "$(inspect '{{.ManifestType}}')" = "application/vnd.oci.image.manifest.v1+json" ||
   fail "the shipped format is OCI, not Docker schema 2"
 
@@ -242,6 +267,8 @@ run 'set -eu; test -w "$HOME"; test "$HOME" = /home/bluefin' >/dev/null ||
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
 run '
   set -eu
+  test -x /usr/bin/bluefin-review-appliance
+  grep -q "checkUpdate: false" /usr/share/bluefin/review/appliance-config.yml
   test -f /usr/share/bluefin/review/extension/index.ts
   test -d /usr/share/bluefin/review/extension/agents
   test -f /usr/share/bluefin/review/sbom.spdx.json
@@ -276,5 +303,15 @@ done
 entry_version="$("$engine" run --rm "$image" --version)"
 test "$entry_version" = "$omp_label" ||
   fail "the entrypoint printed '${entry_version}', expected ${omp_label}"
+
+update_output="$("$engine" run --rm "$image" update 2>&1 || true)"
+grep -q 'immutable appliance' <<<"$update_output" ||
+  fail "the appliance update command did not explain replacement semantics"
+
+help_output="$("$engine" run --rm "$image" --help)"
+grep -q 'Replace it to update' <<<"$help_output" ||
+  fail "appliance help does not explain replacement semantics"
+grep -q 'BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1' <<<"$help_output" ||
+  fail "appliance help does not expose the explicit host-config opt-in"
 
 echo "appliance-contract: runtime contract holds ($((size / 1024 / 1024)) MiB, omp ${omp_version}, pi ${pi_version})"

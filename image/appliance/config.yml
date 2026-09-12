@@ -1,0 +1,5 @@
+# Invocation overlay owned by the immutable appliance. User and project
+# settings still apply, except that a packaged binary never advertises an
+# in-place update that cannot survive appliance replacement.
+startup:
+  checkUpdate: false

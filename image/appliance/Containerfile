@@ -171,6 +171,8 @@ RUN set -eu; \
     chown -R 65532:65532 /out/home/bluefin /out/workspace
 
 COPY --chown=65532:65532 image/extension/bluefin-review /out/usr/share/bluefin/review/extension
+COPY --chmod=0755 image/appliance/entrypoint.sh /out/usr/bin/bluefin-review-appliance
+COPY image/appliance/config.yml /out/usr/share/bluefin/review/appliance-config.yml
 COPY --chmod=0755 bin/dinosay /out/usr/bin/dinosay
 # Fail the build here rather than in a maintainer's terminal: every staged
 # binary must resolve its interpreter and libraries against the staged closure.
@@ -224,4 +226,4 @@ WORKDIR /workspace
 
 # The mode is keyboard driven and registers no slash commands; arguments passed
 # to `podman run` land on omp itself, so `--pr 1284` and `--issues` work.
-ENTRYPOINT ["/usr/bin/omp", "--profile", "review", "--extension", "/usr/share/bluefin/review/extension"]
+ENTRYPOINT ["/usr/bin/bluefin-review-appliance"]
