@@ -2,25 +2,24 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
-import hmac
 import json
 import os
 import re
-import signal
-import socketserver
 import subprocess
-import threading
+import sys
 from dataclasses import dataclass
 from typing import Any
 
-PROTOCOL_VERSION = 1
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import broker_protocol as protocol
+
+PROTOCOL_VERSION = protocol.PROTOCOL_VERSION
 ACTIONS = ("status", "submit", "logs", "cancel")
 NAMESPACE = "bluefin-system"
 JOB_DEADLINE_SECONDS = 3600
 JOB_TTL_SECONDS = 3600
-MAX_REQUEST_BYTES = 65536
-MAX_RESPONSE_BYTES = 262144
+MAX_REQUEST_BYTES = protocol.MAX_REQUEST_BYTES
+MAX_RESPONSE_BYTES = protocol.MAX_RESPONSE_BYTES
 READ_TIMEOUT_SECONDS = 30.0
 WRITE_TIMEOUT_SECONDS = 30.0
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
@@ -28,12 +27,9 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 BACKENDS = frozenset({"omp", "codex"})
 EFFORTS = frozenset({"low", "medium", "high", "max"})
 
-
-class Rejected(Exception):
-    def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
+Rejected = protocol.Rejected
+read_request_line = protocol.read_request_line
+bounded_response = protocol.bounded_response
 
 
 @dataclass(frozen=True)
@@ -121,21 +117,7 @@ def sanitize_label(value: str) -> str:
 
 
 def decode_request(raw: bytes, context: BrokerContext) -> dict:
-    if len(raw) > MAX_REQUEST_BYTES:
-        raise Rejected("bad-request", "request is too large")
-    try:
-        request = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as error:
-        raise Rejected("bad-request", "request is not JSON") from error
-    if not isinstance(request, dict) or request.get("version") != PROTOCOL_VERSION:
-        raise Rejected("bad-request", "version is missing or unsupported")
-    if request.get("action") not in ACTIONS:
-        raise Rejected("unknown-action", "actions are status, submit, logs, cancel")
-    if not isinstance(request.get("session"), str) or not hmac.compare_digest(
-        request["session"], context.session
-    ):
-        raise Rejected("wrong-session", "request session does not match the broker")
-    return request
+    return protocol.decode_request(raw, session=context.session, actions=ACTIONS)
 
 
 def job_manifest(context: BrokerContext, request: dict) -> dict:
@@ -302,114 +284,21 @@ def dispatch(context: BrokerContext, raw: bytes) -> dict:
             return handle_logs(context, request)
         return handle_cancel(context, request)
     except Rejected as error:
-        return {"version": PROTOCOL_VERSION, "ok": False, "error": error.code, "detail": error.detail}
+        return protocol.error_payload(error.code, error.detail)
     except Exception as error:
-        return {"version": PROTOCOL_VERSION, "ok": False, "error": "unavailable", "detail": type(error).__name__}
-
-
-def read_request_line(sock) -> bytes | None:
-    buffer = bytearray()
-    while True:
-        chunk = sock.recv(4096)
-        if not chunk:
-            return None
-        buffer.extend(chunk)
-        if b"\n" in buffer:
-            line, _ = buffer.split(b"\n", 1)
-            return bytes(line)
-        if len(buffer) > MAX_REQUEST_BYTES:
-            raise Rejected("bad-request", "request line is too long")
-
-
-def bounded_response(payload: dict) -> bytes:
-    data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    if len(data) > MAX_RESPONSE_BYTES:
-        data = json.dumps(
-            {
-                "version": PROTOCOL_VERSION,
-                "ok": False,
-                "error": "response-too-large",
-                "detail": "response exceeded byte cap",
-            },
-            separators=(",", ":"),
-        ).encode("utf-8")
-    return data + b"\n"
-
-
-class BrokerHandler(socketserver.BaseRequestHandler):
-    def handle(self) -> None:
-        connection = self.request
-        try:
-            connection.settimeout(READ_TIMEOUT_SECONDS)
-            raw = read_request_line(connection)
-        except OSError:
-            return
-        if raw is None:
-            return
-        payload = dispatch(self.server.context, raw)
-        line = bounded_response(payload)
-        try:
-            connection.settimeout(WRITE_TIMEOUT_SECONDS)
-            connection.sendall(line)
-        except OSError:
-            return
-
-
-class BrokerServer(socketserver.ThreadingUnixStreamServer):
-    daemon_threads = True
-    allow_reuse_address = False
-
-    def __init__(self, path: str, context: BrokerContext) -> None:
-        self.context = context
-        super().__init__(path, BrokerHandler)
-
-    def handle_error(self, request, client_address) -> None:
-        return
-
-
-def prepare_socket_path(path: str) -> None:
-    directory = os.path.dirname(os.path.abspath(path)) or "."
-    os.makedirs(directory, mode=0o700, exist_ok=True)
-    if os.path.exists(path):
-        with contextlib.suppress(OSError):
-            os.unlink(path)
+        return protocol.error_payload("unavailable", type(error).__name__)
 
 
 def serve(path: str, context: BrokerContext) -> int:
-    prepare_socket_path(path)
-    previous_umask = os.umask(0o177)
-    try:
-        server = BrokerServer(path, context)
-    finally:
-        os.umask(previous_umask)
-    os.chmod(path, 0o600)
-
-    def stop(_signum, _frame) -> None:
-        threading.Thread(target=server.shutdown, daemon=True).start()
-
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
-
-    sweep_orphans(context)
-
-    print(
-        json.dumps(
-            {"version": PROTOCOL_VERSION, "ready": True, "session": context.session},
-            separators=(",", ":"),
-        ),
-        flush=True,
+    return protocol.serve(
+        path,
+        context,
+        dispatch,
+        read_timeout=READ_TIMEOUT_SECONDS,
+        write_timeout=WRITE_TIMEOUT_SECONDS,
+        on_start=sweep_orphans,
+        on_stop=cancel_session_jobs,
     )
-    try:
-        server.serve_forever(poll_interval=0.2)
-    finally:
-        try:
-            cancel_session_jobs(context)
-        except Exception:
-            pass
-        server.server_close()
-        with contextlib.suppress(OSError):
-            os.unlink(path)
-    return 0
 
 
 def probe(timeout: int = 10) -> int:
