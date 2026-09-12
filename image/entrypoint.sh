@@ -23,7 +23,7 @@ banner() {
 |  _ \| ____| | | |_ _| ____| |  | |
 | |_) |  _| | | | || ||  _| | |/\| |
 |  _ <| |___| |_| || || |___|  /\  |
-|_| \_\_____\___/|___|_____|_/  \_|
+|_| \_\_____|\___/|___|_____|_/  \_|
 BANNER
     printf '%s      %sBLUEFIN REVIEW APPLIANCE%s\n' "$r" "$c3" "$r"
     printf '%s%s | model %s | effort %s%s\n' \
@@ -99,7 +99,7 @@ export GOOSE_PATH_ROOT="${REVIEW_GOOSE_ROOT:-/opt/bluefin/goose}"
 # a local default.
 if [ -f "${hive_config}/contributor.env" ]; then
   # Parse AGENT_BACKEND from the registration file if present.
-  parsed_backend="$(awk -F= '$1=="AGENT_BACKEND" {sub(/^[^=]*=/, ""); gsub(/["'"'\ ]/, ""); print; exit}' "${hive_config}/contributor.env" 2>/dev/null || true)"
+  parsed_backend="$(awk -F= '$1=="AGENT_BACKEND" {sub(/^[^=]*=/, ""); print; exit}' "${hive_config}/contributor.env" 2>/dev/null | tr -d "\"' " || true)"
   if [ -n "${parsed_backend}" ]; then
     selected_backend="${parsed_backend}"
   fi
@@ -252,7 +252,128 @@ if [ "$review_dashboard" = true ]; then
   # The explicit `<&3` matters as it does for the tmux attach below: with job
   # control off, bash redirects an asynchronous command's stdin from /dev/null
   # unless the command carries a redirection of its own, and the dashboard
-  # which follows is started in the background with FD 3 attached to the
-  # container's stdin so that it can prompt the maintainer without blocking
-  # the reaper shell.  See the comments in the original upstream Hive entrypoint
-  # for more detail.
+  # dies the moment it loses the tty.
+  exec 3<&0
+  /opt/bluefin/tui/.venv/bin/python /opt/bluefin/tui/bluefin_review_tui.py "$@" <&3 &
+  tui_pid=$!
+  exec 3<&-
+  trap 'kill -TERM "$tui_pid" 2>/dev/null || true' HUP INT TERM
+  tui_status=0
+  wait "$tui_pid" || tui_status=$?
+  exit "$tui_status"
+fi
+
+# --- Hand over to Hive -------------------------------------------------------
+#
+# contributor-agent.sh creates the tmux session named "contributor", starts the
+# relay, and launches Goose by keystroke injection. Attaching to that session is
+# Hive's own documented flow. Running it in the foreground is deliberate: the
+# launcher never backgrounds or detaches the agent.
+# The attach client must describe the terminal that actually renders tmux.
+# The base ships the full terminfo database, so the caller's TERM normally
+# resolves; the fallback covers terminals newer than the base's ncurses
+# (e.g. xterm-ghostty). A truecolor caller (COLORTERM) gets the direct-color
+# fallback; without it tmux downsamples every pane color to 256 and Goose
+# renders the wrong colors.
+tmux_fallback_term=xterm-256color
+if ! infocmp "${TERM:-}" >/dev/null 2>&1; then
+  case "${COLORTERM:-}" in
+  truecolor | 24bit) tmux_fallback_term=xterm-direct ;;
+  esac
+  note "TERM=${TERM:-<unset>} has no terminfo; using ${tmux_fallback_term}"
+  export TERM="$tmux_fallback_term"
+fi
+agent_pid=
+status_pid=
+# Podman sends SIGTERM and waits ten seconds before SIGKILL, so teardown has
+# to be BOUNDED: an unbounded wait on a stuck agent stalls until that deadline
+# and dies by SIGKILL, which is the "Ctrl-C stops it" promise failing in the
+# only way a user can see. Two short steps, three seconds worst case, leave
+# the deadline untouched.
+#
+# Nothing downstream depends on the agent exiting cleanly. Hive's hub releases
+# the task itself when the socket drops -- its disconnect defer nils
+# currentTask, logs 'task released on disconnect' and books a cooldown, and
+# heartbeatLoop closes a half-open socket on a stale pong. A polite window for
+# the agent's own exit trap is worth two seconds; it is not load-bearing, and
+# must not grow into a shutdown protocol this repository does not owe anyone.
+shutdown_grace_deciseconds=20
+
+wait_for_exit() {
+  # Poll rather than 'wait' so this is reusable from inside a trap handler,
+  # where the child has usually already been reaped.
+  local pid="$1" limit="$2" waited=0
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$limit" ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+}
+
+cleanup() {
+  status=$?
+  # A second signal during teardown would re-enter this handler and restart
+  # the escalation, stretching a bounded teardown past podman's deadline.
+  trap '' HUP INT TERM
+  if [ -n "$status_pid" ] && kill -0 "$status_pid" 2>/dev/null; then
+    kill -TERM "$status_pid" 2>/dev/null || true
+  fi
+  if [ -n "$agent_pid" ] && kill -0 "$agent_pid" 2>/dev/null; then
+    kill -TERM "$agent_pid" 2>/dev/null || true
+    wait_for_exit "$agent_pid" "$shutdown_grace_deciseconds"
+    # Hive's agent script blocks on its own tmux session, so dropping the
+    # session is what lets a stuck shutdown finish.
+    tmux kill-session -t contributor 2>/dev/null || true
+    wait_for_exit "$agent_pid" 10
+    kill -KILL "$agent_pid" 2>/dev/null || true
+    wait "$agent_pid" 2>/dev/null || true
+  fi
+  tmux kill-session -t contributor 2>/dev/null || true
+  exit "$status"
+}
+trap cleanup EXIT HUP INT TERM
+
+/usr/local/bin/contributor-agent.sh "$@" &
+agent_pid=$!
+
+attempts=0
+while ! tmux has-session -t contributor 2>/dev/null; do
+  if ! kill -0 "$agent_pid" 2>/dev/null; then
+    wait "$agent_pid"
+    exit $?
+  fi
+  attempts=$((attempts + 1))
+  if [ "$attempts" -ge 600 ]; then
+    note 'contributor session did not start'
+    note "tmux readiness diagnostics: TMUX=${TMUX:-<unset>} TMUX_TMPDIR=${TMUX_TMPDIR:-<unset>}"
+    tmux_state="$(tmux ls 2>&1 || true)"
+    note "tmux readiness diagnostics: ${tmux_state//$'\n'/; }"
+    exit 1
+  fi
+  sleep 0.1
+done
+
+# The attended surface is a passive status companion. Hive still creates and
+# owns the contributor tmux session; the companion prints its exact attach
+# command so a maintainer can enter that session deliberately.
+#
+# The companion runs as a background job and is waited on rather than run in
+# the foreground so this shell remains PID 1 and signal-responsive. Its input
+# is the attended terminal; Hive's own tmux session remains a separate,
+# explicitly attachable runtime.
+#
+# The explicit `<&3` matters: with job control off, bash redirects an
+# asynchronous command's stdin from /dev/null unless the command carries a
+# redirection of its own, and the companion would lose its attended terminal.
+if [ -t 0 ] && [ -t 1 ]; then
+  exec 3<&0
+  /opt/bluefin/tui/.venv/bin/python /opt/bluefin/tui/worker_status.py <&3 &
+  status_pid=$!
+  exec 3<&-
+  wait "$status_pid" || true
+  status_pid=
+  note 'status companion closed; the agent remains foreground in this terminal. Press Ctrl-C or close this terminal to stop it.'
+  wait "$agent_pid"
+else
+  note 'no tty; following the agent without attaching'
+  wait "$agent_pid"
+fi
