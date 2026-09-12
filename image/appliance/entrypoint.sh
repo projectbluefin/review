@@ -16,7 +16,7 @@ Replace the SIF with the newer release asset, or pull a newer container image.
 EOF
   exit 2
   ;;
---help|-h|help)
+--help | -h | help)
   # OMP owns the rest of the help text. Remove its mutable-install update
   # command and replace it with the appliance contract below.
   omp --profile "$profile" --config /usr/share/bluefin/review/appliance-config.yml \
