@@ -25,16 +25,10 @@
   ],
   "packageRules": [
     {
-      "description": "Latest upstream is the project posture (AGENTS.md): every update automerges — digest, pin, patch, minor, and major alike. A pin is a checkpoint the automation moves, never a human gate. automergeType and automergeStrategy are stated rather than inherited: branch-mode automerge cannot land here because branch protection requires a pull request, and squash is the only merge this repository allows.",
+      "description": "Immutable-ref housekeeping (pin and pinDigest) automerges — these updates only move a floating reference to an immutable one and carry no upstream code change. automergeType and automergeStrategy are stated rather than inherited: branch-mode automerge cannot land here because branch protection requires a pull request, and squash is the only merge this repository allows. digest, patch, minor, major, rollback, and replacement updates are intentionally NOT automerged: a human reviews every upstream code change before it lands on main (supply-chain review gate, projectbluefin/review#499).",
       "matchUpdateTypes": [
-        "digest",
         "pin",
-        "pinDigest",
-        "patch",
-        "minor",
-        "major",
-        "rollback",
-        "replacement"
+        "pinDigest"
       ],
       "automerge": true,
       "automergeType": "pr",
