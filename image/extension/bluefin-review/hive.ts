@@ -293,6 +293,36 @@ export interface HiveFetchOptions {
 export const HIVE_TIMEOUT_MS = 10_000;
 
 /**
+ * A concise fallback status for an optional Hive failure.
+ *
+ * Optional Hive reads must never dominate a startup line or the header with a
+ * raw error such as `ERR_TLS_CERT_ALTNAME_INVALID`. That is a diagnostic for
+ * the structured status (kept in `snapshot.error`), not a status a maintainer
+ * can act on. Classify the failure into a short, stable label — `hive tls`,
+ * `hive network`, `hive unauthorized`, `hive connection`, or the catch-all
+ * `hive unavailable` — so the optional failure degrades to a fallback status
+ * instead. The raw text stays behind it in `snapshot.error` for the status
+ * tool.
+ */
+export function hiveFailureStatus(error: unknown): string {
+	const message = error instanceof Error ? error.message : String(error);
+	const code =
+		error instanceof Error && typeof (error as { code?: unknown }).code === "string"
+			? String((error as { code: string }).code).toUpperCase()
+			: "";
+	const needle = `${code} ${message}`.toUpperCase();
+	let kind = "unavailable";
+	if (/CERT|TLS|SSL/.test(needle)) kind = "tls";
+	else if (/ECONNREFUSED|ECONNRESET|EPIPE|ECONN/.test(needle)) kind = "connection";
+	else if (/ETIMEDOUT|SOCKETTIMEDOUT|EAI_AGAIN|ENOTFOUND|GETADDRINFO|TIMEOUT/.test(needle)) kind = "network";
+	else if (/401|403|UNAUTHORIZED|FORBIDDEN/.test(needle)) kind = "unauthorized";
+	return `hive ${kind}`;
+	// ponytail: signature regex is a cheap heuristic, not a taxonomy — add a
+	// case here before adding a label. A structured error-code table is the
+	// upgrade when the five categories stop covering what operators ask about.
+}
+
+/**
  * Read the hub. Never throws, never fatal.
  *
  * Consulting Hive must not be able to break a review session: an unreachable or

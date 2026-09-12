@@ -6,7 +6,7 @@
  */
 
 import { diffToText, fetchDiff } from "./github.ts";
-import { fetchHiveMe } from "./hive.ts";
+import { fetchHiveMe, hiveFailureStatus } from "./hive.ts";
 import { fetchHiveLeaderboard, getTierInfo } from "./leaderboard.ts";
 import { queueKey } from "./state.ts";
 import { traceToText } from "./trace.ts";
@@ -66,7 +66,7 @@ function orderLine(mode: ReviewMode): string {
 		return "order: local — no hive hub configured; queue classified from live GitHub evidence";
 	}
 	if (!hive.online) {
-		return `order: local — hive configured but unreachable (${hive.error ?? "unknown"})`;
+		return `order: local — ${hiveFailureStatus(hive.error)}, configured but unreachable`;
 	}
 	const actionable = hive.actionableItems === undefined ? "" : `, ${hive.actionableItems} actionable overall`;
 	const coverage = mode.hiveCoverage();

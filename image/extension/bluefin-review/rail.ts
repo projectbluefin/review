@@ -7,6 +7,7 @@
  * no repaints.
  */
 
+import { hiveFailureStatus } from "./hive.ts";
 import { GLYPH, SPINNER_TICK_MS, type PaintRole, type Painter, formatDuration, statusIcon, statusRole } from "./glyphs.ts";
 import { type ReviewMode, ciGlyph } from "./mode.ts";
 import type { Priority, PriorityCategory } from "./priority.ts";
@@ -77,7 +78,7 @@ export function priorityChip(painter: Painter, priority: Priority | undefined): 
 export function orderSourceLabel(mode: ReviewMode): { text: string; role: PaintRole } {
 	const hive = mode.hive;
 	if (!hive.configured) return { text: "local ranking", role: "dim" };
-	if (hive.error) return { text: `hive unreachable (${hive.error.split(" \u2192 ")[0]})`, role: "error" };
+	if (hive.error) return { text: hiveFailureStatus(hive.error), role: "error" };
 	const coverage = mode.hiveCoverage();
 	if (mode.orderSource() === "hive") {
 		const actionable = hive.actionableItems === undefined ? "" : ` \u00b7 ${hive.actionableItems} actionable`;
