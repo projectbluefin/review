@@ -430,7 +430,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (flagAutoslay === true) {
 			autoslayActive = true;
 			const slayable = mode.slayableItems();
-			const items = (slayable.length > 0 ? slayable.slice(0, BATCH_LIMIT) : [mode.selected()].filter(Boolean)) as QueueItem[];
+			const items = (slayable.length > 0 ? slayable.slice(0, 7) : [mode.selected()].filter(Boolean)) as QueueItem[];
 			if (items.length > 0) {
 				const action: DashboardAction = { kind: "slay", item: items[0]!, items: items.length > 1 ? items : undefined };
 				void dispatch(ctx, action);
@@ -549,7 +549,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			await refreshQueue(ctxToUse);
 			const nextBatch = mode.slayableItems();
 			if (nextBatch.length > 0) {
-				const items = nextBatch.slice(0, BATCH_LIMIT);
+				const items = nextBatch.slice(0, 7);
 				const action: DashboardAction = { kind: "slay", item: items[0]!, items: items.length > 1 ? items : undefined };
 				void dispatch(ctxToUse, action, { deliverAs: "followUp" });
 				return;
@@ -571,7 +571,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			await refreshQueue(ctxToUse);
 			const nextBatch = mode.slayableItems();
 			if (nextBatch.length > 0) {
-				const items = nextBatch.slice(0, BATCH_LIMIT);
+				const items = nextBatch.slice(0, 7);
 				const action: DashboardAction = { kind: "slay", item: items[0]!, items: items.length > 1 ? items : undefined };
 				void dispatch(ctxToUse, action);
 				return;
@@ -667,7 +667,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			// cycling continuously through assignments without requiring manual intervention.
 			autoslayActive = true;
 			const slayable = mode.slayableItems();
-			const items = (slayable.length > 0 ? slayable.slice(0, BATCH_LIMIT) : [mode.selected()].filter(Boolean)) as QueueItem[];
+			const items = (slayable.length > 0 ? slayable.slice(0, 7) : [mode.selected()].filter(Boolean)) as QueueItem[];
 			if (items.length === 0) {
 				autoslayActive = false;
 				if (ctx.hasUI) ctx.ui.notify("No queue items available to slay", "warning");

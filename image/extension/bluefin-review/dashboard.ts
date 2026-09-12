@@ -281,9 +281,13 @@ export class ReviewDashboard {
 			case "f":
 				this.done({ kind: "fix", item, items });
 				return;
-			case "s":
-				this.done({ kind: "slay", item, items });
+			case "s": {
+				const slayable = this.mode.slayableItems();
+				const batch = chosenItems.length > 0 ? chosenItems : (slayable.length > 0 ? slayable.slice(0, 7) : undefined);
+				const targetItem = batch && batch.length > 0 ? batch[0]! : activeItem;
+				this.done({ kind: "slay", item: targetItem, items: batch && batch.length > 1 ? batch : undefined });
 				return;
+			}
 			case "y":
 				this.done({ kind: "reference", item, items });
 				return;
