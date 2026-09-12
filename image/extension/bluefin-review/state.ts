@@ -54,8 +54,8 @@ export interface LandingEvent {
 	timestamp: number;
 	done?: boolean;
 	watchStatus?: string;
+	headSha?: string;
 }
-
 export interface Finding {
 	severity: "critical" | "high" | "medium" | "low";
 	file: string;
@@ -234,6 +234,7 @@ export function readLandingEvents(root: string): LandingEvent[] {
 			const watch = row.watch as Record<string, unknown> | undefined;
 			const watchRepository = watch ? asString(watch.repository) : "";
 			const watchNumber = watch ? asNumber(watch.pull_request) : undefined;
+			const head = typeof row.head === "string" ? row.head : typeof row.head_sha === "string" ? row.head_sha : (watch && typeof watch.head_sha === "string" ? watch.head_sha : undefined);
 			events.push({
 				pullRequestKey:
 					typeof row.pr === "string"
@@ -246,6 +247,7 @@ export function readLandingEvents(root: string): LandingEvent[] {
 				timestamp: toMillis(row.ts),
 				done: row.done === true,
 				watchStatus: watch ? asString(watch.status) : undefined,
+				headSha: head,
 			});
 		}
 	}
@@ -572,12 +574,14 @@ export function buildPipelineSpans(
 			children: landingEvents.map((event, index) => {
 				const settled = index < landingEvents.length - 1;
 				const own = event.done ? ("success" as SpanStatus) : landingStateStatus(event.state ?? "");
+				const headDetail = event.headSha ? `head ${event.headSha.slice(0, 7)}` : "";
+				const noteDetail = event.note || "";
+				const detail = [headDetail, noteDetail].filter(Boolean).join(" · ") || undefined;
 				return {
 					id: `${key}/landing/${index}`,
 					label: event.done ? "done" : (event.state ?? event.watchStatus ?? "event"),
-					detail: event.note || undefined,
+					detail,
 					status: settled ? settledStatus(own) : own,
-					startedAt: event.timestamp,
 					endedAt: settled ? landingEvents[index + 1]!.timestamp : undefined,
 				};
 			}),

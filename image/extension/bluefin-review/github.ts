@@ -37,6 +37,8 @@ export interface QueueItem {
 	changedFiles?: number;
 	/** `owner/repo#number` of every issue this pull request closes. */
 	closingIssues?: string[];
+	/** `owner/repo#number` of merged PRs that reference or close this issue. */
+	closedByPrs?: string[];
 }
 
 export interface QueueResult {
@@ -73,6 +75,18 @@ const PR_ITEM_FIELDS = `
 	}
 `;
 
+/** What an issue carries beyond the shared queue fields. */
+const ISSUE_ITEM_FIELDS = `
+	closedByPullRequestsReferences(first: 5) {
+		nodes {
+			number
+			state
+			merged
+			repository { nameWithOwner }
+		}
+	}
+`;
+
 export const PR_QUEUE_QUERY = `
 query($search: String!, $cursor: String) {
 	search(query: $search, type: ISSUE, first: 50, after: $cursor) {
@@ -93,6 +107,7 @@ query($search: String!, $cursor: String) {
 		nodes {
 			... on Issue {
 				${QUEUE_FIELDS}
+				${ISSUE_ITEM_FIELDS}
 			}
 		}
 	}
@@ -181,6 +196,14 @@ interface SearchNode {
 	labels?: { nodes?: Array<{ name?: string }> } | null;
 	commits?: { nodes?: Array<{ commit?: { statusCheckRollup?: { state?: string } | null } }> } | null;
 	closingIssuesReferences?: { nodes?: Array<{ number?: number; repository?: { nameWithOwner?: string } | null }> } | null;
+	closedByPullRequestsReferences?: {
+		nodes?: Array<{
+			number?: number;
+			state?: string;
+			merged?: boolean;
+			repository?: { nameWithOwner?: string } | null;
+		}>;
+	} | null;
 }
 
 function toCiStatus(state?: string): CiStatus | undefined {
@@ -244,6 +267,14 @@ function toQueueItem(node: SearchNode, mode: QueueMode): QueueItem | undefined {
 			.map((reference) =>
 				reference.repository?.nameWithOwner && typeof reference.number === "number"
 					? `${reference.repository.nameWithOwner}#${reference.number}`
+					: "",
+			)
+			.filter(Boolean),
+		closedByPrs: (node.closedByPullRequestsReferences?.nodes ?? [])
+			.filter((pr) => pr.merged === true || pr.state?.toUpperCase() === "MERGED")
+			.map((pr) =>
+				pr.repository?.nameWithOwner && typeof pr.number === "number"
+					? `${pr.repository.nameWithOwner}#${pr.number}`
 					: "",
 			)
 			.filter(Boolean),
@@ -378,7 +409,7 @@ export async function fetchItemsByKey(
 	if (targets.length === 0) return { items, fetchedAt: Date.now() };
 
 	const wanted = mode === "prs" ? "PullRequest" : "Issue";
-	const extras = mode === "prs" ? PR_ITEM_FIELDS : "";
+	const extras = mode === "prs" ? PR_ITEM_FIELDS : ISSUE_ITEM_FIELDS;
 	const query = `query {\n${targets
 		.map(
 			({ alias, owner, name, number }) =>

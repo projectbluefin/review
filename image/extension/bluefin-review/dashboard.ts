@@ -15,7 +15,7 @@ import { GLYPH, SPINNER_TICK_MS, type Painter, formatDuration, statusIcon, statu
 import type { QueueItem } from "./github.ts";
 import { type KeyMatcher, canonicalKey, rawKeyMatcher } from "./keys.ts";
 import { type ReviewMode, ciGlyph } from "./mode.ts";
-import { type RailKey, keymapBar, orderSourceLabel, priorityChip } from "./rail.ts";
+import { type RailKey, keymapBar, orderSourceLabel, priorityChip, tmuxReviewStatusBar } from "./rail.ts";
 import { type RenderedRow, type Span, findSpan, hasChildren, renderSpanTree, visibleSpanIds } from "./trace.ts";
 import { fitToWidth, truncateToWidth } from "./width.ts";
 import { BLUEFIN_RAPTOR_BANNER, renderRaptorGlyph } from "./mascot.ts";
@@ -520,7 +520,14 @@ export class ReviewDashboard {
 				),
 			);
 		}
-		if (work && !work.pr && answering.length === 0) {
+		if (item.type === "issue" && item.closedByPrs && item.closedByPrs.length > 0) {
+			rows.push(
+				truncateToWidth(
+					`  ${this.painter.fg("accent", "merged PR:")} ${this.painter.fg("warning", item.closedByPrs.join(", "))} ${this.painter.fg("dim", "(slay to verify and close)")}`,
+					width,
+				),
+			);
+		} else if (work && !work.pr && answering.length === 0) {
 			rows.push(truncateToWidth(this.painter.fg("dim", "  no open change closes this yet"), width));
 		}
 		rows.push("");
@@ -619,6 +626,7 @@ export class ReviewDashboard {
 			lines.push(truncateToWidth(this.painter.fg("dim", `filter: ${this.mode.filter}  (/ to search · esc/clear to reset)`), width));
 		}
 		lines.push(keymapBar(this.painter, DASHBOARD_KEYS, width));
+		lines.push(tmuxReviewStatusBar(this.mode, this.painter, width, now));
 		return lines;
 	}
 

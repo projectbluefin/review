@@ -23,7 +23,7 @@ import { EMPTY_HIVE, buildRankMap, fetchHive, resolveHub } from "../image/extens
 import { categorize, prioritize } from "../image/extension/bluefin-review/priority.ts";
 import { BATCH_LIMIT, ReviewMode } from "../image/extension/bluefin-review/mode.ts";
 import { ReviewDashboard } from "../image/extension/bluefin-review/dashboard.ts";
-import { STALE_AFTER_MS, queueAge, renderHitlist, renderRail, statusSegment } from "../image/extension/bluefin-review/rail.ts";
+import { STALE_AFTER_MS, queueAge, renderHitlist, renderRail, statusSegment, tmuxReviewStatusBar } from "../image/extension/bluefin-review/rail.ts";
 import { SessionTrace } from "../image/extension/bluefin-review/session.ts";
 import { BluefinAnsiSplash } from "../image/extension/bluefin-review/splash.ts";
 import { STATE_ENTRY, actionPrompt, createReviewExtension } from "../image/extension/bluefin-review/extension.ts";
@@ -483,6 +483,45 @@ test("queue fetch maps CI rollup and reports auth failure", async () => {
 	assert.match(denied.error ?? "", /401/, "a failed queue must say why, not render empty");
 });
 
+test("issue queue fetch maps merged closedByPullRequestsReferences into closedByPrs", async () => {
+	const issueFetch = async () => ({
+		ok: true,
+		status: 200,
+		statusText: "OK",
+		json: async () => ({
+			data: {
+				search: {
+					pageInfo: { hasNextPage: false, endCursor: null },
+					nodes: [
+						{
+							number: 1130,
+							title: "Cache Maintenance fails on jq syntax error",
+							url: "https://github.com/projectbluefin/bluefin/issues/1130",
+							updatedAt: new Date(NOW - 1000).toISOString(),
+							author: { login: "hive" },
+							repository: { nameWithOwner: "projectbluefin/bluefin" },
+							labels: { nodes: [] },
+							closedByPullRequestsReferences: {
+								nodes: [
+									{
+										number: 1203,
+										state: "MERGED",
+										merged: true,
+										repository: { nameWithOwner: "projectbluefin/bluefin" },
+									},
+								],
+							},
+						},
+					],
+				},
+			},
+		}),
+	});
+	const res = await fetchQueue("issues", { token: "t", fetchImpl: issueFetch });
+	assert.equal(res.items.length, 1);
+	assert.deepEqual(res.items[0].closedByPrs, ["projectbluefin/bluefin#1203"]);
+});
+
 test("diff fetch is bounded but honest about it", async () => {
 	const diff = await fetchDiff("projectbluefin/review", 42, { token: "t", fetchImpl: fakeFetch([]), maxPatchChars: 100 });
 	assert.equal(diff.totalFiles, 2);
@@ -558,6 +597,11 @@ test("mode ranks, filters, moves, and keeps the selection across a refetch", asy
 	mode.setFilter("fix-ci");
 	assert.equal(mode.selected().id, 42, "the category is part of the filter surface");
 	mode.setFilter("");
+	mode.skipRepos.add("other");
+	assert.equal(mode.visibleItems().length, 1);
+	assert.equal(mode.selected().id, 42, "skipped repo items are filtered out");
+	mode.skipRepos.clear();
+	assert.equal(mode.visibleItems().length, 2);
 
 	assert.deepEqual(mode.ciTally(), { success: 1, failure: 1, pending: 0, unknown: 0 });
 });
@@ -579,13 +623,22 @@ test("rail renders the queue, the pipeline, and the keymap within width", (t) =>
 	assert.ok(multiRows[0].includes("⬢ bluefin"));
 	assert.ok(multiRows[1].includes("projectbluefin/review#42"));
 	assert.ok(multiRows.some((row) => row.includes("landing")), "the rail shows live pipeline stages");
-	assert.ok(multiRows[multiRows.length - 1].includes("alt+b"));
+	assert.ok(multiRows.some((row) => row.includes("alt+b")));
+	assert.ok(multiRows[multiRows.length - 1].includes("BLUEFIN"), "tmux status bar is at the very bottom");
 	for (const row of multiRows) assert.ok(visibleWidth(row) <= 100);
 
 	assert.match(statusSegment(mode, PLAIN_PAINTER, NOW), /PR 1\/1 #42/);
 	mode.selectedKeys.add("projectbluefin/review#42");
 	assert.match(statusSegment(mode, PLAIN_PAINTER, NOW), /PR \[1 sel\] 1\/1 #42/);
 	mode.selectedKeys.clear();
+
+	mode.hive = { ...mode.hive, workers: "2/15", reviewers: "2/15" };
+	const tmuxBar = tmuxReviewStatusBar(mode, PLAIN_PAINTER, 150, NOW);
+	assert.ok(tmuxBar.includes("BLUEFIN") && tmuxBar.includes("review"));
+	assert.ok(tmuxBar.includes("Task:") && tmuxBar.includes("#42"));
+	assert.ok(tmuxBar.includes("Issues:") && tmuxBar.includes("PRs:"));
+	assert.ok(tmuxBar.includes("Workers:") && tmuxBar.includes("2/15"));
+	assert.ok(tmuxBar.includes("Reviewers:") && tmuxBar.includes("2/15"));
 });
 test("hitlist renders window of items around cursor above the editor", (t) => {
 	const mode = new ReviewMode({ org: "projectbluefin", stateRoot: join(tmpdir(), "nope") });
@@ -1129,7 +1182,7 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 
 	assert.deepEqual(pi.labels, ["Bluefin Review"]);
 	assert.deepEqual([...pi.shortcuts.keys()].sort(), ["alt+b", "alt+i", "alt+j", "alt+k", "alt+o", "alt+s", "alt+u", "alt+x", "alt+y"]);
-	assert.deepEqual([...pi.flags.keys()].sort(), ["all", "issues", "pr", "repo", "splash"]);
+	assert.deepEqual([...pi.flags.keys()].sort(), ["all", "issues", "pr", "repo", "skip-repo", "splash"]);
 	assert.deepEqual([...pi.tools.keys()].sort(), [
 		"bluefin_hive_lookup",
 		"bluefin_review_diff",
@@ -1354,6 +1407,7 @@ test("action prompts name the evidence and refuse to merge red checks", () => {
 	assert.equal(actionPrompt({ kind: "close" }), undefined);
 	assert.match(batchPrompt, /Never ask the user for confirmation/);
 	assert.match(batchPrompt, /execute all actions end-to-end autonomously/);
+	assert.match(batchPrompt, /immediately request the next assignment/);
 	assert.match(actionPrompt({ kind: "review", item }), /Never ask the user for confirmation/);
 });
 
@@ -1363,24 +1417,26 @@ test("slaying an issue ships a pull request for someone else to merge", () => {
 	assert.match(prompt, /open a pull request/);
 	assert.match(prompt, /Closes projectbluefin\/documentation#936/);
 	assert.match(prompt, /never merge your own/);
+	assert.match(prompt, /gh issue close/);
+	assert.match(prompt, /already been resolved or closed/);
 	assert.doesNotMatch(prompt, /review the diff/, "an issue has no diff to land");
 
 	// A pull request still gets the landing pass; the key means two things.
 	const landing = actionPrompt({ kind: "slay", item: queueItem() });
-	assert.match(landing, /Run the full landing pass/);
-	assert.match(landing, /Do not merge without green checks/);
-	assert.match(landing, /rekicking CI/);
-	assert.match(landing, /failing test or major defect/);
+	assert.match(landing, /fix-and-merge landing pass/);
+	assert.match(landing, /approve and land the pull request/);
+	assert.match(landing, /gh run rerun/);
+	assert.match(landing, /failing tests or defects/);
 	// A batch of issues is still one pull request per issue, not one for the lot.
 	const batch = [issue, queueItem({ id: 941, type: "issue", repo: "projectbluefin/documentation" })];
 	const batchPrompt = actionPrompt({ kind: "slay", item: issue, items: batch });
 	assert.match(batchPrompt, /one pull request per issue/);
 	assert.match(batchPrompt, /never merge your own/);
 	assert.match(batchPrompt, /report an evidenced finding/);
-
+	assert.match(batchPrompt, /gh issue close/);
 	// A mixed selection cannot be both, so it keeps the landing pass it had.
 	const mixed = actionPrompt({ kind: "slay", item: issue, items: [issue, queueItem()] });
-	assert.match(mixed, /Run the full landing pass/);
+	assert.match(mixed, /fix-and-merge landing pass/);
 });
 
 test("hive work the search never returned is still admitted to the queue", async () => {

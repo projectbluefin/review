@@ -25,6 +25,49 @@ export function keymapBar(painter: Painter, keys: readonly RailKey[], width: num
 }
 
 /**
+ * Retro tmux status bar styled like the contribute runtime's lower-third bar:
+ * [🦖 BLUEFIN] [review] [🐝 HIVE/LOCAL] | Task: #123 (repo) | Issues: X | PRs: Y | Workers: Z/ZZ | Reviewers: X/XX | HH:MM
+ */
+export function tmuxReviewStatusBar(mode: ReviewMode, painter: Painter, width: number, now: number): string {
+	// Colors matching image/contribute/entrypoint.sh & image/tmux.conf:
+	// left: #[bg=#1d4ed8,fg=#ffffff,bold] 🦖 BLUEFIN #[bg=#2563eb,fg=#ffffff,nobold] review #[bg=#1e40af,fg=#bfdbfe] 🐝 ${mode} #[default]
+	// status-style: bg=#1e293b,fg=#93c5fd
+	const hive = mode.hive;
+	const hiveMode = hive.online ? "HIVE" : (hive.configured ? "OFFLINE" : "LOCAL");
+
+	const bluefinBadge = "\x1b[48;2;29;78;216m\x1b[38;2;255;255;255m\x1b[1m 🦖 BLUEFIN \x1b[0m";
+	const reviewBadge = "\x1b[48;2;37;99;235m\x1b[38;2;255;255;255m review \x1b[0m";
+	const hiveBadge = `\x1b[48;2;30;64;175m\x1b[38;2;191;219;254m 🐝 ${hiveMode} \x1b[0m`;
+
+	const item = mode.selected();
+	let activeTaskStr = "";
+	if (item) {
+		const kind = item.type === "pr" ? "PR" : "ISSUE";
+		const repo = item.repo.includes("/") ? item.repo.split("/")[1] : item.repo;
+		activeTaskStr = `\x1b[38;2;96;165;250mTask: \x1b[1m\x1b[38;2;255;255;255m${kind} #${item.id}\x1b[0m\x1b[38;2;147;197;253m (${repo}) \x1b[38;2;59;130;246m| `;
+	}
+
+	const tally = mode.ciTally();
+	const issuesCount = mode.queueMode === "issues" ? mode.visibleItems().length : (hive.actionableItems ?? "-");
+	const prsCount = mode.queueMode === "prs" ? mode.visibleItems().length : tally.success + tally.failure + tally.pending;
+
+	let stats = `\x1b[38;2;147;197;253mIssues: \x1b[1m\x1b[38;2;255;255;255m${issuesCount}\x1b[0m\x1b[38;2;147;197;253m \x1b[38;2;59;130;246m| \x1b[38;2;147;197;253mPRs: \x1b[1m\x1b[38;2;255;255;255m${prsCount}\x1b[0m\x1b[38;2;147;197;253m`;
+	if (hive.workers) {
+		stats += ` \x1b[38;2;59;130;246m| \x1b[38;2;147;197;253mWorkers: \x1b[1m\x1b[38;2;255;255;255m${hive.workers}\x1b[0m\x1b[38;2;147;197;253m`;
+	}
+	if (hive.reviewers) {
+		stats += ` \x1b[38;2;59;130;246m| \x1b[38;2;147;197;253mReviewers: \x1b[1m\x1b[38;2;255;255;255m${hive.reviewers}\x1b[0m\x1b[38;2;147;197;253m`;
+	}
+	const date = new Date(now);
+	const hours = String(date.getHours()).padStart(2, "0");
+	const minutes = String(date.getMinutes()).padStart(2, "0");
+	const timeStr = `\x1b[38;2;59;130;246m| \x1b[38;2;191;219;254m${hours}:${minutes}\x1b[0m`;
+
+	const bar = `${bluefinBadge}${reviewBadge}${hiveBadge} ${activeTaskStr}${stats} ${timeStr}`;
+	return truncateToWidth(bar, width);
+}
+
+/**
  * Age of the queue data, shown only once it is old enough to matter.
  *
  * A live "3.1s ago" counter forces a repaint every tick and tells you nothing you
@@ -211,6 +254,7 @@ export function renderRail(
 	if (live) rows.push(truncateToWidth(live, width));
 
 	rows.push(keymapBar(painter, keys, width));
+	rows.push(tmuxReviewStatusBar(mode, painter, width, now));
 	return rows;
 }
 /**

@@ -443,6 +443,10 @@ if Static is not None:
             badge.update(render_state_badge(self.projection, color=self.use_color))
             for name, content in sections.items():
                 self.query_one(f"#{name}-section Static", Static).update(content)
+            if self.projection.issue != UNKNOWN and self.projection.repository != UNKNOWN:
+                self.title = display_title(f"WORKER: #{self.projection.issue} ({self.projection.repository})")
+            elif self.projection.state != UNKNOWN:
+                self.title = display_title(f"WORKER: {self.projection.state.upper()}")
 
 
 def main() -> int:

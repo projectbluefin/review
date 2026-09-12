@@ -108,6 +108,7 @@ let hub = process.env.HIVE_HUB || "";
 let taskFile = process.env.HIVE_TASK_FILE || "/tmp/contributor-task.json";
 
 let activeTaskStr = "";
+let activeTaskTitle = "";
 if (fs.existsSync(taskFile)) {
   try {
     const t = JSON.parse(fs.readFileSync(taskFile, "utf8"));
@@ -115,6 +116,7 @@ if (fs.existsSync(taskFile)) {
       const repo = t.repo ? t.repo.split("/").pop() : "";
       const kind = t.kind === "pull_request" ? "PR" : (t.kind ? t.kind.toUpperCase() : "TASK");
       activeTaskStr = `#[fg=#60a5fa]Task: #[bold,fg=#ffffff]${kind} #${t.number}#[nobold,fg=#93c5fd] (${repo}) #[fg=#3b82f6]| `;
+      activeTaskTitle = `${kind} #${t.number} (${repo})${t.title ? " " + String(t.title).replace(/["`$\\]/g, "") : ""}`;
     }
   } catch (_) {}
 }
@@ -157,7 +159,8 @@ const req = reqMod.get(statusUrl, { headers, timeout: 5000 }, (res) => {
       right += ` #[fg=#3b82f6]| #[fg=#bfdbfe]%H:%M #[default]`;
 
       const { execSync } = require("child_process");
-      execSync(`tmux set-option -t contributor status on && tmux set-option -t contributor status-style "bg=#1e293b,fg=#93c5fd" && tmux set-option -t contributor status-left-length 70 && tmux set-option -t contributor status-left "${left}" && tmux set-option -t contributor status-right-length 140 && tmux set-option -t contributor status-right "${right}"`, { stdio: "ignore" });
+      const termTitle = activeTaskTitle ? `contribute · ${activeTaskTitle}` : "contribute · idle";
+      execSync(`tmux set-option -t contributor status on && tmux set-option -t contributor status-style "bg=#1e293b,fg=#93c5fd" && tmux set-option -t contributor status-left-length 70 && tmux set-option -t contributor status-left "${left}" && tmux set-option -t contributor status-right-length 140 && tmux set-option -t contributor status-right "${right}" && tmux set-option -t contributor set-titles on && tmux set-option -t contributor set-titles-string "${termTitle}"`, { stdio: "ignore" });
     } catch (_) {}
   });
 });
