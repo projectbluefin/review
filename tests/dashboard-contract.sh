@@ -38,6 +38,9 @@ python3 "$repo_root/tests/review_engine_contract.py"
 python3 "$repo_root/tests/review_transport_contract.py"
 python3 "$repo_root/tests/review_deadline_contract.py"
 python3 "$repo_root/tests/capacity_contract.py"
+# scripts/benchmark-capacity.py is opt-in and never runs in CI; this contract
+# runs it at a one-unit workload so its statistics and table cannot drift.
+python3 "$repo_root/tests/benchmark_capacity_contract.py"
 python3 "$repo_root/tests/model_profiles_contract.py"
 python3 "$repo_root/tests/run_state_contract.py"
 python3 "$repo_root/tests/gh_client_contract.py"
