@@ -53,7 +53,7 @@ help_out="$(PATH="$scratch/bin:$PATH" OMP_ARGS="$scratch/omp-args-help" "$review
 
 # --- pr mode: check the pull request out and review it against its base -------
 # The dashboard's review key shells out to exactly this path, so it is the one
-# place a pull request becomes a diff for Goose to judge.
+# place a pull request becomes a diff for the reviewer agent to judge.
 mkdir -p "$scratch/workspace/alpha"
 git -C "$scratch/workspace/alpha" init --quiet
 git -C "$scratch/workspace/alpha" config user.email t@example.com
@@ -302,7 +302,7 @@ set -e
 [[ "$malformed_status" != *'The Review Draft above is for you to judge'* ]]
 
 # TERM requests adapter cancellation before the launcher cleans up. The
-# adapter-created process group must not leave its PATH-local Goose behind.
+# adapter-created process group must not leave its child processes behind.
 cat >"$scratch/bin/omp" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$$" >"${OMP_PID_FILE:?}"
@@ -331,7 +331,7 @@ if ps -p "$omp_pid" -o comm= 2>/dev/null | grep -qx 'sleep'; then
 fi
 
 # The shipped local-range path must forward TERM to the adapter too. The
-# adapter owns the Goose process group and must terminate and wait for it.
+# adapter owns the process group and must terminate and wait for it.
 cat >"$scratch/bin/omp" <<'EOF'
 #!/usr/bin/env bash
 printf '%s %s\n' "$$" "$(ps -o pgid= -p $$ | tr -d ' ')" >"${OMP_PID_FILE:?}"
@@ -553,7 +553,7 @@ argv="$(tr '\0' '\n' <"$scratch/argv")"
 [[ "$argv" != *'ORG_REVIEW_REFERENCE_MARKER'* ]]
 
 # Hive's knowledge export is named explicitly so a review can reach the hub's
-# knowledge base without relying on Goose context-file inheritance.
+# knowledge base directly.
 printf 'HIVE_KB\n' >"$scratch/agent.md"
 BLUEFIN_REVIEW_SKILLS_ROOT="$scratch/skills" \
   BLUEFIN_REVIEW_KNOWLEDGE_FILE="$scratch/agent.md" \

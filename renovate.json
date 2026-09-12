@@ -42,12 +42,12 @@
       "platformAutomerge": true
     },
     {
-      "description": "Keep the FSDK lab-runner base image digest in image/Containerfile current",
+      "description": "Keep the FSDK base image digest current",
       "matchManagers": [
         "dockerfile"
       ],
       "matchPackageNames": [
-        "ghcr.io/projectbluefin/lab-runner"
+        "ghcr.io/projectbluefin/base"
       ],
       "pinDigests": true
     }

@@ -1,9 +1,7 @@
 # review contributor image.
 #
-# This image is self-owned: it derives from Project Bluefin's FSDK lab-runner
-# base and layers in only the runtime pieces review actually needs for
-# contributor mode. We still reuse Hive's contributor runtime scripts, but we do
-# not inherit the whole Debian-based contributor container any more.
+# This image is self-owned: it derives from Project Bluefin's authentic FSDK base
+# and BuildStream-carved runtimes, not the lab-runner image.
 #
 # The base is pinned as tag *and* digest, and needs both. The digest is what
 # builds and what tests/image-contract.sh asserts, so the base is immutable.
@@ -12,7 +10,8 @@
 # was never once offered an update and silently froze. A pin no tool can track
 # is not a stricter pin, it is a stale one. The reference below is the only
 # source of truth for which base this is; do not restate its value here.
-ARG FSDK_RUNNER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:2c07034a167fec3296605ab1b1287f6c2d14f90d745b7686fab3e19e67fcb899
+# renovate: datasource=docker depName=ghcr.io/projectbluefin/base
+ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08@sha256:1e5b5437116d78176d68a05e053ac750ca11b36c7da46bfa85d48c184201414c
 # Kept equal to justfile's hive_commit: host setup and the
 # image runtime use the same contributor relay protocol revision.
 ARG HIVE_COMMIT=ebd5db6adf95c2eceb77c1a4376f137af0836d4b
@@ -37,7 +36,7 @@ ARG RIPGREP_X86_64_SHA256=33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a58
 ARG RIPGREP_AARCH64_SHA256=800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915
 ARG SKILLS_COMMIT=b6f5c370cca19398fbbbe43a0182dca6783a80cb
 
-FROM ${FSDK_RUNNER_IMAGE}
+FROM ${FSDK_BASE_IMAGE}
 
 USER root
 

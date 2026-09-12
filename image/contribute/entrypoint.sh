@@ -151,6 +151,8 @@ const req = reqMod.get(statusUrl, { headers, timeout: 5000 }, (res) => {
       let right = `${activeTaskStr}#[fg=#93c5fd]Issues: #[bold,fg=#ffffff]${issues}#[nobold,fg=#93c5fd] #[fg=#3b82f6]| #[fg=#93c5fd]PRs: #[bold,fg=#ffffff]${prs}#[nobold,fg=#93c5fd]`;
       if (workers) {
         right += ` #[fg=#3b82f6]| #[fg=#93c5fd]Workers: #[bold,fg=#ffffff]${workers}#[nobold,fg=#93c5fd]`;
+        const reviewers = `${pool.active !== undefined ? pool.active : 0}/${pool.registered || 0}`;
+        right += ` #[fg=#3b82f6]| #[fg=#93c5fd]Reviewers: #[bold,fg=#ffffff]${reviewers}#[nobold,fg=#93c5fd]`;
       }
       right += ` #[fg=#3b82f6]| #[fg=#bfdbfe]%H:%M #[default]`;
 

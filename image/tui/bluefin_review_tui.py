@@ -1938,7 +1938,7 @@ def classify_routability(stop: Stop, record: RunRecord | None = None) -> str | N
                 if isinstance(r, dict):
                     author = r.get("author") or {}
                     login = author.get("login") if isinstance(author, dict) else str(author)
-                    if login and not (login.endswith("[bot]") or login.endswith("-bot") or login in {"goose", "github-actions", "copilot"}):
+                    if login and not (login.endswith("[bot]") or login.endswith("-bot") or login in {"github-actions", "copilot"}):
                         st = str(r.get("state") or "").upper()
                         if st in {"APPROVED", "CHANGES_REQUESTED", "COMMENTED"}:
                             has_human = True
@@ -4838,7 +4838,7 @@ class ReviewDashboard(App):
         return (
             lowered.endswith("[bot]")
             or lowered.endswith("-bot")
-            or lowered in {"goose", "github-actions", "copilot"}
+            or lowered in {"github-actions", "copilot"}
         )
 
     @staticmethod

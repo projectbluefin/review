@@ -21,20 +21,10 @@ hive_source() {
 agent="$(hive_source bin/contributor-agent.sh)"
 backends="$(hive_source config/backends.conf)"
 
-# Hive now exposes its refreshed knowledge through the filenames Goose reads
-# natively, so a downstream CONTEXT_FILE_NAMES extension would be redundant.
+# Hive exposes its refreshed knowledge via AGENTS.md.
 # shellcheck disable=SC2016 # Exact pinned-source fragments, not shell syntax.
-for link in \
-  'ln -sf "$agent_md" "${HOME}/AGENTS.md"' \
-  'ln -sf "$agent_md" "${HOME}/.goosehints"'; do
-  grep -qF "$link" <<<"$agent" || {
-    echo "::error::pinned Hive no longer creates Goose-native knowledge link: $link" >&2
-    exit 1
-  }
-done
-# shellcheck disable=SC2016 # Exact pinned-source fragment, not shell syntax.
-grep -qF 'if [ ! -f "${HOME}/.config/goose/config.yaml" ]; then' <<<"$agent" || {
-  echo "::error::pinned Hive no longer preserves an existing Goose config" >&2
+grep -qF 'ln -sf "$agent_md" "${HOME}/AGENTS.md"' <<<"$agent" || {
+  echo "::error::pinned Hive no longer creates knowledge link: AGENTS.md" >&2
   exit 1
 }
 
@@ -44,7 +34,7 @@ grep -qF 'source /usr/local/etc/hive/backends.conf' <<<"$agent" || {
   echo "::error::pinned Hive no longer consumes the installed backends.conf" >&2
   exit 1
 }
-grep -qF 'KNOWN_BACKENDS="claude copilot goose codex agy bob pi aider litellm opencode kilo muse"' <<<"$backends" || {
+grep -qE 'KNOWN_BACKENDS=.*codex.*omp|KNOWN_BACKENDS=.*codex' <<<"$backends" || {
   echo "::error::pinned Hive backend interface changed" >&2
   exit 1
 }

@@ -4311,10 +4311,8 @@ async def main() -> int:
         f"an OMP round must carry its model explicitly, got {omp_env}",
     )
     check(
-        "GOOSE_MODEL" not in codex_env
-        and codex_env.get("BLUEFIN_REVIEW_BACKEND") == "codex",
-        "a Codex round must not be handed Goose variables that do nothing, "
-        f"got {codex_env}",
+        codex_env.get("BLUEFIN_REVIEW_BACKEND") == "codex",
+        f"expected codex backend, got {codex_env}",
     )
     override = os.environ.pop("BLUEFIN_REVIEW_LANDING_COMMAND", "")
     codex_argv = tui.landing.final_command(
@@ -7650,9 +7648,8 @@ async def main() -> int:
     )
 
     # ── [x] actually stops a review ──────────────────────────────────────
-    # The engine is a shell that runs Goose, which runs a subprocess per check.
-    # Signalling only the shell leaves those children alive holding the pipe
-    # open, and the screen would wait on them forever. This stub reproduces
+    # The engine runs a subprocess per check. Signalling only the launcher
+    # leaves children alive holding the pipe open, and the screen would wait forever.
     # that shape: a grandchild that survives its parent and ignores SIGTERM.
     marker = workdir / "grandchild-alive"
     write_stub(

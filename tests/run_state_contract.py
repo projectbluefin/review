@@ -162,7 +162,7 @@ class RunStateContractTests(unittest.TestCase):
                     "pull_request": 2,
                     "base_sha": _sha("3"),
                     "head_sha": _sha("4"),
-                    "backend": "goose",
+                    "backend": "legacy-backend",
                     "model": "gpt-4o",
                     "effort": "high",
                     "check_scope_version": "checks-v1",

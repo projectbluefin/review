@@ -164,7 +164,7 @@ class SlayStateMachineContractTests(unittest.TestCase):
         # Bot reviews only
         bot_live = {
             "reviews": [
-                {"author": {"login": "goose"}, "state": "APPROVED"},
+                {"author": {"login": "ci-runner[bot]"}, "state": "APPROVED"},
                 {"author": {"login": "github-actions[bot]"}, "state": "APPROVED"},
                 {"author": {"login": "renovate-bot"}, "state": "COMMENTED"},
             ]

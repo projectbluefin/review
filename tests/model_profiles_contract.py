@@ -92,10 +92,6 @@ class ModelProfilesContractTests(unittest.TestCase):
         self.assertEqual(codex_env["BLUEFIN_REVIEW_BACKEND"], "codex")
         self.assertEqual(codex_env["BLUEFIN_REVIEW_FINAL_MODEL"], "claude-opus-5")
         self.assertEqual(codex_env["BLUEFIN_REVIEW_FINAL_EFFORT"], "high")
-        self.assertNotIn("GOOSE_MODEL", codex_env)
-        self.assertNotIn("GOOSE_THINKING_EFFORT", codex_env)
-        self.assertNotIn("GOOSE_MODEL", omp_env)
-        self.assertNotIn("GOOSE_THINKING_EFFORT", omp_env)
     def test_high_assurance_and_cheap_classification(self):
         self.assertTrue(is_high_assurance(SOL_TRIPLE))
         self.assertTrue(is_high_assurance(OPUS_TRIPLE))
