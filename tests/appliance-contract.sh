@@ -131,6 +131,14 @@ grep -qE '^[0-9]+$' image/appliance/REVISION || fail "image/appliance/REVISION m
 grep -qF '!scripts/generate-appliance-sbom.py' .dockerignore ||
   fail ".dockerignore must let the appliance SBOM generator into the build context"
 
+# The generator that fills that SBOM. Its own contract runs here rather than as
+# a separate validate.yml step: the document it writes is part of this image's
+# contract, and the runtime half below only reads it when --image is given.
+python3_contract_output="$(python3 tests/appliance_sbom_contract.py 2>&1)" || {
+  printf '%s\n' "$python3_contract_output" >&2
+  fail "tests/appliance_sbom_contract.py failed"
+}
+
 require .github/workflows/publish-appliance.yml \
   'scripts/review-appliance-version.sh' \
   'tests/appliance-contract.sh' \
