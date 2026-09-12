@@ -29,6 +29,7 @@ it scopes every task, so read it alongside the matching skill.
 | Run or evaluate automated final batch reviews | [`final-review.md`](skills/final-review.md) |
 | Control review-scheduler admission, capacity, and deadlines | [`review-scheduler.md`](skills/review-scheduler.md) |
 | Maintain the review-exec UDS broker and typed review jobs | [`review-exec-broker.md`](skills/review-exec-broker.md) |
+| Maintain the bounded local workload engine and protocol | [`local-engine.md`](skills/local-engine.md) |
 
 `docs/skills/index.json` is the machine-readable catalog, generated from the
 frontmatter in each skill file. When changing a skill, regenerate it with

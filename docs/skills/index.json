@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-09",
+  "generated_at": "2026-09-12",
   "schema_version": "1.0",
   "skills": [
     {
@@ -231,6 +231,25 @@
       "version": "3.8",
       "last_updated": "2026-09-08",
       "doc_type": "runbook"
+    },
+    {
+      "id": "local-engine",
+      "name": "local-engine",
+      "one_line_purpose": "Maintain the bounded local Review workload engine contract.",
+      "entry_point": "docs/skills/local-engine.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "review",
+        "engine",
+        "grpc",
+        "lifecycle",
+        "sandbox"
+      ],
+      "description": "Maintains the versioned engine protocol, physical job lifecycle, fixture executors, and terminal receipts without duplicating ReviewRun or harness authority.",
+      "version": "1.0",
+      "last_updated": "2026-09-12",
+      "doc_type": "procedure"
     },
     {
       "id": "pr-labels",

@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package review.engine.v1;
+
+option go_package = "github.com/projectbluefin/review/engine/gen/review/engine/v1;enginev1";
+
+// ReviewEngine owns one bounded physical workload. It is not a general shell.
+service ReviewEngine {
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
+  rpc StartJob(StartJobRequest) returns (StartJobResponse);
+  rpc WatchJob(WatchJobRequest) returns (stream JobEvent);
+  rpc GetJob(GetJobRequest) returns (JobSnapshot);
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+  rpc ListArtifacts(ListArtifactsRequest) returns (ListArtifactsResponse);
+  rpc ReadArtifact(ReadArtifactRequest) returns (stream ArtifactChunk);
+}
+
+message ProtocolVersion { uint32 major = 1; uint32 minor = 2; }
+
+message GetCapabilitiesRequest { ProtocolVersion client_protocol = 1; }
+message GetCapabilitiesResponse {
+  string engine_version = 1;
+  ProtocolVersion protocol = 2;
+  repeated string executor_ids = 3;
+  repeated string terminal_states = 4;
+  uint64 max_output_bytes = 5;
+  uint64 max_artifact_bytes = 6;
+  bool runtime_available = 7;
+}
+
+enum NetworkPolicy { NETWORK_POLICY_UNSPECIFIED = 0; NETWORK_POLICY_NONE = 1; NETWORK_POLICY_RESTRICTED = 2; }
+enum JobState {
+  JOB_STATE_UNSPECIFIED = 0; JOB_STATE_ACCEPTED = 1; JOB_STATE_PREPARING = 2;
+  JOB_STATE_RUNNING = 3; JOB_STATE_STOPPING = 4; JOB_STATE_FINALIZING = 5;
+  JOB_STATE_SUCCEEDED = 6; JOB_STATE_FAILED = 7; JOB_STATE_CANCELLED = 8; JOB_STATE_TIMED_OUT = 9;
+}
+enum CleanupState { CLEANUP_STATE_UNSPECIFIED = 0; CLEANUP_STATE_COMPLETE = 1; CLEANUP_STATE_FAILED = 2; CLEANUP_STATE_UNVERIFIED = 3; }
+enum EventKind {
+  EVENT_KIND_UNSPECIFIED = 0; EVENT_KIND_STATE = 1; EVENT_KIND_STDOUT = 2;
+  EVENT_KIND_STDERR = 3; EVENT_KIND_PROGRESS = 4; EVENT_KIND_CANCELLATION = 5;
+  EVENT_KIND_TIMEOUT = 6; EVENT_KIND_OUTPUT_TRUNCATED = 7; EVENT_KIND_TERMINAL_RECEIPT = 8;
+}
+
+message ResourceLimits {
+  uint32 cpu_millis = 1; uint64 memory_bytes = 2; uint64 runtime_millis = 3;
+  uint64 output_bytes = 4; uint64 artifact_bytes = 5;
+}
+message CredentialHandle { string handle = 1; string purpose = 2; }
+message InputArtifact { string name = 1; string media_type = 2; bytes digest_sha256 = 3; uint64 size = 4; }
+message JobSpec {
+  string logical_review_run_id = 1;
+  string workload_kind = 2;
+  string executor_id = 3;
+  string repository = 4;
+  string source_revision = 5;
+  string image = 6;
+  repeated InputArtifact inputs = 7;
+  string harness = 8;
+  string model = 9;
+  string effort = 10;
+  NetworkPolicy network_policy = 11;
+  ResourceLimits limits = 12;
+  repeated CredentialHandle credentials = 13;
+  ProtocolVersion client_protocol = 14;
+  repeated string verification_steps = 15;
+}
+message StartJobRequest { string request_id = 1; JobSpec spec = 2; }
+message StartJobResponse { string job_id = 1; bool existing = 2; }
+message WatchJobRequest { string job_id = 1; uint64 after_sequence = 2; }
+message GetJobRequest { string job_id = 1; }
+message CancelJobRequest { string job_id = 1; string actor = 2; string reason = 3; }
+message CancelJobResponse { string job_id = 1; bool accepted = 2; JobState state = 3; }
+
+message JobEvent {
+  string job_id = 1; uint64 sequence = 2; int64 timestamp_unix_millis = 3;
+  uint64 elapsed_millis = 4; EventKind kind = 5; JobState state = 6;
+  bytes payload = 7; string source_revision = 8; string image = 9; string executor_id = 10;
+}
+message TerminalReceipt {
+  string job_id = 1; string request_id = 2; string logical_review_run_id = 3;
+  string repository = 4; string source_revision = 5; string image = 6; string executor_id = 7;
+  string harness = 8; string model = 9; string effort = 10;
+  string client_version = 11; string engine_version = 12; ProtocolVersion protocol = 13;
+  JobState terminal_state = 14; string reason = 15; CleanupState cleanup = 16;
+  int64 started_unix_millis = 17; int64 ended_unix_millis = 18; bool output_truncated = 19;
+  repeated CredentialHandle credentials = 20; ResourceLimits requested_limits = 21; ResourceLimits effective_limits = 22;
+}
+message JobSnapshot { string job_id = 1; JobState state = 2; uint64 last_sequence = 3; TerminalReceipt receipt = 4; }
+
+message Artifact { string name = 1; string media_type = 2; uint64 size = 3; bytes digest_sha256 = 4; bool complete = 5; string trust_class = 6; }
+message ListArtifactsRequest { string job_id = 1; }
+message ListArtifactsResponse { repeated Artifact artifacts = 1; }
+message ReadArtifactRequest { string job_id = 1; string name = 2; uint64 offset = 3; uint64 max_bytes = 4; }
+message ArtifactChunk { uint64 offset = 1; bytes data = 2; bool eof = 3; }
