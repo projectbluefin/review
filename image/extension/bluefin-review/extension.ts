@@ -233,7 +233,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 	const syncStatus = (ctx: CtxLike) => {
 		if (!ctx.hasUI) return;
-		ctx.ui.setStatus("bluefin_queue", statusSegment(mode, themePainter(ctx.ui.theme), Date.now()));
+		if (dashboardOpen) {
+			ctx.ui.setStatus("bluefin_queue", undefined);
+		} else {
+			ctx.ui.setStatus("bluefin_queue", statusSegment(mode, themePainter(ctx.ui.theme), Date.now()));
+		}
 		const activeItem = mode.selected();
 		if (activeItem) {
 			const kind = activeItem.type === "pr" ? "PR" : "ISSUE";
@@ -291,7 +295,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		return true;
 	};
 
-	const dispatch = async (ctx: CtxLike, action: DashboardAction): Promise<void> => {
+	const dispatch = async (ctx: CtxLike, action: DashboardAction, options?: { deliverAs?: "steer" | "followUp" }): Promise<void> => {
 		if (action.kind === "close") {
 			autoReopenDashboard = false;
 			return;
@@ -313,9 +317,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const label = count > 1 ? `${action.kind}: ${count} items` : `${action.kind}: ${action.item.repo}#${action.item.id}`;
 		ctx.ui.notify(action.kind === "snapshot" ? "Queuing snapshot build…" : label, "info");
 		activeCtx = ctx;
-		autoReopenDashboard = true;
+		autoReopenDashboard = !autoslayActive;
 		mode.clearSelected();
-		pi.sendUserMessage(prompt);
+		pi.sendUserMessage(prompt, options?.deliverAs ? { deliverAs: options.deliverAs } : undefined);
 	};
 	const openLeaderboard = async (ctx: CtxLike) => {
 		if (!ctx.hasUI) return;
@@ -486,7 +490,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			"bluefin-rail",
 			(hostTui: unknown, theme: unknown) => {
 				tui = hostTui as { requestRender(): void };
-				return new ReviewRail(tui, themePainter(theme as UiLike["theme"]), mode, RAIL_KEYS);
+				return new ReviewRail(tui, themePainter(theme as UiLike["theme"]), mode, RAIL_KEYS, () => dashboardOpen);
 			},
 			{ placement: "belowEditor" },
 		);
@@ -546,7 +550,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			if (nextBatch.length > 0) {
 				const items = nextBatch.slice(0, BATCH_LIMIT);
 				const action: DashboardAction = { kind: "slay", item: items[0]!, items: items.length > 1 ? items : undefined };
-				void dispatch(ctxToUse, action);
+				void dispatch(ctxToUse, action, { deliverAs: "followUp" });
 				return;
 			}
 			autoslayActive = false;
@@ -558,6 +562,21 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			if (mode.visibleItems().length > 0) {
 				void openDashboard(ctxToUse);
 			}
+		}
+	});
+	pi.on("agent_settled", async (_event, eventCtx) => {
+		const ctxToUse = (eventCtx as CtxLike | undefined) ?? activeCtx;
+		if (autoslayActive && ctxToUse) {
+			await refreshQueue(ctxToUse);
+			const nextBatch = mode.slayableItems();
+			if (nextBatch.length > 0) {
+				const items = nextBatch.slice(0, BATCH_LIMIT);
+				const action: DashboardAction = { kind: "slay", item: items[0]!, items: items.length > 1 ? items : undefined };
+				void dispatch(ctxToUse, action);
+				return;
+			}
+			autoslayActive = false;
+			if (ctxToUse.hasUI) ctxToUse.ui.notify("Autoslay completed: queue fully drained", "info");
 		}
 	});
 	pi.on("tool_execution_start", (event) => {

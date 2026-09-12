@@ -418,12 +418,14 @@ export class ReviewRail {
 	private readonly painter: Painter;
 	private readonly mode: ReviewMode;
 	private readonly keys: readonly RailKey[];
+	private readonly isHidden?: () => boolean;
 
-	constructor(tui: TuiLike, painter: Painter, mode: ReviewMode, keys: readonly RailKey[]) {
+	constructor(tui: TuiLike, painter: Painter, mode: ReviewMode, keys: readonly RailKey[], isHidden?: () => boolean) {
 		this.tui = tui;
 		this.painter = painter;
 		this.mode = mode;
 		this.keys = keys;
+		this.isHidden = isHidden;
 	}
 
 	private shouldAnimate(): boolean {
@@ -454,6 +456,7 @@ export class ReviewRail {
 	}
 
 	render(width: number): string[] {
+		if (this.isHidden?.()) return [];
 		this.syncTimer();
 		const now = Date.now();
 		const rows = renderRail(this.mode, this.painter, width, now, this.frame, this.keys);
