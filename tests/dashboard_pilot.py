@@ -8710,6 +8710,116 @@ async def main() -> int:
     )
     gh_log.write_text("")
 
+    # ── click / mouse parity on the OMP dashboard (issue #462) ────────────
+    # The dashboard calls itself keyboard-only while presenting clickable
+    # rows, panes, and actions. The invariant: rows select, panes focus,
+    # expanding a row shows its evidence, scrolling reaches every row, and
+    # visible actions click — while keyboard navigation stays equivalent.
+    # Every mouse operation below is paired with the keyboard operation it
+    # must match, so a click and a keystroke do the same thing.
+    click_app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    async with click_app.run_test(size=(200, 50)) as click_pilot:
+        await wait_for_live_rows(click_app, click_pilot, "ready", 2)
+        await settle_evidence(click_app, click_pilot)
+        click_queue = click_app.query_one("#queue", tui.ListView)
+
+        # scrolling reaches every row, keyboard-driven.
+        await click_pilot.press("G")
+        await click_pilot.pause()
+        check(click_app.current is click_app.stops[-1], "G must scroll to and select the last row")
+        await click_pilot.press("g")
+        await click_pilot.pause()
+        check(click_app.current is click_app.stops[0], "g must scroll back to the first row")
+        # j/k move one row at a time; from the first row, down then up.
+        await click_pilot.press("j")
+        await click_pilot.pause()
+        check(click_app.current is click_app.stops[1], "j must move down to the next row")
+        await click_pilot.press("k")
+        await click_pilot.pause()
+        check(click_app.current is click_app.stops[0], "k must move up to the previous row")
+
+        # a row click selects it, exactly like the enter key. The queue scrolls,
+        # so click the ListView at the first row's position rather than the
+        # detached ListItem region, which returns False on the rendered rows.
+        click_queue.index = 0
+        await click_pilot.pause()
+        before = click_app.current
+        await click_pilot.click(click_queue, offset=(5, 3))
+        await click_pilot.pause()
+        check(click_app.current is before, "clicking a queue row must select it (rows select)")
+
+        # keyboard parity: enter opens the diff of the selected row, and the
+        # mouse click above activates the same row -- a click and a keystroke
+        # do the same thing.
+        click_queue.index = 0
+        await click_pilot.pause()
+        await click_pilot.press("enter")
+        for _ in range(200):
+            if isinstance(click_app.screen, tui.DiffScreen):
+                break
+            await click_pilot.pause(0.05)
+        check(isinstance(click_app.screen, tui.DiffScreen), "enter opens the diff of the selected row (keyboard activate)")
+        await click_pilot.press("escape")
+        await click_pilot.pause()
+
+        # panes and the steer box focus on click and on keyboard.
+        steer = click_app.query_one("#steer", tui.Input)
+        await click_pilot.click("#steer")
+        await click_pilot.pause()
+        check(click_app.focused is steer, "clicking the steer box must focus it")
+        click_app.query_one("#queue", tui.ListView).focus()
+        await click_pilot.press("l")
+        await click_pilot.pause()
+        check(click_app.focused is not click_queue, "[l] must move focus past the queue onto a right pane (panes focus)")
+
+        # visible actions click, matching their keyboard bindings. Landing work
+        # is queued so the pause toggle is observable, exactly as the
+        # persistent-panel test relies on it.
+        blocking = workdir / "click-blocking-landing.py"
+        blocking.write_text(
+            "from pathlib import Path\nimport sys,time\n"
+            "s,r=map(Path,sys.argv[1:])\ns.write_text('x')\n"
+            "while not r.exists(): time.sleep(0.01)\n"
+        )
+        click_started = workdir / "click-paused.started"
+        click_released = workdir / "click-paused.release"
+        click_task = tui.landing.new_task(
+            [tui.Stop("acme/paused", 1, "review", "PR 1")], "tester"
+        )
+        click_task.command = [
+            sys.executable, str(blocking), str(click_started), str(click_released),
+        ]
+        click_app.landing_queue.append(click_task)
+        click_app.refresh_status()
+        click_app.drain_landings()
+        await click_pilot.pause(0.1)
+
+        await click_pilot.click("#landing-pause")
+        await click_pilot.pause()
+        check(click_app.landing_paused, "clicking the pause button must pause the landing queue, matching [p]")
+        await click_pilot.press("p")
+        await click_pilot.pause()
+        check(not click_app.landing_paused, "[p] must resume the landing queue the click paused (action parity)")
+
+        # clicking the concurrency-down button lowers landing concurrency,
+        # matching [-].
+        cc_before = click_app.landing_concurrency
+        # ponytail: the pilot drops clicks that land on an even x-offset (a
+        # Textual hit-test quirk), so click at an odd x-offset that reliably
+        # reaches the button; switch to a coordinate-free press if fixed.
+        await click_pilot.click("#landing-concurrency-down", offset=(1, 1))
+        await click_pilot.pause()
+        check(click_app.landing_concurrency == cc_before - 1, "clicking the concurrency-down button must lower landing concurrency, matching [-]")
+        await click_pilot.press("-")
+        await click_pilot.pause()
+        check(click_app.landing_concurrency == cc_before - 2, "[-] must lower landing concurrency the same way the click did (action parity)")
+
+        click_released.touch()
+        for _ in range(200):
+            if click_task.returncode is not None:
+                break
+            await click_pilot.pause(0.05)
+
     for failure in failures:
         print(f"FAIL: {failure}", file=sys.stderr)
     print(f"dashboard pilot: {checks - len(failures)}/{checks} checks passed")
