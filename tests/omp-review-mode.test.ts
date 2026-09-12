@@ -8,7 +8,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -1865,4 +1865,170 @@ test("a filtered slice is selected and dispatched in one wave", (t) => {
 	assert.match(prompt, /capped at a maximum of 7 concurrent subagents/);
 	assert.match(prompt, /k3-final-review/);
 	assert.match(prompt, /lands them all in one PR per repository/);
+});
+
+// Bounded adaptive tool fallback: the queue is two sources, one truth. Search
+// decides what is nearby; the by-name lookup repairs what Hive requires and is
+// outside the window; the shortfall is reported instead of a row that merely
+// looks complete. From the repaired queue the agent reaches a typed tool, reads
+// the checks and the recorded state, and stops at the merge line.
+test("bounded fallback repairs by name, observes checks and state, and never merges", async (t) => {
+	const root = stateTree();
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+
+	const listState = () =>
+		(readdirSync(root, { recursive: true }) as string[]).sort();
+	const before = listState();
+
+	// Search only surfaces the one nearby PR. Hive's blocked item sits outside the
+	// recency window and can only arrive by the native by-name lookup; a third item
+	// is closed, so it is a real shortfall, not a missing row.
+	const byName = {
+		"projectbluefin/review#936": {
+			number: 936,
+			title: "hold: gate the release behind soak",
+			url: "https://github.com/projectbluefin/review/issues/936",
+			updatedAt: new Date(NOW - 5 * 24 * 3600 * 1000).toISOString(),
+			isDraft: false,
+			mergeable: "MERGEABLE",
+			reviewDecision: "REVIEW_REQUIRED",
+			additions: 0,
+			deletions: 0,
+			author: { login: "castrojo" },
+			repository: { nameWithOwner: "projectbluefin/review" },
+			labels: { nodes: [{ name: "hold" }, { name: "review_required" }] },
+			commits: { nodes: [{ commit: { statusCheckRollup: { state: "PENDING" } } }] },
+		},
+	};
+
+	const fetchImpl = async (url, init) => {
+		const target = String(url);
+		if (target.includes("/graphql")) {
+			const body = JSON.parse(String(init?.body ?? "{}"));
+			if (body.variables?.search) {
+				return {
+					ok: true,
+					status: 200,
+					statusText: "OK",
+					json: async () => ({
+						data: {
+							search: {
+								pageInfo: { hasNextPage: false, endCursor: null },
+								nodes: [
+									{
+										number: 42,
+										title: "fix(launcher): resolve HIVE_HUB before mutating",
+										url: "https://github.com/projectbluefin/review/pull/42",
+										updatedAt: new Date(NOW - 1000).toISOString(),
+										isDraft: false,
+										mergeable: "MERGEABLE",
+										reviewDecision: "REVIEW_REQUIRED",
+										additions: 42,
+										deletions: 7,
+										changedFiles: 3,
+										author: { login: "jorge" },
+										repository: { nameWithOwner: "projectbluefin/review" },
+										labels: { nodes: [{ name: "launcher" }] },
+										commits: { nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }] },
+									},
+								],
+							},
+						},
+					}),
+				};
+			}
+			// Native gh repair: one aliased by-name lookup for what search missed.
+			const data = {};
+			const lookup = /(\w+): repository\(owner: "([^"]+)", name: "([^"]+)"\)\s*\{\s*issueOrPullRequest\(number: (\d+)\)/g;
+			for (const m of body.query.matchAll(lookup)) {
+				const w = m[1], owner = m[2], name = m[3], number = m[4];
+				data[w] = { issueOrPullRequest: byName[`${owner}/${name}#${number}`] ?? null };
+			}
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
+		}
+		if (target.includes("/api/v1/status")) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ hub: "online", actionable_items: 12 }) };
+		}
+		if (target.includes("/api/contribute/queue")) {
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => ({
+					queue: [
+						{ repo: "projectbluefin/review", number: 42, title: "fix(launcher)", url: "https://github.com/projectbluefin/review/pull/42", updatedAt: new Date(NOW - 1000).toISOString(), author: { login: "jorge" }, repository: { nameWithOwner: "projectbluefin/review" }, labels: { nodes: [] }, closed: false },
+						{ repo: "projectbluefin/review", number: 936, title: "hold: gate the release", url: "https://github.com/projectbluefin/review/issues/936", updatedAt: new Date(NOW - 5 * 24 * 3600 * 1000).toISOString(), author: { login: "castrojo" }, repository: { nameWithOwner: "projectbluefin/review" }, labels: { nodes: [] }, closed: false },
+						{ repo: "projectbluefin/review", number: 470, title: "ship the launcher", url: "https://github.com/projectbluefin/review/pull/470", updatedAt: new Date(NOW - 2 * 24 * 3600 * 1000).toISOString(), author: { login: "ada" }, repository: { nameWithOwner: "projectbluefin/review" }, labels: { nodes: [] }, closed: true },
+					],
+				}),
+			};
+		}
+		if (target.includes("/api/contribute/triage") || target.includes("/api/v1/contributors")) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ groups: [], contributors: [] }) };
+		}
+		if (target.includes("/pulls/")) {
+			// The available typed tool, reached natively — no browser in the path.
+			return { ok: true, status: 200, statusText: "OK", json: async () => [
+				{ filename: "image/entrypoint.sh", status: "modified", additions: 3, deletions: 1, patch: "@@ -1 +1 @@\n-old\n+new" },
+			] };
+		}
+		return { ok: true, status: 404, statusText: "Not Found", json: async () => ({}) };
+	};
+
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, {
+		org: "projectbluefin",
+		fetchImpl: fetchImpl as unknown as typeof fetch,
+		env: { ...ISOLATED_ENV, HIVE_HUB: "https://hive.example" },
+	});
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	pi.flagValues.set("splash", false);
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+
+	// The fallback repaired the queue by name: the nearby PR and the item search
+	// missed are both present; the closed third item is reported as a shortfall,
+	// not silently dropped from a list that looks complete.
+	const queue = await pi.tools.get("bluefin_review_queue").execute("id", {});
+	assert.match(queue.content[0].text, /projectbluefin\/review#42/);
+	assert.match(queue.content[0].text, /projectbluefin\/review#936/, "the out-of-window item arrives by native repair");
+	assert.doesNotMatch(queue.content[0].text, /#470/, "a closed item is a shortfall, not a row");
+	assert.equal(queue.details.order_source, "hive");
+
+	// The repair is metadata only: the durable state tree gained no file and wrote
+	// no source. The queue is a projection over disk, never a writer of it.
+	assert.deepEqual(listState(), before, "repair made no on-disk changes");
+
+	// The agent reaches a typed tool from the repaired queue and reads the real
+	// bounded diff — native gh, not a browser — honest about its bounds.
+	const diff = await pi.tools.get("bluefin_review_diff").execute("id", { pull_request: 42, repo: "projectbluefin/review" });
+	assert.match(diff.content[0].text, /entrypoint\.sh/);
+	assert.match(diff.content[0].text, /\+3 -1/);
+	assert.equal(diff.isError, false);
+
+	// The status tool observes the checks and the recorded state, and names the
+	// authority. The selected item's review state is a blocker the tool reports.
+	const status = await pi.tools.get("bluefin_review_status").execute("id", {});
+	assert.match(status.content[0].text, /ci: 0 passing, 1 failing, 1 pending/);
+	assert.match(status.content[0].text, /review_required/);
+	assert.match(status.content[0].text, /missing from this queue/, "the unresolved item is reported, not hidden");
+	assert.equal(status.details.order_source, "hive");
+	assert.equal(status.details.hive.queued.present, 2);
+	assert.equal(status.details.hive.queued.total, 3, "the closed item is counted as a shortfall");
+
+	// The queue refreshes without duplicating the repaired rows.
+	(pi.shortcuts.get("alt+u") as { handler: (ctx: unknown) => void }).handler(ctx);
+	await review.whenStarted();
+	const queue2 = await pi.tools.get("bluefin_review_queue").execute("id", {});
+	const occurrences = queue2.content[0].text.match(/projectbluefin\/review#936/g) ?? [];
+	assert.equal(occurrences.length, 1, "a refresh does not re-add a repaired row");
+
+	// The fallback never oversteps merge authority: the red check on #42 stops the
+	// approve prompt at "report", and the hold/review item is not mergeable either.
+	const approve42 = actionPrompt({ kind: "approve", item: queueItem({ id: 42 }) });
+	assert.match(approve42, /gh pr checks 42 --repo projectbluefin\/review/);
+	assert.match(approve42, /Stop and report instead of merging/);
+	const approve936 = actionPrompt({ kind: "approve", item: queueItem({ id: 936, labels: ["hold", "review_required"] }) });
+	assert.match(approve936, /Stop and report instead of merging/);
 });
