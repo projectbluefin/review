@@ -225,7 +225,9 @@ jobs:
             podman save --format docker-archive -o "$archive" "$image"
             apptainer build --force "$sif" "docker-archive:${archive}"
             chmod 0755 "$sif"
-            apptainer exec "$sif" /usr/bin/omp --version
+            omp_path="/usr/bin/omp"
+            [[ "$name" != review ]] || omp_path="/usr/local/bin/omp"
+            apptainer exec "$sif" "$omp_path" --version
             [[ "$name" != contribute ]] || apptainer exec "$sif" /usr/bin/tmux -V
             rm -f "$archive"
           done

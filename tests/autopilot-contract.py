@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "image"))
@@ -39,19 +40,31 @@ class AutopilotContract(unittest.TestCase):
                 else: os.environ["XDG_CONFIG_HOME"] = old
 
     def test_registry_drives_metadata_and_recommended_selection(self):
-        options = discover_all()
+        with patch("harness.autopilot.CodexHarness.probe", return_value=Availability.READY), \
+             patch("harness.autopilot.OmpHarness.probe", return_value=Availability.READY):
+            options = discover_all()
         self.assertTrue({option.harness.branding.harness_id for option in options} >= {"omp", "codex"})
         self.assertTrue(all(len(option.harness.branding.terminal_badge) == 2 for option in options))
         selected = choose_option("org/repo", {}, options)
         self.assertIsNotNone(selected)
+        self.assertEqual(selected.harness.branding.harness_id, "codex")
         self.assertEqual(selected.discovery.availability.value, "READY")
 
     def test_remembered_unavailable_choice_does_not_silently_fallback(self):
-        options = discover_all()
+        with patch("harness.autopilot.CodexHarness.probe", return_value=Availability.UNAVAILABLE_BINARY), \
+             patch("harness.autopilot.OmpHarness.probe", return_value=Availability.READY):
+            options = discover_all()
         remembered = {"org/repo": Preference("codex", "gpt-5.6-luna", "low")}
         selected = choose_option("org/repo", remembered, options)
         self.assertIsNotNone(selected)
         self.assertEqual(selected.harness.branding.harness_id, "codex")
+        self.assertIs(selected.discovery.availability, Availability.UNAVAILABLE_BINARY)
+
+    def test_no_ready_harness_returns_no_selection(self):
+        with patch("harness.autopilot.CodexHarness.probe", return_value=Availability.UNAVAILABLE_BINARY), \
+             patch("harness.autopilot.OmpHarness.probe", return_value=Availability.UNAVAILABLE_BINARY):
+            options = discover_all()
+        self.assertIsNone(choose_option("org/repo", {}, options))
 
 
 if __name__ == "__main__":

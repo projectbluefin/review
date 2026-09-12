@@ -1135,9 +1135,8 @@ async def main() -> int:
             base_sha,
             head_sha,
             base_sha[:12] + head_sha[:12],
-            "omp",
-            "gemini-3.8-flash",
-            "max",
+            tui.ACTIVE_BACKEND,
+            *app.review_profile(stop.repository),
         )
         receipt = tui.ReviewReceipt.from_result(
             run,
@@ -5519,6 +5518,7 @@ async def main() -> int:
     # OMP is the selected backend by default and drafts bodies directly.
     original_backend = tui.ACTIVE_BACKEND
     original_omp_draft = tui.OmpHarness.draft
+    original_omp_probe = tui.OmpHarness.probe
     omp_calls = []
 
     def omp_draft(self, request):
@@ -5531,6 +5531,7 @@ async def main() -> int:
 
     tui.ACTIVE_BACKEND = "omp"
     tui.OmpHarness.draft = omp_draft
+    tui.OmpHarness.probe = classmethod(lambda cls: tui.Availability.READY)
     try:
         app = tui.ReviewDashboard(tui.QueueFilters(action=""))
         async with app.run_test() as pilot:
@@ -5575,6 +5576,7 @@ async def main() -> int:
     finally:
         tui.ACTIVE_BACKEND = original_backend
         tui.OmpHarness.draft = original_omp_draft
+        tui.OmpHarness.probe = original_omp_probe
 
     # A verdict that is not an approval has to say why.
     app = tui.ReviewDashboard(tui.QueueFilters())
@@ -7041,7 +7043,7 @@ async def main() -> int:
         "findings  No evidenced findings.",
         "next action  Review the evidence; wait for green CI before landing.",
         "No evidenced findings",
-        "checks  4 verified / 1 unverified",
+        "checks  1 verified / 1 unverified / 2 reported",
         "overlap 1 duplicate / 2 shared-file hazard",
         "CI failure",
         "MERGEABLE/CLEAN",
@@ -8180,6 +8182,7 @@ async def main() -> int:
 
     # ── option $: slay PR (review + fix if needed + land in batch) ──
     app = tui.ReviewDashboard(tui.QueueFilters(action=""))
+    app.review_profile = lambda repository: ("gemini-3.8-flash", "max")
     # This state-machine fixture mutates one in-memory stop through several
     # synthetic outcomes. The operation-triggered reconciliation contract is
     # exercised above with real queue replacement; isolate this older unit of
