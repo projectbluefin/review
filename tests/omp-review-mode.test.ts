@@ -14,14 +14,14 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { GLYPH, PLAIN_PAINTER, formatDuration, statusIcon } from "../image/extension/bluefin-review/glyphs.ts";
-import { renderSpanTree, traceToText, visibleSpanIds } from "../image/extension/bluefin-review/trace.ts";
+import { renderSpanTree, traceToText, visibleSpanIds, traceClassBadge, type TraceClass } from "../image/extension/bluefin-review/trace.ts";
 import { truncateToWidth, visibleWidth } from "../image/extension/bluefin-review/width.ts";
-import { buildPipelineSpans, readStateSnapshot, landingStateStatus, runStateStatus } from "../image/extension/bluefin-review/state.ts";
+import { buildPipelineSpans, readStateSnapshot, landingStateStatus, runStateStatus, reviewEventStatus, classifyRunState, classifyReviewEvent } from "../image/extension/bluefin-review/state.ts";
 import { appendFileSync } from "node:fs";
 import { fetchDiff, fetchItemsByKey, fetchQueue, parseScope, searchExpression } from "../image/extension/bluefin-review/github.ts";
 import { EMPTY_HIVE, buildRankMap, fetchHive, resolveHub } from "../image/extension/bluefin-review/hive.ts";
 import { categorize, prioritize } from "../image/extension/bluefin-review/priority.ts";
-import { BATCH_LIMIT, ReviewMode } from "../image/extension/bluefin-review/mode.ts";
+import { BATCH_LIMIT, ReviewMode, ciGlyph } from "../image/extension/bluefin-review/mode.ts";
 import { ReviewDashboard } from "../image/extension/bluefin-review/dashboard.ts";
 import { STALE_AFTER_MS, queueAge, renderHitlist, renderRail, statusSegment, tmuxReviewStatusBar } from "../image/extension/bluefin-review/rail.ts";
 import { SessionTrace } from "../image/extension/bluefin-review/session.ts";
@@ -464,6 +464,113 @@ test("appliance states map onto span statuses", () => {
 	assert.equal(landingStateStatus("merged"), "success");
 	assert.equal(landingStateStatus("blocked"), "findings");
 	assert.equal(landingStateStatus("failed"), "failure");
+});
+
+test("the run-state machine fails as environment or tool, never as a PR check (#465)", () => {
+	// The whole point of the taxonomy: a run-state machine failure is the review
+	// workspace or the agent step failing, NOT the pull request's own checks.
+	assert.equal(classifyRunState("head_changed"), "environment");
+	assert.equal(classifyRunState("mutation_failed"), "tool");
+	assert.equal(classifyRunState("unknown_state_now"), "environment");
+	// The visual status is unchanged: every one of these still reads as a red ✘.
+	assert.equal(runStateStatus("head_changed"), "failure");
+	assert.equal(runStateStatus("mutation_failed"), "failure");
+	// A review that needs a human is findings to act on, not a PR check failure.
+	assert.equal(classifyRunState("blocked"), "findings");
+	assert.equal(classifyRunState("human_review_missing"), "findings");
+	assert.equal(runStateStatus("blocked"), "findings");
+});
+
+test("an unavailable review is a verification failure, not a PR check (#471, #465)", () => {
+	assert.equal(classifyRunState("review_missing"), "verification");
+	assert.equal(classifyRunState("review_incomplete"), "verification");
+	assert.equal(classifyRunState("review_unparsable"), "verification");
+	assert.equal(runStateStatus("review_missing"), "failure");
+});
+
+test("a cancelled review is normal flow, rendered skipped not failed (#465)", () => {
+	assert.equal(classifyReviewEvent("cancelled"), "cancelled");
+	assert.equal(reviewEventStatus("cancelled"), "skipped");
+	assert.equal(classifyReviewEvent("running"), "running");
+	assert.equal(classifyReviewEvent("cached"), "cached");
+	assert.equal(classifyReviewEvent("complete"), "success");
+	assert.equal(classifyReviewEvent("findings"), "findings");
+	assert.equal(classifyReviewEvent("unknown_now"), "environment");
+	assert.equal(reviewEventStatus("unknown_now"), "failure");
+});
+
+test("the failure taxonomy has a distinct label for every class (#465)", () => {
+	const labels = ["pending", "running", "success", "cached", "findings", "cancelled", "pr-check", "verification", "environment", "tool"].map(
+		(cls) => traceClassBadge(cls as TraceClass),
+	);
+	assert.deepEqual(labels, ["", "", "", "CACHED", "", "CANCELLED", "CHECK", "UNVERIFIED", "WORKSPACE", "TOOL"]);
+	// The four failure classes each get their own tag; they never share one.
+	assert.notEqual(traceClassBadge("pr-check"), traceClassBadge("environment"));
+	assert.notEqual(traceClassBadge("verification"), traceClassBadge("tool"));
+});
+
+test("a head_changed run is classified environment, never pr-check (#465)", () => {
+	const root = stateTree();
+	try {
+		const snapshot = readStateSnapshot(root);
+		// Rewrite the run record to the workspace-mismatch terminal state.
+		snapshot.runs[0].state = "head_changed";
+		const spans = buildPipelineSpans("projectbluefin/review#42", "fix launcher", snapshot, NOW);
+		const run = spans[0].children!.find((span) => span.id.endsWith("/run"));
+		assert.ok(run, "the run span exists");
+		assert.equal(run!.cls, "environment");
+		// The trace says WORKSPACE, never CHECK — this is not a PR check failure.
+		const text = traceToText(spans, NOW, 200);
+		assert.match(text, /WORKSPACE/);
+		assert.doesNotMatch(text, /CHECK/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a selected PR's failed checks mark the root span pr-check, distinct from the run-state class (#465)", async () => {
+	const root = stateTree();
+	try {
+		const mode = new ReviewMode({ org: "projectbluefin", stateRoot: root, fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+		mode.setToken("t");
+		await mode.refreshQueue();
+		mode.refreshState();
+		mode.setFilter("launcher"); // selects #42, whose GitHub checks are failing
+		assert.equal(mode.selected()!.id, 42);
+		const spans = mode.pipelineSpans(NOW);
+		// The root names the PR's own checks; the run-state workspace mismatch is a
+		// different class on its own span — never conflated with the PR check failure.
+		assert.equal(spans[0].cls, "pr-check");
+		const run = spans[0].children!.find((span) => span.id.endsWith("/run"));
+		// The run-state class is the review's own (findings here), never pr-check.
+		assert.notEqual(run!.cls, "pr-check");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("the queue badge comes from the PR checks, not the run-state failure (#465)", () => {
+	// The queue badge is the GitHub ciGlyph of the pull request; a run-state
+	// failure never rewrites it. buildPipelineSpans reads the queue item's
+	// ciStatus for display but never mutates it, so the queue stays in PR state.
+	const item = queueItem({ ciStatus: "failure" });
+	assert.equal(ciGlyph(item.ciStatus).status, "failure");
+	assert.equal(queueItem({ ciStatus: "success" }).ciStatus, "success");
+});
+
+test("a cancelled tool call is skipped, not a failure (#465)", () => {
+	const trace = new SessionTrace();
+	trace.startTurn(NOW);
+	trace.startTool("t1", "bash", "rm -rf /", NOW);
+	// The queue moved on: omp surfaces cancellation as a message in the result.
+	trace.endTool("t1", "tool call cancelled, no longer needed", true, NOW);
+	trace.endTurn(NOW);
+	const run = trace.roots();
+	assert.equal(run[0].status, "skipped");
+	assert.equal(run[0].cls, "cancelled");
+	const text = traceToText(run, NOW, 200);
+	assert.match(text, /CANCELLED/);
+	assert.doesNotMatch(text, /\u2718/); // no red ✘ failure glyph
 });
 
 // ---------------------------------------------------------------- github

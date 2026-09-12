@@ -29,7 +29,7 @@ import {
 	stateRoot,
 } from "./state.ts";
 import { SessionTrace } from "./session.ts";
-import type { Span } from "./trace.ts";
+import type { Span, TraceClass } from "./trace.ts";
 
 export interface ReviewModeOptions {
 	org: string;
@@ -495,7 +495,13 @@ export class ReviewMode {
 	pipelineSpans(now: number): Span[] {
 		const item = this.selected();
 		if (!item) return [];
-		return this.tracePipeline(queueKey(item.repo, item.id), item.title, now);
+		const spans = this.tracePipeline(queueKey(item.repo, item.id), item.title, now);
+		// The root names the one a maintainer acts on: the pull request's own checks.
+		// A run-state failure (workspace mismatch, agent tool, unavailable verification)
+		// is a different class on its own span, so a workspace mismatch never reads as a
+		// PR check failure. Queue status here derives from PR state, not the run log.
+		if (spans[0] && item.ciStatus === "failure") spans[0].cls = "pr-check" as TraceClass;
+		return spans;
 	}
 
 	/** Durable pipeline trace for an arbitrary `owner/repo#number`. */
