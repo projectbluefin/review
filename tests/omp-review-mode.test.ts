@@ -274,20 +274,21 @@ function fakeCtx() {
 	const statuses = new Map();
 	const widgets = new Map();
 	const overlays = [];
-	return {
+	const pasted = [];
+	const ctx = {
 		hasUI: true,
 		notifications,
 		statuses,
 		widgets,
 		overlays,
-		pasted: [],
+		pasted,
 		ui: {
 			notify: (message, level) => notifications.push({ message, level }),
 			setStatus: (key, value) => statuses.set(key, value),
 			setWidget: (key, content) => widgets.set(key, content),
 			setTitle: () => {},
 			pasteToEditor(text) {
-				this.parent.pasted.push(text);
+				pasted.push(text);
 			},
 			custom(factory) {
 				const { promise, resolve } = Promise.withResolvers();
@@ -298,6 +299,7 @@ function fakeCtx() {
 		},
 		sessionManager: { getBranch: () => [] },
 	};
+	return ctx;
 }
 
 // ---------------------------------------------------------------- vocabulary
@@ -1694,4 +1696,580 @@ test("a filtered slice is selected and dispatched in one wave", (t) => {
 	assert.match(prompt, /Do not process the list sequentially/);
 	assert.match(prompt, /name every item that failed/);
 	assert.doesNotMatch(prompt, /repository sequence/);
+});
+
+test("RED: unlabeled open projectbluefin/review issue is rejected and NOT sent to sendUserMessage", async () => {
+	const pi = fakeHost();
+	const issueFetch = (url, init) => {
+		if (String(url).includes("/graphql")) {
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				json: async () => ({
+					data: {
+						search: {
+							pageInfo: { hasNextPage: false, endCursor: null },
+							nodes: [
+								{
+									number: 485,
+									title: "gate issue admission",
+									url: "https://github.com/projectbluefin/review/issues/485",
+									updatedAt: new Date(NOW - 1000).toISOString(),
+									author: { login: "someone" },
+									repository: { nameWithOwner: "projectbluefin/review" },
+									labels: { nodes: [] },
+								},
+							],
+						},
+					},
+				}),
+			};
+		}
+		return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+	};
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueFetch, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	pi.flagValues.set("splash", false);
+	pi.flagValues.set("issues", true);
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+
+	assert.equal(ctx.overlays.length, 1);
+	const dashboard = ctx.overlays[0];
+
+	pi.messages.length = 0;
+
+	// Slay the unlabeled projectbluefin/review issue
+	dashboard.handleInput("s");
+	await Promise.resolve(); // allow microtasks to flush
+
+	// In unpatched code: pi.messages has length 1 (dispatched without admission).
+	// For the RED test, assert that messages.length === 0 and an admission error notification was emitted.
+	// This will FAIL on current unpatched main!
+	assert.equal(pi.messages.length, 0, "unlabeled projectbluefin/review issue must NOT reach sendUserMessage");
+});
+
+test("issue admission gate handles positive admission, negative cases, and invariants", async () => {
+	const setup = async (issueAttrs, options = {}) => {
+		const pi = fakeHost();
+		const issues = Array.isArray(issueAttrs) ? issueAttrs : [issueAttrs];
+		const issueFetch = (url, init) => {
+			const target = String(url);
+			if (target.includes("/graphql")) {
+				const body = JSON.parse(String(init?.body ?? "{}"));
+				// Distinguish search query vs admission query
+				if (body.variables?.search !== undefined) {
+					return {
+						ok: true,
+						status: 200,
+						statusText: "OK",
+						json: async () => ({
+							data: {
+								search: {
+									pageInfo: { hasNextPage: false, endCursor: null },
+									nodes: issues.map((it) => ({
+										number: it.number ?? 485,
+										title: it.title ?? "test issue",
+										url: `https://github.com/${it.repo ?? "projectbluefin/review"}/${it.type === "pr" ? "pull" : "issues"}/${it.number ?? 485}`,
+										updatedAt: new Date(NOW - 1000).toISOString(),
+										isDraft: false,
+										mergeable: "MERGEABLE",
+										reviewDecision: "REVIEW_REQUIRED",
+										author: { login: "someone" },
+										repository: { nameWithOwner: it.repo ?? "projectbluefin/review" },
+										labels: { nodes: (it.labels ?? []).map((l) => ({ name: l })) },
+									})),
+								},
+							},
+						}),
+					};
+				}
+
+				// If options.fetchError is provided, simulate request failure on admission
+				if (options.networkError) {
+					throw new Error("network connection reset");
+				}
+				if (options.httpStatus) {
+					return { ok: false, status: options.httpStatus, statusText: "Error", json: async () => ({}) };
+				}
+				if (options.graphqlErrors) {
+					return { ok: true, status: 200, statusText: "OK", json: async () => ({ errors: options.graphqlErrors }) };
+				}
+
+
+				// Admission query by alias: parse targets from the query
+				const data = {};
+				const aliasRegex = /(\w+): repository\(owner: "([^"]+)", name: "([^"]+)"\)\s*\{\s*nameWithOwner\s*issue\(number: (\d+)\)/g;
+				for (const [, alias, owner, repo, numberStr] of body.query.matchAll(aliasRegex)) {
+					const num = Number(numberStr);
+					const fullRepo = `${owner}/${repo}`;
+					const it = issues.find((i) => (i.number ?? 485) === num && (i.repo ?? "projectbluefin/review") === fullRepo) ?? {
+						number: num,
+						repo: fullRepo,
+						labels: [],
+					};
+					if (options.missingNode) {
+						data[alias] = { nameWithOwner: fullRepo, issue: null };
+						continue;
+					}
+					const returnedRepo = options.wrongRepo ? "projectbluefin/wrong" : fullRepo;
+					const returnedNumber = options.wrongNumber ? 999 : num;
+					data[alias] = {
+						nameWithOwner: returnedRepo,
+						issue: {
+							number: returnedNumber,
+							closed: it.closed === true,
+							repository: { nameWithOwner: returnedRepo },
+							labels: {
+								pageInfo: { hasNextPage: options.labelsTruncated === true },
+								nodes: (it.admissionLabels ?? it.labels ?? []).map((l) => ({ name: l })),
+							},
+						},
+					};
+				}
+				return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
+			}
+			return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+		};
+
+		const review = createReviewExtension(pi, {
+			org: "projectbluefin",
+			fetchImpl: options.customFetch ?? issueFetch,
+			env: ISOLATED_ENV,
+		});
+		const ctx = fakeCtx();
+		ctx.ui.parent = ctx;
+		pi.flagValues.set("splash", false);
+		if (!options.isPr) pi.flagValues.set("issues", true);
+		await pi.events.get("session_start")({}, ctx);
+		await review.whenStarted();
+		const dashboard = ctx.overlays[0];
+		const turn = async () => {
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+		};
+		return { pi, ctx, dashboard, mode: review, turn };
+	};
+
+	// 1. Positive exact-label admission with exactly one dispatch
+	{
+		const { pi, dashboard, turn } = await setup({ number: 485, labels: ["3-clanker-queue"] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 1, "admitted issue dispatches exactly once");
+		assert.match(pi.messages[0], /Close out projectbluefin\/review#485/);
+	}
+
+	// 2. No label
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: [] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "no label -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+	}
+
+	// 3. Only 3-human-queue
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-human-queue"] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "3-human-queue only -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+	}
+
+	// 4. Only hive/* or agent/* provenance
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["hive/triage", "agent/task", "area/image"] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "hive/agent labels only -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+	}
+
+	// 5. hold label present (even if 3-clanker-queue is present)
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue", "hold"] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "hold label -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("hold label")));
+	}
+
+	// 6. blocked label present (even if 3-clanker-queue is present)
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue", "blocked"] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "blocked label -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("blocked label")));
+	}
+
+	// 7. closed issue
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue"], closed: true });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "closed issue -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("issue is closed")));
+	}
+
+	// 8. Admission removed between display and dispatch
+	{
+		// Queue showed 3-clanker-queue, but admission check returns labels: []
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue"], admissionLabels: [] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "label removed between display and dispatch -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+	}
+
+	// 9. Request failure (network error / HTTP error / GraphQL partial errors)
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue"] }, { networkError: true });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "network error -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("Admission check failed")));
+	}
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue"] }, { graphqlErrors: [{ message: "rate limited" }] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "graphql error -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("rate limited")));
+	}
+
+	// 10. Incomplete label evidence (labelsTruncated)
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue"] }, { labelsTruncated: true });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "truncated labels -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("incomplete label evidence")));
+	}
+
+	// 11. Wrong returned repository or issue identity
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue"] }, { wrongRepo: true });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "wrong repo returned -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("repository mismatch")));
+	}
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue"] }, { wrongNumber: true });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "wrong issue number returned -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("issue number mismatch")));
+	}
+
+	// 12. Missing node
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue"] }, { missingNode: true });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "missing node -> no dispatch");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("not found")));
+	}
+
+	// 13. Mixed batch containing one ineligible Review issue: zero dispatches (do not silently shrink)
+	{
+		const items = [
+			{ number: 485, repo: "projectbluefin/review", labels: ["3-clanker-queue"] }, // eligible
+			{ number: 486, repo: "projectbluefin/review", labels: ["hold"] }, // ineligible
+		];
+		const { pi, dashboard, ctx, turn } = await setup(items);
+		// Select all items using 'A'
+		dashboard.handleInput("A");
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "batch with one ineligible item yields zero dispatches");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("issue has hold label")));
+	}
+
+	// 14. Mixed batch containing Review issue and other repo issue: if Review issue is ineligible, zero dispatches
+	{
+		const items = [
+			{ number: 10, repo: "projectbluefin/other", labels: [] },
+			{ number: 485, repo: "projectbluefin/review", labels: [] },
+		];
+		const { pi, dashboard, ctx, turn } = await setup(items);
+		dashboard.handleInput("A");
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 0, "mixed-repo batch with ineligible review issue yields zero dispatches");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+	}
+
+	// 15. Unrelated repository issue: no admission read needed, still dispatches as before
+	{
+		const { pi, dashboard, turn } = await setup({ number: 936, repo: "projectbluefin/documentation", labels: [] });
+		pi.messages.length = 0;
+		dashboard.handleInput("s");
+		await turn();
+		assert.equal(pi.messages.length, 1, "unrelated repository issue dispatches without requiring 3-clanker-queue");
+		assert.match(pi.messages[0], /projectbluefin\/documentation#936/);
+	}
+
+	// 16. Read-only actions (diff, reference), PR actions, and other issue implementation actions ('fix', 'docs')
+	{
+		const { pi, dashboard, turn } = await setup({ number: 485, labels: [] });
+		pi.messages.length = 0;
+		// 'd' for diff
+		dashboard.handleInput("d");
+		await turn();
+		assert.equal(pi.messages.length, 1, "diff is read-only and dispatches without admission gate");
+		assert.match(pi.messages[0], /Call bluefin_review_diff/);
+	}
+	{
+		const { dashboard, ctx, turn } = await setup({ number: 485, labels: [] });
+		dashboard.handleInput("y");
+		await turn();
+		assert.ok(ctx.pasted.length > 0, "cite/reference is read-only");
+	}
+	// fix on an unadmitted Review issue dispatches zero messages and notifies
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: [] });
+		pi.messages.length = 0;
+		dashboard.handleInput("f");
+		await turn();
+		assert.equal(pi.messages.length, 0, "fix on unadmitted Review issue dispatches zero messages");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+	}
+	// docs on an unadmitted Review issue dispatches zero messages and notifies
+	{
+		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: [] });
+		pi.messages.length = 0;
+		dashboard.handleInput("D");
+		await turn();
+		assert.equal(pi.messages.length, 0, "docs on unadmitted Review issue dispatches zero messages");
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+	}
+	// fix on a projectbluefin/review PR is unchanged (no admission read, dispatches)
+	{
+		const { pi, dashboard, turn } = await setup({ number: 42, type: "pr", repo: "projectbluefin/review", labels: [] }, { isPr: true });
+		pi.messages.length = 0;
+		dashboard.handleInput("f");
+		await turn();
+		assert.equal(pi.messages.length, 1, "fix on Review PR dispatches unchanged without admission read");
+		assert.match(pi.messages[0], /Fix the findings recorded for projectbluefin\/review#42/);
+	}
+
+	// 17. Selection changes during the read: no retargeting
+	{
+		const { promise, resolve } = Promise.withResolvers();
+		const customFetch = (url, init) => {
+			const target = String(url);
+			if (target.includes("/graphql")) {
+				const body = JSON.parse(String(init?.body ?? "{}"));
+				if (body.variables?.search !== undefined) {
+					return {
+						ok: true,
+						status: 200,
+						statusText: "OK",
+						json: async () => ({
+							data: {
+								search: {
+									pageInfo: { hasNextPage: false, endCursor: null },
+									nodes: [
+										{
+											number: 485,
+											title: "first issue",
+											url: "https://github.com/projectbluefin/review/issues/485",
+											updatedAt: new Date(NOW - 1000).toISOString(),
+											author: { login: "someone" },
+											repository: { nameWithOwner: "projectbluefin/review" },
+											labels: { nodes: [{ name: "3-clanker-queue" }] },
+										},
+										{
+											number: 486,
+											title: "second issue",
+											url: "https://github.com/projectbluefin/review/issues/486",
+											updatedAt: new Date(NOW - 2000).toISOString(),
+											author: { login: "someone" },
+											repository: { nameWithOwner: "projectbluefin/review" },
+											labels: { nodes: [] },
+										},
+									],
+								},
+							},
+						}),
+					};
+				}
+				return promise;
+			}
+			return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+		};
+
+		const { pi, dashboard, turn } = await setup([], { customFetch });
+		pi.messages.length = 0;
+		// Trigger dispatch for item 485
+		dashboard.handleInput("s");
+
+		// While admission read is pending, navigate to item 486
+		dashboard.handleInput("j");
+
+		// Now resolve the admission read
+		resolve({
+			ok: true,
+			status: 200,
+			statusText: "OK",
+			json: async () => ({
+				data: {
+					iss0: {
+						nameWithOwner: "projectbluefin/review",
+						issue: {
+							number: 485,
+							closed: false,
+							repository: { nameWithOwner: "projectbluefin/review" },
+							labels: { pageInfo: { hasNextPage: false }, nodes: [{ name: "3-clanker-queue" }] },
+						},
+					},
+				},
+			}),
+		});
+		await turn();
+		assert.equal(pi.messages.length, 1);
+		assert.match(pi.messages[0], /projectbluefin\/review#485/, "prompt must dispatch for captured item 485, not navigated item 486");
+	}
+
+	// 18. Superseded dispatch generation discard: stale in-flight admission resolution produces no dispatch
+	{
+		let resolveFirst;
+		let resolveSecond;
+		let requestCount = 0;
+		const { promise: p1, resolve: r1 } = Promise.withResolvers();
+		const { promise: p2, resolve: r2 } = Promise.withResolvers();
+		resolveFirst = r1;
+		resolveSecond = r2;
+
+		const customFetch = (url, init) => {
+			const target = String(url);
+			if (target.includes("/graphql")) {
+				const body = JSON.parse(String(init?.body ?? "{}"));
+				if (body.variables?.search !== undefined) {
+					return {
+						ok: true,
+						status: 200,
+						statusText: "OK",
+						json: async () => ({
+							data: {
+								search: {
+									pageInfo: { hasNextPage: false, endCursor: null },
+									nodes: [
+										{
+											number: 485,
+											title: "first issue",
+											url: "https://github.com/projectbluefin/review/issues/485",
+											updatedAt: new Date(NOW - 1000).toISOString(),
+											author: { login: "someone" },
+											repository: { nameWithOwner: "projectbluefin/review" },
+											labels: { nodes: [{ name: "3-clanker-queue" }] },
+										},
+										{
+											number: 486,
+											title: "second issue",
+											url: "https://github.com/projectbluefin/review/issues/486",
+											updatedAt: new Date(NOW - 2000).toISOString(),
+											author: { login: "someone" },
+											repository: { nameWithOwner: "projectbluefin/review" },
+											labels: { nodes: [{ name: "3-clanker-queue" }] },
+										},
+									],
+								},
+							},
+						}),
+					};
+				}
+
+				requestCount++;
+				if (requestCount === 1) {
+					return p1;
+				}
+				return p2;
+			}
+			return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+		};
+
+		const { pi, dashboard, ctx, turn } = await setup([], { customFetch });
+		pi.messages.length = 0;
+
+		// Dispatch 1 on item 485 (pending on p1)
+		dashboard.handleInput("s");
+		await Promise.resolve();
+
+		// Move to item 486 and start Dispatch 2 (superseding Dispatch 1)
+		await pi.shortcuts.get("alt+b").handler(ctx);
+		const dashboard2 = ctx.overlays[1];
+		dashboard2.handleInput("j");
+		dashboard2.handleInput("s");
+		await Promise.resolve();
+		// Resolve Dispatch 2 first
+		resolveSecond({
+			ok: true,
+			status: 200,
+			statusText: "OK",
+			json: async () => ({
+				data: {
+					iss0: {
+						nameWithOwner: "projectbluefin/review",
+						issue: {
+							number: 486,
+							closed: false,
+							repository: { nameWithOwner: "projectbluefin/review" },
+							labels: { pageInfo: { hasNextPage: false }, nodes: [{ name: "3-clanker-queue" }] },
+						},
+					},
+				},
+			}),
+		});
+		await turn();
+
+		assert.equal(pi.messages.length, 1, "Dispatch 2 sends exactly one user message");
+		assert.match(pi.messages[0], /projectbluefin\/review#486/);
+
+		// Now let Dispatch 1 resolve late (superseded generation)
+		resolveFirst({
+			ok: true,
+			status: 200,
+			statusText: "OK",
+			json: async () => ({
+				data: {
+					iss0: {
+						nameWithOwner: "projectbluefin/review",
+						issue: {
+							number: 485,
+							closed: false,
+							repository: { nameWithOwner: "projectbluefin/review" },
+							labels: { pageInfo: { hasNextPage: false }, nodes: [{ name: "3-clanker-queue" }] },
+						},
+					},
+				},
+			}),
+		});
+		await turn();
+
+		// The stale generation must NOT authorize work or emit an extra message
+		assert.equal(pi.messages.length, 1, "stale generation produced zero extra messages; total dispatches across both requests remains 1");
+		assert.match(pi.messages[0], /projectbluefin\/review#486/);
+	}
 });

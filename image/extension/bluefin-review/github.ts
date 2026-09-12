@@ -425,6 +425,148 @@ export async function fetchItemsByKey(
 	}
 }
 
+export interface IssueAdmissionTarget {
+	owner: string;
+	repo: string;
+	number: number;
+}
+
+export interface AdmittedIssue {
+	owner: string;
+	repo: string;
+	number: number;
+	closed: boolean;
+	labels: string[];
+	labelsTruncated: boolean;
+}
+
+export interface IssueAdmissionResult {
+	issues: AdmittedIssue[];
+	error?: string;
+}
+
+/**
+ * Fail-closed fresh admission read for issues.
+ *
+ * Queries GitHub GraphQL by repository and issue number.
+ * Unlike fetchItemsByKey:
+ * - Absence of a requested issue node fails the whole read.
+ * - Partial GraphQL errors fail the whole read.
+ * - Incomplete label evidence (labels page hasNextPage: true) is recorded.
+ * - Returned repository and issue identities must match exactly.
+ */
+export async function fetchIssueAdmission(
+	targets: readonly IssueAdmissionTarget[],
+	options: FetchOptions = {},
+): Promise<IssueAdmissionResult> {
+	const { token, signal } = options;
+	const doFetch = options.fetchImpl ?? fetch;
+	if (targets.length === 0) return { issues: [] };
+	if (!token) {
+		return { issues: [], error: "no GitHub credential (set GH_TOKEN or run gh auth login)" };
+	}
+
+	const targetList = targets.map((t, idx) => ({
+		alias: `iss${idx}`,
+		owner: t.owner,
+		repo: t.repo,
+		number: t.number,
+	}));
+
+	const query = `query {\n${targetList
+		.map(
+			({ alias, owner, repo, number }) =>
+				`\t${alias}: repository(owner: ${JSON.stringify(owner)}, name: ${JSON.stringify(repo)}) {\n` +
+				`\t\tnameWithOwner\n` +
+				`\t\tissue(number: ${number}) {\n` +
+				`\t\t\tnumber\n` +
+				`\t\t\tclosed\n` +
+				`\t\t\trepository { nameWithOwner }\n` +
+				`\t\t\tlabels(first: 100) {\n` +
+				`\t\t\t\tpageInfo { hasNextPage }\n` +
+				`\t\t\t\tnodes { name }\n` +
+				`\t\t\t}\n` +
+				`\t\t}\n` +
+				`\t}`,
+		)
+		.join("\n")}\n}`;
+
+	try {
+		const response = await doFetch("https://api.github.com/graphql", {
+			method: "POST",
+			headers: { ...headers(token), "Content-Type": "application/json" },
+			body: JSON.stringify({ query }),
+			signal: deadlineSignal(options.timeoutMs ?? QUEUE_TIMEOUT_MS, signal),
+			redirect: "error",
+		});
+		if (!response.ok) {
+			return { issues: [], error: `GitHub GraphQL ${response.status} ${response.statusText}` };
+		}
+		const payload = (await response.json()) as {
+			data?: Record<
+				string,
+				{
+					nameWithOwner?: string;
+					issue?: {
+						number?: number;
+						closed?: boolean;
+						repository?: { nameWithOwner?: string };
+						labels?: { pageInfo?: { hasNextPage?: boolean }; nodes?: Array<{ name?: string }> };
+					} | null;
+				} | null
+			>;
+			errors?: Array<{ message?: string }>;
+		};
+
+		if (payload.errors?.length) {
+			return {
+				issues: [],
+				error: payload.errors.map((e) => e.message ?? "unknown").join("; "),
+			};
+		}
+
+		const issues: AdmittedIssue[] = [];
+		for (const t of targetList) {
+			const repoNode = payload.data?.[t.alias];
+			if (!repoNode) {
+				return { issues: [], error: `repository ${t.owner}/${t.repo} not found` };
+			}
+			const issueNode = repoNode.issue;
+			if (!issueNode) {
+				return { issues: [], error: `issue ${t.owner}/${t.repo}#${t.number} not found` };
+			}
+			const returnedRepo = issueNode.repository?.nameWithOwner ?? repoNode.nameWithOwner;
+			const expectedRepo = `${t.owner}/${t.repo}`;
+			if (returnedRepo !== expectedRepo) {
+				return {
+					issues: [],
+					error: `repository mismatch for issue ${expectedRepo}#${t.number}: got ${returnedRepo}`,
+				};
+			}
+			if (typeof issueNode.number !== "number" || issueNode.number !== t.number) {
+				return {
+					issues: [],
+					error: `issue number mismatch: expected #${t.number}, got #${issueNode.number}`,
+				};
+			}
+			const labels = (issueNode.labels?.nodes ?? []).map((l) => l.name ?? "").filter(Boolean);
+			const labelsTruncated = issueNode.labels?.pageInfo?.hasNextPage === true;
+			issues.push({
+				owner: t.owner,
+				repo: t.repo,
+				number: t.number,
+				closed: issueNode.closed === true,
+				labels,
+				labelsTruncated,
+			});
+		}
+		return { issues };
+	} catch (error) {
+		if (signal?.aborted) return { issues: [], error: "aborted" };
+		return { issues: [], error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
 export interface DiffFile {
 	path: string;
 	status: string;

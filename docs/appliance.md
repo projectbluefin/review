@@ -158,6 +158,16 @@ The detail pane names the contributor whose worker holds an item right now, from
 Hive's live contributor state. Two people burning the same queue down do not
 need to negotiate; they can see what is already taken.
 
+### Issue implementation admission
+
+Queue-derived issue implementation in `projectbluefin/review` is gated on fresh,
+explicit GitHub admission: dispatching an implementation action (`slay`, `fix`, `docs`)
+requires a fresh GraphQL read confirming the exact `3-clanker-queue` label and the
+absence of `hold` and `blocked`. Any closed, unadmitted, held, blocked, unreadable,
+or incompletely read issue refuses dispatch for the entire batch. Direct human
+instructions outside the queue workflow remain a separate authority path; browsing
+unadmitted backlog issues remains available.
+
 Credentials are inherited by name (`--env GH_TOKEN`), never passed as arguments
 and never baked into a layer. The mode resolves a token from `GH_TOKEN`,
 `GITHUB_TOKEN`, `COPILOT_GITHUB_TOKEN`, or `gh auth token` in that order.
