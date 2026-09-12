@@ -1782,11 +1782,23 @@ review-appliance *appliance_args:
       --env "TERM=${TERM:-xterm-256color}" --env "COLORTERM=${COLORTERM:-truecolor}"
       --env BLUEFIN_REVIEW_ORG
     )
-    # A bare `owner/repo` is the repository shortcut; anything else is passed to
-    # the mode untouched.
+    # Determine whether to rewrite the first positional as a --repo flag.
+    #
+    # Preserve explicit repository shorthand so users can still pass:
+    #   owner/repo
+    #   owner/repo#123
+    # These should be forwarded verbatim to the image entrypoint. Convert only
+    # a bare short repository name (e.g. "bluefin") into the flag form so
+    # older callers that expect --repo continue to work.
     APPLIANCE_ARGS=({{appliance_args}})
-    if [[ "${APPLIANCE_ARGS[0]:-}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
-      APPLIANCE_ARGS=(--repo "${APPLIANCE_ARGS[0]}" "${APPLIANCE_ARGS[@]:1}")
+    if [[ -n "${APPLIANCE_ARGS[0]:-}" ]]; then
+      # owner/repo or owner/repo#123 -> preserve unchanged
+      if [[ "${APPLIANCE_ARGS[0]}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(#([0-9]+))?$ ]]; then
+        :
+      # short repo name (no slash) -> translate to --repo shortname
+      elif [[ "${APPLIANCE_ARGS[0]}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        APPLIANCE_ARGS=(--repo "${APPLIANCE_ARGS[0]}" "${APPLIANCE_ARGS[@]:1}")
+      fi
     fi
 
     "$ENGINE" "${ARGS[@]}" "$IMAGE" ${APPLIANCE_ARGS[@]+"${APPLIANCE_ARGS[@]}"}
