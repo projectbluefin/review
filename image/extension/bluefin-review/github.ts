@@ -42,6 +42,8 @@ export interface QueueItem {
 export interface QueueResult {
 	items: QueueItem[];
 	error?: string;
+	/** The caller canceled this request; it is not a queue failure. */
+	cancelled?: boolean;
 	fetchedAt: number;
 	/** More open items exist than `limit` allowed; the queue is a prefix. */
 	truncated?: boolean;
@@ -284,8 +286,8 @@ export async function fetchQueue(mode: QueueMode, options: FetchOptions = {}): P
 	const deadline = deadlineSignal(options.timeoutMs ?? QUEUE_TIMEOUT_MS, signal);
 	const items: QueueItem[] = [];
 	let cursor: string | undefined;
-
 	if (!token) {
+		if (signal?.aborted) return { items, cancelled: true, fetchedAt: Date.now() };
 		return { items, error: "no GitHub credential (set GH_TOKEN or run gh auth login)", fetchedAt: Date.now() };
 	}
 
@@ -324,7 +326,7 @@ export async function fetchQueue(mode: QueueMode, options: FetchOptions = {}): P
 		// counter cannot read as "this is everything open".
 		return { items: items.slice(0, limit), fetchedAt: Date.now(), truncated: true };
 	} catch (error) {
-		if (signal?.aborted) return { items, error: "aborted", fetchedAt: Date.now() };
+		if (signal?.aborted) return { items, cancelled: true, fetchedAt: Date.now() };
 		// The deadline expired mid-walk. Keep the pages that did land: a partial
 		// queue in priority order still beats an empty one, as long as it says so.
 		if (deadline.aborted) {
@@ -365,6 +367,7 @@ export async function fetchItemsByKey(
 	const items: QueueItem[] = [];
 	if (keys.length === 0) return { items, fetchedAt: Date.now() };
 	if (!token) {
+		if (signal?.aborted) return { items, cancelled: true, fetchedAt: Date.now() };
 		return { items, error: "no GitHub credential (set GH_TOKEN or run gh auth login)", fetchedAt: Date.now() };
 	}
 
@@ -417,7 +420,7 @@ export async function fetchItemsByKey(
 			: undefined;
 		return { items, error: failed, fetchedAt: Date.now() };
 	} catch (error) {
-		if (signal?.aborted) return { items, error: "aborted", fetchedAt: Date.now() };
+		if (signal?.aborted) return { items, cancelled: true, fetchedAt: Date.now() };
 		return { items, error: error instanceof Error ? error.message : String(error), fetchedAt: Date.now() };
 	}
 }

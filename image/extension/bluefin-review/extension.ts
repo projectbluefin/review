@@ -239,7 +239,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	const refreshQueue = async (ctx: CtxLike) => {
 		syncStatus(ctx);
 		const result = await mode.refreshQueue();
-		if (result.error && result.items.length === 0 && ctx.hasUI) {
+		if (result.error && !result.cancelled && result.items.length === 0 && ctx.hasUI) {
 			ctx.ui.notify(`Bluefin queue: ${result.error}`, "error");
 		}
 		syncStatus(ctx);

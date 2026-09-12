@@ -18,7 +18,7 @@ import { renderSpanTree, traceToText, visibleSpanIds } from "../image/extension/
 import { truncateToWidth, visibleWidth } from "../image/extension/bluefin-review/width.ts";
 import { buildPipelineSpans, readStateSnapshot, landingStateStatus, runStateStatus } from "../image/extension/bluefin-review/state.ts";
 import { appendFileSync } from "node:fs";
-import { fetchDiff, fetchQueue, parseScope, searchExpression } from "../image/extension/bluefin-review/github.ts";
+import { fetchDiff, fetchItemsByKey, fetchQueue, parseScope, searchExpression } from "../image/extension/bluefin-review/github.ts";
 import { EMPTY_HIVE, buildRankMap, fetchHive, resolveHub } from "../image/extension/bluefin-review/hive.ts";
 import { categorize, prioritize } from "../image/extension/bluefin-review/priority.ts";
 import { BATCH_LIMIT, ReviewMode } from "../image/extension/bluefin-review/mode.ts";
@@ -482,6 +482,176 @@ test("queue fetch maps CI rollup and reports auth failure", async () => {
 	});
 	assert.match(denied.error ?? "", /401/, "a failed queue must say why, not render empty");
 });
+test("queue cancellation is classified separately from failures", async () => {
+	const controller = new AbortController();
+	controller.abort();
+
+	const cancelled = await fetchQueue("prs", {
+		token: "t",
+		signal: controller.signal,
+		fetchImpl: async () => {
+			throw new Error("request was cancelled");
+		},
+	});
+	assert.equal(cancelled.cancelled, true);
+	assert.equal(cancelled.error, undefined);
+
+	const failed = await fetchQueue("prs", {
+		token: "t",
+		fetchImpl: async () => {
+			throw new Error("network down");
+		},
+	});
+	assert.equal(failed.cancelled, undefined);
+	assert.equal(failed.error, "network down");
+	const named = await fetchItemsByKey(["owner/repo#1"], "prs", {
+		token: "t",
+		signal: controller.signal,
+		fetchImpl: async () => {
+			throw new Error("named request was cancelled");
+		},
+	});
+	assert.equal(named.cancelled, true);
+	assert.equal(named.error, undefined);
+});
+
+test("scope refresh keeps the latest response when requests finish out of order", async () => {
+	const requests = [];
+	const fetchImpl = (_url, init) => {
+		const pending = Promise.withResolvers();
+		requests.push({ init, pending });
+		return pending.promise;
+	};
+	const response = (repo, number) => ({
+		ok: true,
+		status: 200,
+		statusText: "OK",
+		json: async () => ({
+			data: {
+				search: {
+					pageInfo: { hasNextPage: false },
+					nodes: [
+						{
+							number,
+							title: `item ${number}`,
+							url: "",
+							updatedAt: new Date(NOW).toISOString(),
+							author: { login: "a" },
+							repository: { nameWithOwner: repo },
+							labels: { nodes: [] },
+							isDraft: false,
+							mergeable: "MERGEABLE",
+							reviewDecision: "APPROVED",
+							commits: { nodes: [] },
+						},
+					],
+				},
+			},
+		}),
+	});
+
+	const mode = new ReviewMode({
+		org: "projectbluefin",
+		stateRoot: join(tmpdir(), "nope"),
+		fetchImpl,
+		env: ISOLATED_ENV,
+	});
+	mode.setToken("t");
+	const staleRefresh = mode.refreshQueue();
+	assert.equal(requests.length, 1);
+
+	mode.setScope({ kind: "repo", value: "owner/repo" });
+	assert.equal(requests[0].init.signal.aborted, true);
+	const currentRefresh = mode.refreshQueue();
+	assert.equal(requests.length, 2);
+
+	requests[1].pending.resolve(response("owner/repo", 2));
+	await currentRefresh;
+	requests[0].pending.resolve(response("projectbluefin/review", 1));
+	const staleResult = await staleRefresh;
+
+	assert.equal(staleResult.cancelled, true);
+	assert.equal(mode.scopeLabel(), "owner/repo");
+	assert.deepEqual(mode.items.map((item) => `${item.repo}#${item.id}`), ["owner/repo#2"]);
+	assert.equal(mode.queueError, undefined);
+});
+test("scope refresh discards stale Hive backfill responses", async () => {
+	const requests = [];
+	const backfillStarted = Promise.withResolvers();
+	const fetchImpl = async (_url, init) => {
+		const body = JSON.parse(String(init?.body ?? "{}"));
+		const pending = Promise.withResolvers();
+		requests.push({ body, init, pending });
+		if (body.variables?.search === undefined) backfillStarted.resolve();
+		return pending.promise;
+	};
+	const node = (repo, number) => ({
+		number,
+		title: `item ${number}`,
+		url: "",
+		updatedAt: new Date(NOW).toISOString(),
+		author: { login: "a" },
+		repository: { nameWithOwner: repo },
+		labels: { nodes: [] },
+		isDraft: false,
+		mergeable: "MERGEABLE",
+		reviewDecision: "APPROVED",
+		commits: { nodes: [] },
+	});
+	const searchResponse = (item) => ({
+		ok: true,
+		status: 200,
+		statusText: "OK",
+		json: async () => ({
+			data: { search: { pageInfo: { hasNextPage: false }, nodes: item ? [item] : [] } },
+		}),
+	});
+	const namedResponse = (item) => ({
+		ok: true,
+		status: 200,
+		statusText: "OK",
+		json: async () => ({ data: { w0: { issueOrPullRequest: { ...item, closed: false } } } }),
+	});
+
+	const mode = new ReviewMode({
+		org: "projectbluefin",
+		stateRoot: join(tmpdir(), "nope"),
+		fetchImpl,
+		env: ISOLATED_ENV,
+	});
+	mode.setToken("t");
+	mode.setScope({ kind: "repo", value: "owner/old" });
+	const oldKey = "owner/old#9";
+	mode.hive = {
+		...EMPTY_HIVE,
+		configured: true,
+		online: true,
+		hub: "https://hive.example",
+		items: [{ key: oldKey, repo: "owner/old", number: 9, title: "old", url: "", labels: [] }],
+		ranks: new Map([[oldKey, 0]]),
+	};
+
+	const staleRefresh = mode.refreshQueue();
+	assert.equal(requests.length, 1);
+	requests[0].pending.resolve(searchResponse(undefined));
+	await backfillStarted.promise;
+
+	mode.setScope({ kind: "repo", value: "owner/new" });
+	assert.equal(requests[0].init.signal.aborted, true);
+	const currentRefresh = mode.refreshQueue();
+	assert.equal(requests.length, 3);
+	requests[2].pending.resolve(searchResponse(node("owner/new", 2)));
+	await currentRefresh;
+
+	requests[1].pending.resolve(namedResponse(node("owner/old", 9)));
+	const staleResult = await staleRefresh;
+
+	assert.equal(staleResult.cancelled, true);
+	assert.deepEqual(mode.items.map((item) => `${item.repo}#${item.id}`), ["owner/new#2"]);
+	assert.deepEqual(mode.hiveCoverage(), { present: 0, total: 0 });
+	assert.equal(mode.queueError, undefined);
+});
+
 
 test("diff fetch is bounded but honest about it", async () => {
 	const diff = await fetchDiff("projectbluefin/review", 42, { token: "t", fetchImpl: fakeFetch([]), maxPatchChars: 100 });
@@ -1152,6 +1322,51 @@ test("session_start returns without waiting for the queue or the intro", { timeo
 	assert.ok(
 		ctx.notifications.some((entry) => entry.level === "error" && /504/.test(entry.message)),
 		"a queue that failed says so instead of rendering as an empty queue",
+	);
+});
+test("refresh cancellation is silent while replacement activity continues", async () => {
+	const pi = fakeHost();
+	const firstStarted = Promise.withResolvers();
+	const firstCancelled = Promise.withResolvers();
+	let calls = 0;
+	const fetchImpl = async (_url, init) => {
+		calls += 1;
+		if (calls === 1) {
+			firstStarted.resolve();
+			const firstRequest = Promise.withResolvers();
+			init.signal.addEventListener(
+				"abort",
+				() => {
+					firstCancelled.resolve();
+					firstRequest.reject(new Error("The operation was aborted"));
+				},
+				{ once: true },
+			);
+			await firstRequest.promise;
+		}
+		return {
+			ok: true,
+			status: 200,
+			statusText: "OK",
+			json: async () => ({ data: { search: { pageInfo: { hasNextPage: false }, nodes: [] } } }),
+		};
+	};
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	pi.flagValues.set("splash", false);
+
+	await pi.events.get("session_start")({}, ctx);
+	await firstStarted.promise;
+	await pi.shortcuts.get("alt+u").handler(ctx);
+	await firstCancelled.promise;
+	await review.whenStarted();
+
+	assert.equal(calls, 2);
+	assert.equal(
+		ctx.notifications.some((entry) => /aborted/.test(entry.message)),
+		false,
+		"an expected cancellation must not render as a queue error",
 	);
 });
 

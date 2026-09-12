@@ -118,12 +118,19 @@ export class ReviewMode {
 		return this.scope.value;
 	}
 
-	/** Point the queue at an organization or one repository. */
+	/** Point the queue at another organization or repository. */
 	setScope(scope: QueueScope): void {
+		this.inflight?.abort();
+		this.inflight = undefined;
+		this.loading = false;
 		this.scope = scope;
 		this.cursor = 0;
 		this.items = [];
 		this.ranked = { items: [], priorities: new Map(), source: "local", hiveRanked: 0 };
+		this.queueError = undefined;
+		this.queueTruncated = false;
+		this.fetchedAt = 0;
+		this.hiveMissing = 0;
 	}
 
 	/** Why this item sits where it sits. */
@@ -368,20 +375,31 @@ export class ReviewMode {
 				fetchImpl: this.fetchImpl,
 			};
 			const result = await fetchQueue(this.queueMode, options);
-			if (controller.signal.aborted) return result;
+			if (result.cancelled || this.inflight !== controller || controller.signal.aborted) {
+				return { items: result.items, cancelled: true, fetchedAt: result.fetchedAt };
+			}
+
+			if (result.error && result.items.length === 0) {
+				this.queueError = result.error;
+				this.queueTruncated = result.truncated === true;
+				this.fetchedAt = result.fetchedAt;
+				return result;
+			}
+
+			const missing = await this.missingHiveWork(result.items, options, controller);
+			if (this.inflight !== controller || controller.signal.aborted) {
+				return { items: result.items, cancelled: true, fetchedAt: result.fetchedAt };
+			}
 
 			this.queueError = result.error;
 			this.queueTruncated = result.truncated === true;
 			this.fetchedAt = result.fetchedAt;
-			if (!result.error || result.items.length > 0) {
-				const previousKey = this.selectedKey();
-				this.items = [...result.items, ...(await this.missingHiveWork(result.items, options))];
-				if (controller.signal.aborted) return result;
-				this.reprioritize();
-				if (previousKey) {
-					const index = this.visibleItems().findIndex((item) => queueKey(item.repo, item.id) === previousKey);
-					this.cursor = index >= 0 ? index : Math.min(this.cursor, Math.max(0, this.visibleItems().length - 1));
-				}
+			const previousKey = this.selectedKey();
+			this.items = [...result.items, ...missing];
+			this.reprioritize();
+			if (previousKey) {
+				const index = this.visibleItems().findIndex((item) => queueKey(item.repo, item.id) === previousKey);
+				this.cursor = index >= 0 ? index : Math.min(this.cursor, Math.max(0, this.visibleItems().length - 1));
 			}
 			return result;
 		} finally {
@@ -398,13 +416,24 @@ export class ReviewMode {
 	 * Scope is respected: a repository-scoped queue stays that repository's, so
 	 * asking for one project never drags in another project's Hive work.
 	 */
-	private async missingHiveWork(fetched: readonly QueueItem[], options: FetchOptions): Promise<QueueItem[]> {
-		this.hiveMissing = 0;
-		if (!this.hive.online) return [];
+	private async missingHiveWork(
+		fetched: readonly QueueItem[],
+		options: FetchOptions,
+		controller: AbortController,
+	): Promise<QueueItem[]> {
+		if (this.inflight !== controller || controller.signal.aborted) return [];
+		if (!this.hive.online) {
+			this.hiveMissing = 0;
+			return [];
+		}
 		const present = new Set(fetched.map(itemKey));
 		const wanted = [...this.hive.ranks.keys()].filter((key) => !present.has(key) && this.inScope(key));
-		if (wanted.length === 0) return [];
+		if (wanted.length === 0) {
+			this.hiveMissing = 0;
+			return [];
+		}
 		const result = await fetchItemsByKey(wanted, this.queueMode, options);
+		if (this.inflight !== controller || controller.signal.aborted) return [];
 		this.hiveMissing = wanted.length - result.items.length;
 		return result.items;
 	}
