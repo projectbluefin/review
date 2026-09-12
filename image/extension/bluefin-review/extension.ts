@@ -30,13 +30,13 @@ const STATE_POLL_MS = 2_000;
 const HIVE_POLL_MS = 120_000;
 
 export const RAIL_KEYS: readonly RailKey[] = [
+	{ chord: "alt+s", label: "autoslay" },
 	{ chord: "alt+b", label: "dashboard" },
 	{ chord: "alt+j/k", label: "next/prev" },
 	{ chord: "alt+x", label: "select" },
 	{ chord: "alt+i", label: "prs/issues" },
 	{ chord: "alt+o", label: "repo" },
 	{ chord: "alt+u", label: "refresh" },
-	{ chord: "alt+s", label: "slay" },
 	{ chord: "alt+y", label: "cite" },
 ];
 
@@ -360,9 +360,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				},
 				{ overlay: false },
 			);
-			activeDashboardDone = undefined;
+			if (action.kind === "slay") {
+				autoslayActive = true;
+			}
 			await dispatch(ctx, action);
-			// Changing scope from inside the dashboard should land you back in it,
 			// looking at the queue you just asked for.
 			if (action.kind === "scope") {
 				dashboardOpen = false;

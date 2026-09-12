@@ -33,7 +33,7 @@ export type DashboardAction =
 	| { kind: "leaderboard" };
 
 export const DASHBOARD_KEYS: readonly RailKey[] = [
-	{ chord: "s", label: "slay" },
+	{ chord: "s", label: "autoslay" },
 	{ chord: "r/enter", label: "review" },
 	{ chord: "a", label: "approve" },
 	{ chord: "space", label: "select" },
