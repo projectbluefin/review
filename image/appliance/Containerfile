@@ -25,6 +25,8 @@ ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08@sha256:1e5b5437116d78176d6
 # binaries staged out of it link against the base's own glibc.
 # renovate: datasource=docker depName=ghcr.io/projectbluefin/lab-runner
 ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:2c07034a167fec3296605ab1b1287f6c2d14f90d745b7686fab3e19e67fcb899
+# renovate: datasource=docker depName=ghcr.io/projectbluefin/python
+ARG FSDK_PYTHON_IMAGE=ghcr.io/projectbluefin/python:26.08@sha256:1d8beb9f9f197f0e3d9ec98be72c2fb0d9d72fbcafe65aa10c89f2053131aaf1
 
 # renovate: datasource=github-releases depName=can1357/oh-my-pi
 ARG OMP_VERSION=18.1.18
@@ -45,10 +47,19 @@ ARG GH_AARCH64_SHA256=73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8f
 ARG REVIEW_VERSION=0.0.0
 ARG REVIEW_REVISION=unknown
 
+# ---------------------------------------------------------------- python stage
+
+FROM ${FSDK_PYTHON_IMAGE} AS python
+
 # ---------------------------------------------------------------- build stage
 
 FROM ${FSDK_BUILDER_IMAGE} AS build
 
+COPY --from=python /usr/bin/python3* /out/usr/bin/
+RUN ln -sf python3 /out/usr/bin/python
+COPY --from=python /usr/lib/python3.14 /out/usr/lib/python3.14
+COPY --from=python /usr/lib /out/usr/lib
+COPY --from=python /etc/ld.so.cache /out/etc/ld.so.cache
 ARG OMP_VERSION
 ARG OMP_X86_64_SHA256
 ARG OMP_AARCH64_SHA256

@@ -21,12 +21,6 @@ shift
 # utilities that every shell one-liner an agent writes assumes exists. FSDK's
 # distroless base ships coreutils but not these, so without them `gh ... | grep`
 # fails at the pipe — four megabytes to keep the shell from being a decoration.
-python3_real="$(command -v python3 || true)"
-[[ -n "$python3_real" ]] && python3_real="$(readlink -f "$python3_real")"
-python3_ver=""
-if [[ -n "$python3_real" && -x "$python3_real" ]]; then
-  python3_ver="$("$python3_real" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || true)"
-fi
 
 binaries=(
   /usr/bin/bash
@@ -42,9 +36,6 @@ binaries=(
   /usr/bin/tar
   /usr/bin/xargs
 )
-if [[ -n "$python3_real" && -x "$python3_real" ]]; then
-  binaries+=("$python3_real")
-fi
 
 # Callers may name additional absolute executables after the destination. Their
 # ELF closures are staged by the same ldd path as the appliance's fixed base.
@@ -137,23 +128,6 @@ ln -sf bash "${dest}/usr/bin/sh"
 
 # `awk` is spelled that way in every script ever written.
 ln -sf gawk "${dest}/usr/bin/awk"
-if [[ -n "$python3_real" && -x "$python3_real" ]]; then
-  ln -sf "$(basename "$python3_real")" "${dest}/usr/bin/python3"
-  ln -sf "$(basename "$python3_real")" "${dest}/usr/bin/python"
-  if [[ -n "$python3_ver" && -d "/usr/lib/python${python3_ver}" ]]; then
-    install -d -m 0755 "${dest}/usr/lib"
-    cp -a "/usr/lib/python${python3_ver}" "${dest}/usr/lib/python${python3_ver}"
-    rm -rf "${dest}/usr/lib/python${python3_ver}/test" \
-      "${dest}/usr/lib/python${python3_ver}/idlelib" \
-      "${dest}/usr/lib/python${python3_ver}/tkinter" \
-      "${dest}/usr/lib/python${python3_ver}/turtle"* 2>/dev/null || true
-    find "${dest}/usr/lib/python${python3_ver}" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-    find "${dest}/usr/lib/python${python3_ver}" -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete 2>/dev/null || true
-    while IFS= read -r -d '' so; do
-      stage_libraries "$so"
-    done < <(find "${dest}/usr/lib/python${python3_ver}" -type f -name '*.so' -print0)
-  fi
-fi
 
 # git init warns on every invocation without its template directory, and a tool
 # that greets the maintainer with a warning it cannot act on is noise.

@@ -13,10 +13,9 @@ Read first, in this order, and treat them as authoritative over any habit you ca
 in from other repositories:
 
 1. `AGENTS.md` at the repository root.
-2. `.github/copilot-instructions.md`.
-3. `docs/factory/agentic-model.md`, `docs/SKILL.md`, and the matching file under `docs/skills/`.
-4. The Hive knowledge base (`~/agent.md` when present) and organization review skills in `~/.agents/skills/` or `.agents/skills/`.
-5. The diff itself, then the seams it touches: `justfile`, `image/entrypoint.sh`,
+2. `docs/factory/agentic-model.md`, `docs/SKILL.md`, and the matching file under `docs/skills/`.
+3. The Hive knowledge base (`~/agent.md` when present) and organization review skills in `~/.agents/skills/` or `.agents/skills/`.
+4. The diff itself, then the seams it touches: `justfile`, `image/entrypoint.sh`,
    `image/Containerfile`, `image/tui/`, `image/harness/`, `bin/`, `tests/`.
 
 Fetch the diff with `gh pr diff <number> --repo <owner/repo>` and the check state

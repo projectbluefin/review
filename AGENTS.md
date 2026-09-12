@@ -13,6 +13,9 @@ contributor protocol, task selection, tmux session, prompt injection, and output
 3. [`docs/SKILL.md`](docs/SKILL.md).
 4. The one matching file in `docs/skills/`.
 
+## Instruction ownership
+
+`AGENTS.md` is the single authoritative repository contract. Never duplicate policy, instructions, or environment guidance into `.github/copilot-instructions.md` or any user-level agent instruction file.
 ## Boundaries
 
 Keep this repository focused: it ships the maintainer-facing review appliance and the isolated `contribute` Hive worker. `contribute` is not a general agent distribution: OMP is its only selectable agent surface, Hive remains the sole task authority, and the registration file plus inherited provider credentials are its only runtime inputs.
