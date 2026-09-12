@@ -129,6 +129,7 @@ jobs:
           set -euo pipefail
           bash tests/omp-review-mode.sh
           bash tests/appliance-contract.sh
+          bash tests/contribute-contract.sh
 
       # Drives the real Textual app: builds the hash-locked Textual venv from
       # image/tui/requirements.lock, then presses keys and asserts what the

@@ -78,6 +78,15 @@ Published tags:
 | `stable` | Moving alias for the newest published build. |
 | `sha-<commit>` | Immutable, published for every build including branches. |
 
+Tagged releases also carry native `x86_64` and `aarch64` SIF files. Review and
+Contribute use separate checksum manifests (`bluefin-review-SHA256SUMS.txt` and
+`bluefin-contribute-SHA256SUMS.txt`), so installing both cannot overwrite the
+evidence for either artifact. The `bluefin` wrapper prints the canonical
+architecture-specific `gh release download` plus `sha256sum` command when a SIF
+is absent. The contributor OCI equivalent is
+`ghcr.io/projectbluefin/contribute:stable`; both forms run the same pinned
+Contribute image contents.
+
 ## Running it
 
 State lives under `/home/bluefin`: sessions, logs, caches, the model credential,

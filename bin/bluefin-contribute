@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Run the local OMP-only Hive contributor SIF with its required isolation.
+set -euo pipefail
+
+script_path="$(readlink -f "${BASH_SOURCE[0]}")"
+repo_root="$(cd "$(dirname "$script_path")/.." && pwd)"
+sif="${BLUEFIN_CONTRIBUTE_SIF:-${repo_root}/bluefin-contribute.sif}"
+registration="${HIVE_CONTRIBUTOR_ENV:-${HOME}/.config/hive/contributor.env}"
+omp_state="${BLUEFIN_OMP_STATE:-${HOME}/.omp}"
+
+command -v apptainer >/dev/null 2>&1 || {
+  echo "ERROR: apptainer is required to run Bluefin Contribute." >&2
+  exit 127
+}
+[[ -x "$sif" ]] || {
+  echo "ERROR: contributor SIF is missing: ${sif}" >&2
+  echo "  Install the verified release artifact with:" >&2
+  echo "  gh release download --repo projectbluefin/review --pattern bluefin-contribute-\$(uname -m).sif --pattern bluefin-contribute-SHA256SUMS.txt && sha256sum -c --ignore-missing bluefin-contribute-SHA256SUMS.txt" >&2
+  exit 1
+}
+[[ -r "$registration" ]] || {
+  echo "ERROR: Hive registration is missing or unreadable: ${registration}" >&2
+  exit 1
+}
+
+[[ -d "$omp_state" ]] || {
+  echo "ERROR: OMP state directory is missing: ${omp_state}" >&2
+  exit 1
+}
+
+# The SIF gets a fresh $HOME every run (see bin/bluefin's identical note for
+# the review SIF): nothing here persists a `gh auth login`, and apptainer
+# only forwards a token that is actually set in this shell. Without one, the
+# contributor picks up a Hive task, its first `git fetch`/`gh` call fails
+# against a stale or absent credential, it retries through an interactive
+# `gh auth login` device-code prompt, and — headless, nobody there to type
+# the code — that hangs forever, burning CPU on a task that can never
+# complete. Resolve the token from the host the same way bin/bluefin review
+# and bin/omp-review do, and fail fast instead of launching into that hang.
+if [[ -z "${GH_TOKEN:-}" && -z "${GITHUB_TOKEN:-}" ]] && command -v gh >/dev/null 2>&1; then
+  resolved_gh_token="$(gh auth token 2>/dev/null || true)"
+  if [[ -n "$resolved_gh_token" ]]; then
+    export GH_TOKEN="$resolved_gh_token"
+    export GITHUB_TOKEN="$resolved_gh_token"
+  fi
+fi
+# Fallback to host omp auth database if gh CLI is unauthenticated or missing
+if [[ -z "${GH_TOKEN:-}" && -z "${GITHUB_TOKEN:-}" ]] && command -v python3 >/dev/null 2>&1; then
+  resolved_omp_token="$(python3 -c '
+import sqlite3, os, json
+state_dir = os.environ.get("BLUEFIN_OMP_STATE") or (os.path.join(os.environ["HOME"], ".omp") if "HOME" in os.environ else "")
+db_path = os.path.join(state_dir, "agent/agent.db") if state_dir else ""
+if db_path and os.path.exists(db_path):
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        for prov in ("github-copilot", "github"):
+            row = cur.execute("SELECT data FROM auth_credentials WHERE provider = ?", (prov,)).fetchone()
+            if row:
+                d = json.loads(row[0])
+                tok = d.get("access") or d.get("token") or d.get("access_token")
+                if tok:
+                    print(tok)
+                    break
+    except Exception:
+        pass
+' 2>/dev/null || true)"
+  if [[ -n "$resolved_omp_token" ]]; then
+    export GH_TOKEN="$resolved_omp_token"
+    export GITHUB_TOKEN="$resolved_omp_token"
+    export COPILOT_GITHUB_TOKEN="$resolved_omp_token"
+    export GITHUB_COPILOT_TOKEN="$resolved_omp_token"
+  fi
+fi
+if [[ -z "${GH_TOKEN:-}" && -z "${GITHUB_TOKEN:-}" ]]; then
+  echo "ERROR: no GitHub token available; the agent would have no GitHub identity." >&2
+  echo "  It cannot fork, clone, push, or open a pull request, and would hang at an" >&2
+  echo "  interactive 'gh auth login' device-code prompt nobody can answer." >&2
+  echo "  Fix it with: gh auth login --web --hostname github.com --scopes repo,read:org" >&2
+  echo "  Or export GH_TOKEN with a scoped PAT." >&2
+  exit 1
+fi
+
+# apptainer imports the full host environment by default (only `--cleanenv`
+# or `--no-env` opts out), so the exported tokens above already reach the
+# contained process; passing them again as literal `--env NAME=value`
+# arguments would put credential values in this process's argv instead.
+export GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+export GITHUB_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+
+runtime_home="${XDG_STATE_HOME:-${HOME:-/tmp}/.local/state}/bluefin-contribute"
+mkdir -p "${runtime_home}/.config/hive"
+if [[ -f "${HOME:-/no-such-home}/.gitconfig" && ! -f "${runtime_home}/.gitconfig" ]]; then
+  cp "${HOME}/.gitconfig" "${runtime_home}/.gitconfig"
+fi
+
+bind_args=(
+  --bind "${registration}:/home/bluefin/.config/hive/contributor.env:ro"
+  --bind "${omp_state}:/home/bluefin/.omp:rw"
+)
+# Forward host gh config into contributor container automatically
+host_gh_cfg="${HOME:-/no-such-home}/.config/gh"
+if [[ -e "$host_gh_cfg" ]]; then
+  bind_args+=(--bind "${host_gh_cfg}:/home/bluefin/.config/gh:ro")
+fi
+# Mount updated entrypoint and tmux.conf from repo if present so local fixes take effect immediately
+if [[ -f "${repo_root}/image/contribute/entrypoint.sh" ]]; then
+  bind_args+=(--bind "${repo_root}/image/contribute/entrypoint.sh:/usr/local/bin/contribute-entrypoint:ro")
+fi
+if [[ -f "${repo_root}/image/tmux.conf" ]]; then
+  bind_args+=(--bind "${repo_root}/image/tmux.conf:/etc/tmux.conf:ro")
+fi
+
+exec apptainer run \
+  --home "${runtime_home}:/home/bluefin" \
+  ${bind_args[@]+"${bind_args[@]}"} \
+  "$sif" "$@"

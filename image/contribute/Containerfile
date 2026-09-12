@@ -1,0 +1,93 @@
+# Bluefin Contribute: an isolated interactive Hive + OMP worker.
+ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08.0@sha256:497c31303ce95290dbcb08c667d5cacdda7d3e026e5f1194655af675da80ee1b
+ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:2c07034a167fec3296605ab1b1287f6c2d14f90d745b7686fab3e19e67fcb899
+ARG HIVE_COMMIT=d0fc9ccf1796c408c43dc6be6d6315df00850781
+# renovate: datasource=github-releases depName=can1357/oh-my-pi
+ARG OMP_VERSION=18.1.18
+ARG OMP_X86_64_SHA256=45421f9a5f112bc47cb9f77c4b4d7927631f8ff859624f821287ec854eb239fc
+ARG OMP_AARCH64_SHA256=1ae8273c231ceb88cebc9971901cf7f5d97ed4149cdc740a814f629cd2b4dcb2
+ARG NODE_VERSION=24.18.1
+ARG NODE_X86_64_SHA256=d6c664df3f3f61458e8c277585571328522d705166723a7c7823a9253a4d15a0
+ARG NODE_AARCH64_SHA256=7201e3a09dc825bac57867c81913e2b8f0ef87d04cb9082af4cda82f6ff3d88c
+ARG GH_VERSION=2.97.0
+ARG GH_X86_64_SHA256=a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112
+ARG GH_AARCH64_SHA256=73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5
+ARG TMUX_VERSION=3.7b
+ARG TMUX_X86_64_SHA256=f85e6c1c412750a774eb3f370f33bad05fc726fb8b6a0b174ad6f0b6d954df58
+ARG TMUX_AARCH64_SHA256=b2955782695283fbc3682a2f77d65616f53b986ee3cf3d80618d3b1cb95b91a6
+ARG CONTRIBUTE_VERSION=0.0.0
+ARG CONTRIBUTE_REVISION=unknown
+
+FROM ${FSDK_BUILDER_IMAGE} AS build
+ARG HIVE_COMMIT OMP_VERSION OMP_X86_64_SHA256 OMP_AARCH64_SHA256
+ARG NODE_VERSION NODE_X86_64_SHA256 NODE_AARCH64_SHA256
+ARG GH_VERSION GH_X86_64_SHA256 GH_AARCH64_SHA256
+ARG TMUX_VERSION TMUX_X86_64_SHA256 TMUX_AARCH64_SHA256
+ARG CONTRIBUTE_VERSION CONTRIBUTE_REVISION
+COPY package.json package-lock.json /src/
+COPY --chmod=0755 image/appliance/stage-runtime.sh /usr/local/libexec/stage-runtime
+COPY --chmod=0755 scripts/generate-contribute-sbom.py /usr/local/libexec/contribute-sbom
+RUN set -eu; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64) omp_asset=omp-linux-x64; omp_sha="$OMP_X86_64_SHA256"; node_arch=x64; node_sha="$NODE_X86_64_SHA256"; gh_arch=amd64; gh_sha="$GH_X86_64_SHA256"; tmux_arch=x86_64; tmux_sha="$TMUX_X86_64_SHA256" ;; \
+      aarch64|arm64) omp_asset=omp-linux-arm64; omp_sha="$OMP_AARCH64_SHA256"; node_arch=arm64; node_sha="$NODE_AARCH64_SHA256"; gh_arch=arm64; gh_sha="$GH_AARCH64_SHA256"; tmux_arch=arm64; tmux_sha="$TMUX_AARCH64_SHA256" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    workdir="$(mktemp -d)"; trap 'rm -rf "$workdir"' EXIT; \
+    mkdir -p /out/usr/bin /out/usr/local/bin/lib /out/usr/local/etc/hive /out/usr/lib/bluefin/hive /out/usr/share/bluefin/contribute; \
+    curl --fail --location --show-error --silent "https://github.com/can1357/oh-my-pi/releases/download/v${OMP_VERSION}/${omp_asset}" -o "$workdir/omp"; \
+    printf '%s  %s\n' "$omp_sha" "$workdir/omp" | sha256sum -c --status; install -m 0755 "$workdir/omp" /out/usr/bin/omp; \
+    curl --fail --location --show-error --silent "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" -o "$workdir/node.tar.xz"; \
+    printf '%s  %s\n' "$node_sha" "$workdir/node.tar.xz" | sha256sum -c --status; tar --no-same-owner -xf "$workdir/node.tar.xz" -C "$workdir"; \
+    node_root="$workdir/node-v${NODE_VERSION}-linux-${node_arch}"; \
+    curl --fail --location --show-error --silent "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${gh_arch}.tar.gz" -o "$workdir/gh.tar.gz"; \
+    printf '%s  %s\n' "$gh_sha" "$workdir/gh.tar.gz" | sha256sum -c --status; tar -xzOf "$workdir/gh.tar.gz" --wildcards --occurrence=1 '*/bin/gh' > "$workdir/gh"; chmod 0755 "$workdir/gh"; \
+    curl --fail --location --show-error --silent "https://github.com/tmux/tmux-builds/releases/download/v${TMUX_VERSION}/tmux-${TMUX_VERSION}-linux-${tmux_arch}.tar.gz" -o "$workdir/tmux.tar.gz"; \
+    printf '%s  %s\n' "$tmux_sha" "$workdir/tmux.tar.gz" | sha256sum -c --status; tar -xzOf "$workdir/tmux.tar.gz" --occurrence=1 tmux > "$workdir/tmux"; chmod 0755 "$workdir/tmux"; \
+    PATH="$node_root/bin:$PATH" npm --prefix /src ci --omit=dev --ignore-scripts; \
+    cp -a /src/node_modules /out/usr/lib/bluefin/hive/node_modules; \
+    /usr/local/libexec/stage-runtime /out "$node_root/bin/node" "$workdir/gh" "$workdir/tmux" /usr/bin/cmp; \
+    curl --fail --location --show-error --silent "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-agent.sh" -o /out/usr/local/bin/contributor-agent.sh; \
+    curl --fail --location --show-error --silent "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/contributor-relay.js" -o /out/usr/local/bin/contributor-relay.js; \
+    curl --fail --location --show-error --silent "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/pi-backend.js" -o /out/usr/local/bin/pi-backend.js; \
+    curl --fail --location --show-error --silent "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/bin/lib/pane-classifier.js" -o /out/usr/local/bin/lib/pane-classifier.js; \
+    curl --fail --location --show-error --silent "https://raw.githubusercontent.com/hivecommons/hive/${HIVE_COMMIT}/config/backends.conf" -o /out/usr/local/etc/hive/backends.conf; \
+    chmod 0755 /out/usr/local/bin/contributor-agent.sh /out/usr/local/bin/contributor-relay.js /out/usr/local/bin/pi-backend.js; \
+    /usr/local/libexec/contribute-sbom --out /out/usr/share/bluefin/contribute/sbom.spdx.json --version "$CONTRIBUTE_VERSION" --revision "$CONTRIBUTE_REVISION" --hive-commit "$HIVE_COMMIT" --omp-version "$OMP_VERSION" --omp-sha256 "$omp_sha" --node-version "$NODE_VERSION" --node-sha256 "$node_sha" --gh-version "$GH_VERSION" --gh-sha256 "$gh_sha" --tmux-version "$TMUX_VERSION" --tmux-sha256 "$tmux_sha" --ws-version "$("$node_root/bin/node" -p "require('/src/node_modules/ws/package.json').version")"; \
+    python3 -m json.tool /out/usr/share/bluefin/contribute/sbom.spdx.json >/dev/null; \
+    install -d -m 0755 /out/etc /out/home/bluefin/.config/hive /out/home/bluefin/workspace /out/var/run/hive-metrics; \
+    printf 'root:x:0:0:root:/root:/usr/bin/bash\nbluefin:x:65532:65532:Bluefin:/home/bluefin:/usr/bin/bash\n' > /out/etc/passwd; \
+    printf 'root:x:0:\nbluefin:x:65532:\n' > /out/etc/group; \
+    chown -R 65532:65532 /out/home/bluefin /out/var/run/hive-metrics; \
+    for binary in /out/usr/bin/omp /out/usr/bin/node /out/usr/bin/gh /out/usr/bin/tmux /out/usr/bin/bash /out/usr/bin/git /out/usr/bin/curl /out/usr/bin/find /out/usr/bin/grep /out/usr/bin/sed /out/usr/bin/cmp /out/usr/bin/python3; do test -x "$binary"; done; \
+    test ! -e /out/usr/bin/npm; test ! -e /out/usr/bin/corepack
+
+FROM ${FSDK_BASE_IMAGE}
+ARG FSDK_BASE_IMAGE HIVE_COMMIT OMP_VERSION NODE_VERSION GH_VERSION TMUX_VERSION CONTRIBUTE_VERSION CONTRIBUTE_REVISION
+COPY --from=build /out /
+COPY --chmod=0755 image/contribute/entrypoint.sh /usr/local/bin/contribute-entrypoint
+COPY image/tmux.conf /etc/tmux.conf
+ENV HOME=/home/bluefin \
+    XDG_CONFIG_HOME=/home/bluefin/.config \
+    XDG_STATE_HOME=/home/bluefin/.local/state \
+    NODE_PATH=/usr/lib/bluefin/hive/node_modules \
+    PATH=/usr/bin:/bin \
+    SHELL=/usr/bin/bash \
+    TERM=xterm-256color \
+    AGENT_BACKEND=omp
+LABEL org.opencontainers.image.title="Bluefin Contribute" \
+      org.opencontainers.image.description="Distroless OMP contributor runtime for Hive-assigned work." \
+      org.opencontainers.image.source="https://github.com/projectbluefin/review" \
+      org.opencontainers.image.revision="${CONTRIBUTE_REVISION}" \
+      org.opencontainers.image.version="${CONTRIBUTE_VERSION}" \
+      org.opencontainers.image.base.name="${FSDK_BASE_IMAGE}" \
+      io.projectbluefin.contribute="true" \
+      io.projectbluefin.contribute.omp.version="${OMP_VERSION}" \
+      io.projectbluefin.contribute.hive.commit="${HIVE_COMMIT}" \
+      io.projectbluefin.contribute.node.version="${NODE_VERSION}" \
+      io.projectbluefin.contribute.gh.version="${GH_VERSION}" \
+      io.projectbluefin.contribute.tmux.version="${TMUX_VERSION}"
+USER 65532:65532
+WORKDIR /home/bluefin/workspace
+ENTRYPOINT ["/usr/local/bin/contribute-entrypoint"]

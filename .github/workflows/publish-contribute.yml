@@ -1,4 +1,4 @@
-name: publish review appliance
+name: publish contribute image
 
 on:
   push:
@@ -11,7 +11,7 @@ on:
 # A branch build is a moving pointer: a superseded run has nothing left to
 # publish. A tag build is a release and is never cancelled.
 concurrency:
-  group: publish-review-appliance-${{ github.ref }}
+  group: publish-contribute-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
@@ -26,7 +26,7 @@ permissions:
 # produced under emulation, and every runtime claim below comes from a container
 # the runner actually executed.
 env:
-  IMAGE: ghcr.io/projectbluefin/review
+  IMAGE: ghcr.io/projectbluefin/contribute
   BUILDAH_IMAGE: quay.io/buildah/stable:v1.43@sha256:ca4edbaabf71ca330ec9b2714bf8e06c726a6e85ae215cfb1474d2e2c832aacb
 
 jobs:
@@ -86,7 +86,7 @@ jobs:
           set -euo pipefail
           just --justfile justfile --list
 
-      - name: Guided Goose onboarding behavior
+      - name: Guided onboarding behavior
         run: |
           set -euo pipefail
           bash tests/just-onboarding.sh
@@ -112,11 +112,11 @@ jobs:
           bash tests/bluefin-review.sh
           bash tests/worktree-guard.sh
 
-      - name: Review mode and appliance contracts
+      - name: Review mode and contribute contracts
         run: |
           set -euo pipefail
           bash tests/omp-review-mode.sh
-          bash tests/appliance-contract.sh
+          bash tests/contribute-contract.sh
 
       - name: Dashboard contract and pilot
         run: |
@@ -152,18 +152,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Resolve the appliance version and tag set
+      - name: Resolve the contribute version and tag set
         id: metadata
         shell: bash
         run: |
           set -euo pipefail
           # FSDK series from the pinned base, tool revision from REVISION.
-          version="$(bash scripts/review-appliance-version.sh)"
-          base_image="$(sed -n 's/^ARG FSDK_BASE_IMAGE=\(.*\)$/\1/p' image/appliance/Containerfile)"
+          version="$(bash scripts/contribute-version.sh)"
+          base_image="$(sed -n 's/^ARG FSDK_BASE_IMAGE=\(.*\)$/\1/p' image/contribute/Containerfile)"
           base_name="${base_image%@*}"
           base_digest="${base_image##*@}"
           [[ "$base_digest" =~ ^sha256:[0-9a-f]{64}$ ]] ||
-            { echo "appliance base must be digest-pinned, got: ${base_image}" >&2; exit 1; }
+            { echo "contribute base must be digest-pinned, got: ${base_image}" >&2; exit 1; }
 
           release=false
           sha_tag="sha-${GITHUB_SHA}"
@@ -172,11 +172,11 @@ jobs:
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             # Release build: publish the immutable version tag and update stable pointer
             release=true
-            tags="${tags} ${version} stable"
+            tags="${tags} ${version} stable testing"
             stable=true
           elif [[ "${GITHUB_REF}" == refs/heads/main ]]; then
             # Push to main: update moving pointers only; do not consume immutable version tag
-            tags="${tags} stable"
+            tags="${tags} stable testing"
             stable=true
           fi
 
@@ -199,7 +199,7 @@ jobs:
         run: |
           set -euo pipefail
           if skopeo inspect --raw "docker://${IMAGE}:${VERSION}" >/dev/null 2>&1; then
-            echo "::error::${IMAGE}:${VERSION} already exists. Bump image/appliance/REVISION." >&2
+            echo "::error::${IMAGE}:${VERSION} already exists. Bump image/contribute/REVISION." >&2
             exit 1
           fi
           echo "${IMAGE}:${VERSION} is free"
@@ -233,7 +233,7 @@ jobs:
           buildah --version
           skopeo --version
 
-      - name: Build the appliance
+      - name: Build the contribute
         shell: bash
         env:
           CREATED: ${{ needs.metadata.outputs.created }}
@@ -244,50 +244,53 @@ jobs:
           set -euo pipefail
           podman build \
             --format oci \
-            --build-arg REVIEW_VERSION="${VERSION}" \
-            --build-arg REVIEW_REVISION="${GITHUB_SHA}" \
+            --build-arg CONTRIBUTE_VERSION="${VERSION}" \
+            --build-arg CONTRIBUTE_REVISION="${GITHUB_SHA}" \
             --label "org.opencontainers.image.created=${CREATED}" \
             --label "org.opencontainers.image.base.name=${BASE_NAME}" \
             --label "org.opencontainers.image.base.digest=${BASE_DIGEST}" \
-            --file image/appliance/Containerfile \
-            --tag appliance:smoke \
+            --file image/contribute/Containerfile \
+            --tag contribute:smoke \
             .
 
-      - name: Execute the shipped appliance on this architecture
+      - name: Execute the shipped contribute on this architecture
         shell: bash
         env:
           EXPECTED_UNAME: ${{ matrix.uname }}
           VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           set -euo pipefail
-          bash tests/appliance-contract.sh --image appliance:smoke --expect-arch "$EXPECTED_UNAME" --expect-version "$VERSION"
+          bash tests/contribute-contract.sh --image contribute:smoke
 
 
-      - name: Build the Apptainer SIF appliance
+      - name: Build and execute the native Apptainer image
         shell: bash
         env:
           ARCH: ${{ matrix.arch }}
           UNAME: ${{ matrix.uname }}
         run: |
           set -euo pipefail
-          # Convert the locally built appliance image into an Apptainer SIF binary
-          sif_name="bluefin-review-${UNAME}.sif"
-          podman save --format docker-archive -o "${RUNNER_TEMP}/appliance-${ARCH}.tar" appliance:smoke
-          # Install apptainer via apt from the official PPA
           sudo add-apt-repository -y ppa:apptainer/ppa
           sudo apt-get update -qq
           sudo apt-get install -y apptainer
-          apptainer build --force "${RUNNER_TEMP}/${sif_name}" "docker-archive:${RUNNER_TEMP}/appliance-${ARCH}.tar"
-          chmod 0755 "${RUNNER_TEMP}/${sif_name}"
-          rm -f "${RUNNER_TEMP}/appliance-${ARCH}.tar"
+          sif="${RUNNER_TEMP}/bluefin-contribute-${UNAME}.sif"
+          archive="${RUNNER_TEMP}/contribute-${ARCH}.tar"
+          podman save --format docker-archive -o "$archive" contribute:smoke
+          apptainer build --force "$sif" "docker-archive:${archive}"
+          chmod 0755 "$sif"
+          apptainer exec "$sif" /usr/bin/omp --version
+          apptainer exec "$sif" /usr/bin/tmux -V
+          apptainer exec "$sif" /usr/bin/node -e 'require.resolve("ws")'
+          rm -f "$archive"
 
-      - name: Publish the SIF artifact for release assembly
+      - name: Publish the native Apptainer artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: bluefin-review-sif-${{ matrix.arch }}
-          path: ${{ runner.temp }}/bluefin-review-${{ matrix.uname }}.sif
+          name: bluefin-contribute-sif-${{ matrix.arch }}
+          path: ${{ runner.temp }}/bluefin-contribute-${{ matrix.uname }}.sif
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 14
+
       - name: Log in to GHCR
         shell: bash
         env:
@@ -314,11 +317,11 @@ jobs:
           # Staged in this repository's own namespace: a fork proves the image
           # with its own token, and only the guarded publish job turns these
           # digests into ':stable'.
-          staging="ghcr.io/${GITHUB_REPOSITORY,,}-appliance"
+          staging="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/contribute"
           target="${staging}:sha-${GITHUB_SHA}-${ARCH}"
           podman push --format oci --authfile "${RUNNER_TEMP}/ghcr-auth.json" \
             --digestfile "${RUNNER_TEMP}/digest-${ARCH}.txt" \
-            appliance:smoke "docker://${target}"
+            contribute:smoke "docker://${target}"
           digest="$(cat "${RUNNER_TEMP}/digest-${ARCH}.txt")"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           {
@@ -329,7 +332,7 @@ jobs:
       - name: Publish the digest for index assembly
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: appliance-digest-${{ matrix.arch }}
+          name: contribute-digest-${{ matrix.arch }}
           path: ${{ runner.temp }}/digest-${{ matrix.arch }}.txt
           if-no-files-found: error
           retention-days: 1
@@ -344,7 +347,7 @@ jobs:
         with:
           image: ${{ steps.push.outputs.image }}@${{ steps.push.outputs.digest }}
           format: spdx-json
-          output-file: appliance-sbom-${{ matrix.arch }}.spdx.json
+          output-file: contribute-sbom-${{ matrix.arch }}.spdx.json
           upload-artifact: false
           upload-release-assets: false
 
@@ -360,7 +363,7 @@ jobs:
         with:
           subject-name: ${{ steps.push.outputs.image }}
           subject-digest: ${{ steps.push.outputs.digest }}
-          sbom-path: appliance-sbom-${{ matrix.arch }}.spdx.json
+          sbom-path: contribute-sbom-${{ matrix.arch }}.spdx.json
           push-to-registry: true
   publish:
     needs: [metadata, build]
@@ -382,7 +385,7 @@ jobs:
       - name: Download the per-architecture digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: appliance-digest-*
+          pattern: contribute-digest-*
           path: ${{ runner.temp }}/digests
           merge-multiple: true
 
@@ -411,7 +414,7 @@ jobs:
           TAGS: ${{ needs.metadata.outputs.tags }}
         run: |
           set -euo pipefail
-          staging="ghcr.io/${GITHUB_REPOSITORY,,}-appliance"
+          staging="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/contribute"
           amd64="$(cat "${RUNNER_TEMP}/digests/digest-amd64.txt")"
           arm64="$(cat "${RUNNER_TEMP}/digests/digest-arm64.txt")"
           for digest in "$amd64" "$arm64"; do
@@ -419,20 +422,18 @@ jobs:
           done
 
           # Manifest assembly moves descriptors, never layers, so it runs in a
-          # pinned unprivileged buildah rather than the runner's older one.
-          # Manifest assembly moves descriptors, never layers, so it runs in a
           # pinned unprivileged buildah rather than the runner's older one. The
           # index is created, annotated and pushed by one container: a manifest
           # list does not survive the container that built it.
           script="$(mktemp)"
           cat >"$script" <<EOF
           set -euo pipefail
-          buildah manifest create appliance:index
-          buildah manifest add appliance:index docker://${staging}@${amd64}
-          buildah manifest add appliance:index docker://${staging}@${arm64}
+          buildah manifest create contribute:index
+          buildah manifest add contribute:index docker://${staging}@${amd64}
+          buildah manifest add contribute:index docker://${staging}@${arm64}
           for annotation in \
-            "org.opencontainers.image.title=Bluefin Review" \
-            "org.opencontainers.image.description=Distroless review appliance: the Bluefin Review mode of omp over the live Project Bluefin queue." \
+            "org.opencontainers.image.title=Bluefin Contribute" \
+            "org.opencontainers.image.description=Distroless OMP contributor runtime for Hive-assigned work." \
             "org.opencontainers.image.url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             "org.opencontainers.image.revision=${GITHUB_SHA}" \
@@ -441,13 +442,13 @@ jobs:
             "org.opencontainers.image.licenses=Apache-2.0" \
             "org.opencontainers.image.base.name=${BASE_NAME}" \
             "org.opencontainers.image.base.digest=${BASE_DIGEST}" \
-            "io.projectbluefin.review.appliance=true"; do
-            buildah manifest annotate --index --annotation "\$annotation" appliance:index
+            "io.projectbluefin.contribute=true"; do
+            buildah manifest annotate --index --annotation "\$annotation" contribute:index
           done
           for tag in ${TAGS}; do
-            buildah manifest push --all --format oci appliance:index "docker://${IMAGE}:\${tag}"
+            buildah manifest push --all --format oci contribute:index "docker://${IMAGE}:\${tag}"
           done
-          buildah manifest push --all --format oci --digestfile /tmp/index-digest appliance:index "docker://${IMAGE}:sha-${GITHUB_SHA}"
+          buildah manifest push --all --format oci --digestfile /tmp/index-digest contribute:index "docker://${IMAGE}:sha-${GITHUB_SHA}"
           cat /tmp/index-digest
           EOF
           digest="$(podman run --rm \
@@ -469,58 +470,19 @@ jobs:
       - name: Download the per-architecture SIF files
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: bluefin-review-sif-*
+          pattern: bluefin-contribute-sif-*
           path: ${{ runner.temp }}/sifs
           merge-multiple: true
 
-      - name: Package native cross-platform bundles (macOS, Windows, Linux)
+      - name: Stage release assets
         shell: bash
-        env:
-          VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           set -euo pipefail
-          command -v zip >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y zip)
           staging="${RUNNER_TEMP}/release-assets"
           mkdir -p "$staging"
           cp "${RUNNER_TEMP}/sifs/"*.sif "$staging/"
-
-          # Package macOS bundles (darwin-arm64, darwin-x64)
-          for arch in darwin-arm64 darwin-x64; do
-            dir="${RUNNER_TEMP}/bluefin-review-${arch}"
-            mkdir -p "${dir}/bin" "${dir}/extension"
-            curl -sSfL "https://github.com/can1357/oh-my-pi/releases/download/v18.1.16/omp-${arch}" -o "${dir}/bin/omp"
-            chmod 0755 "${dir}/bin/omp"
-            cp -r image/extension/bluefin-review/* "${dir}/extension/"
-            tar -czf "${staging}/bluefin-review-${arch}.tar.gz" -C "${RUNNER_TEMP}" "bluefin-review-${arch}"
-            rm -rf "$dir"
-          done
-
-          # Package Windows bundles (windows-x64, windows-arm64)
-          for arch in windows-x64 windows-arm64; do
-            dir="${RUNNER_TEMP}/bluefin-review-${arch}"
-            mkdir -p "${dir}/bin" "${dir}/extension"
-            curl -sSfL "https://github.com/can1357/oh-my-pi/releases/download/v18.1.16/omp-${arch}.exe" -o "${dir}/bin/omp.exe"
-            cp -r image/extension/bluefin-review/* "${dir}/extension/"
-            cat << 'CMD' > "${dir}/bluefin-review.cmd"
-          @echo off
-          "%~dp0bin\omp.exe" --profile review --extension "%~dp0extension" %*
-          CMD
-            (cd "${RUNNER_TEMP}" && zip -rq "${staging}/bluefin-review-${arch}.zip" "bluefin-review-${arch}")
-            rm -rf "$dir"
-          done
-
-          # Checksums for all release assets
-          (cd "$staging" && sha256sum -- * > bluefin-review-SHA256SUMS.txt)
+          (cd "$staging" && sha256sum -- *.sif > bluefin-contribute-SHA256SUMS.txt)
           ls -lh "$staging"
-
-      - name: Generate release notes
-        if: needs.metadata.outputs.release == 'true'
-        uses: projectbluefin/actions/bootc-build/generate-release-notes@2564c7bb30143104a9a1aebb4254359e174a8d81 # v1
-        with:
-          tag: v${{ needs.metadata.outputs.version }}
-          output-file: ${{ runner.temp }}/CHANGELOG.md
-          config: cliff.toml
-          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish GitHub Release assets
         if: needs.metadata.outputs.release == 'true'
@@ -528,34 +490,23 @@ jobs:
         with:
           name: v${{ needs.metadata.outputs.version }}
           tag_name: v${{ needs.metadata.outputs.version }}
-          body_path: ${{ runner.temp }}/CHANGELOG.md
           files: |
             ${{ runner.temp }}/release-assets/*
-            ${{ runner.temp }}/CHANGELOG.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Summarize the publication
         shell: bash
         env:
           VERSION: ${{ needs.metadata.outputs.version }}
           STABLE: ${{ needs.metadata.outputs.stable }}
-          RELEASE: ${{ needs.metadata.outputs.release }}
           DIGEST: ${{ steps.publish.outputs.digest }}
         run: |
           set -euo pipefail
           {
-            echo "## Bluefin Review appliance"
+            echo "## Bluefin Contribute"
             echo
             echo "Index digest: \`${DIGEST}\`"
             echo "Immutable tag: \`${IMAGE}:sha-${GITHUB_SHA}\`"
-            if [[ "$RELEASE" == true ]]; then
-              echo "Version tag: \`${IMAGE}:${VERSION}\`"
-            fi
-            if [[ "$STABLE" == true ]]; then
-              echo "Stable alias: \`${IMAGE}:stable\` now points at this build"
-            fi
-            echo
-            echo '```'
-            echo "podman run --rm -it ${IMAGE}:stable"
-            echo '```'
+            [[ "$STABLE" == true ]] && echo "Stable alias: \`${IMAGE}:stable\`"
           } >> "$GITHUB_STEP_SUMMARY"

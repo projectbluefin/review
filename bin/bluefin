@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+command_name="${1:-}"
+shift || true
+script_path="$(readlink -f "${BASH_SOURCE[0]}")"
+repo_root="$(cd "$(dirname "$script_path")/.." && pwd)"
+
+case "$command_name" in
+  contribute)
+    exec "${repo_root}/bin/bluefin-contribute" "$@"
+    ;;
+  review)
+    sif="${BLUEFIN_REVIEW_SIF:-${repo_root}/bluefin-review.sif}"
+    command -v apptainer >/dev/null 2>&1 || { echo "ERROR: apptainer is required." >&2; exit 127; }
+    [[ -x "$sif" ]] || {
+      echo "ERROR: review SIF is missing: ${sif}" >&2
+      echo "  Install the verified release artifact with:" >&2
+      echo "  gh release download --repo projectbluefin/review --pattern bluefin-review-\$(uname -m).sif --pattern bluefin-review-SHA256SUMS.txt && sha256sum -c --ignore-missing bluefin-review-SHA256SUMS.txt" >&2
+      exit 1
+    }
+    runtime_home="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin-review"
+    mkdir -p "$runtime_home"
+    # The distroless review SIF bundles its own gh binary but no persisted
+    # `gh auth login` state — each apptainer run gets a fresh $HOME, and gh's
+    # credential is stored in ~/.config/gh, not an env var, so it never
+    # follows the container in. Resolve it from the HOST's own gh session
+    # (mirrors bin/omp-review's identical resolution for the source-run
+    # path) and forward it as an env var, which is all the containerized
+    # `gh`/the review extension's own token lookup actually needs.
+    if [[ -z "${GH_TOKEN:-}" && -z "${GITHUB_TOKEN:-}" ]] && command -v gh >/dev/null 2>&1; then
+      resolved_gh_token="$(gh auth token 2>/dev/null || true)"
+      if [[ -n "$resolved_gh_token" ]]; then
+        export GH_TOKEN="$resolved_gh_token"
+        export GITHUB_TOKEN="$resolved_gh_token"
+      fi
+    fi
+    if [[ -z "${GH_TOKEN:-}" && -z "${GITHUB_TOKEN:-}" ]] && command -v python3 >/dev/null 2>&1; then
+      resolved_omp_token="$(python3 -c '
+import sqlite3, os, json
+db_path = os.path.expanduser(os.path.join(os.environ.get("HOME", "~"), ".omp/agent/agent.db"))
+if os.path.exists(db_path):
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        for prov in ("github-copilot", "github"):
+            row = cur.execute("SELECT data FROM auth_credentials WHERE provider = ?", (prov,)).fetchone()
+            if row:
+                d = json.loads(row[0])
+                tok = d.get("access") or d.get("token") or d.get("access_token")
+                if tok:
+                    print(tok)
+                    break
+    except Exception:
+        pass
+' 2>/dev/null || true)"
+      if [[ -n "$resolved_omp_token" ]]; then
+        export GH_TOKEN="$resolved_omp_token"
+        export GITHUB_TOKEN="$resolved_omp_token"
+        export COPILOT_GITHUB_TOKEN="$resolved_omp_token"
+        export GITHUB_COPILOT_TOKEN="$resolved_omp_token"
+      fi
+    fi
+    export GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    export GITHUB_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+    # apptainer imports the full host environment by default (only
+    # `--cleanenv`/`--no-env` opt out), so the exported token above already
+    # reaches the contained process without putting its value in this argv.
+    bind_args=()
+    # Forward host configs into container automatically
+    for cfg in "${HOME:-/no-such-home}/.gitconfig:/home/bluefin/.gitconfig:ro" \
+               "${HOME:-/no-such-home}/.config/hive:/home/bluefin/.config/hive:ro" \
+               "${HOME:-/no-such-home}/.config/gh:/home/bluefin/.config/gh:ro" \
+               "${HOME:-/no-such-home}/.omp:/home/bluefin/.omp:rw"; do
+      src="${cfg%%:*}"
+      if [[ -e "$src" ]]; then
+        bind_args+=(--bind "$cfg")
+      fi
+    done
+    exec apptainer run --home "${runtime_home}:/home/bluefin" ${bind_args[@]+"${bind_args[@]}"} "$sif" "$@"
+    ;;
+  *)
+    echo "Usage: bluefin {contribute|review}" >&2
+    exit 2
+    ;;
+esac

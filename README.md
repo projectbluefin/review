@@ -156,8 +156,23 @@ human review.** Choose one worker backend:
 
 ```bash
 just contribute                         # default Goose worker (TOOL=goose)
+just contribute luna                    # select the Luna profile
 TOOL=codex just review-container         # Codex contributor worker
 ```
+
+The native Apptainer distribution uses the same command grammar:
+
+```bash
+bluefin contribute luna
+```
+
+Tagged releases publish `bluefin-contribute-{x86_64,aarch64}.sif` and
+`bluefin-review-{x86_64,aarch64}.sif` with separate checksum manifests. If a
+Homebrew-installed wrapper cannot find its SIF, its error prints the single
+`gh release download` and `sha256sum` command that installs and verifies the
+matching architecture. OCI users pull `ghcr.io/projectbluefin/contribute:stable`
+for the same contributor runtime; immutable version and `sha-<commit>` tags
+follow the review appliance contract.
 
 Keep the launching terminal open. **Ctrl-C stops the attended worker.**
 Detached contributor containers are unsupported (`REVIEW_DETACH=1` is rejected).

@@ -1,7 +1,7 @@
 ---
 name: launcher
-version: "3.8"
-last_updated: 2026-09-08
+version: "3.9"
+last_updated: 2026-09-12
 id: launcher
 one_line_purpose: Change review just recipes without breaking the launch contract.
 entry_point: docs/skills/launcher.md
@@ -68,7 +68,8 @@ Goose, or image build skill documents.
    passes `BLUEFIN_REVIEW_INSTANCE`; `REVIEW_HIVE` selects a named registration.
 4. Keep Goose as the default backend (`TOOL=goose`); Codex (`TOOL=codex`) is
    the explicit alternate backend. Profiles set defaults:
-   `gemini` (`gemini-3.8-flash`, max effort), `sol` (`gpt-5.6-sol`, medium),
+   `gemini` (`gemini-3.8-flash`, max effort), `luna` (`gpt-5.6-luna`, medium),
+   `sol` (`gpt-5.6-sol`, medium),
    `opus5` (`claude-opus-5`, high, 264k context), `k3` (`kimi-k3`, max, 264k).
    Environment `GOOSE_*` always wins.
 5. Pass credentials via inherited environment, never CLI args; stage Codex auth at `0600`.

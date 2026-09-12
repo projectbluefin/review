@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-09",
+  "generated_at": "2026-09-12",
   "schema_version": "1.0",
   "skills": [
     {
@@ -228,8 +228,8 @@
         "kubernetes"
       ],
       "description": "Maintains the review launcher recipes and their credential boundaries. Use when editing justfile.",
-      "version": "3.8",
-      "last_updated": "2026-09-08",
+      "version": "3.9",
+      "last_updated": "2026-09-12",
       "doc_type": "runbook"
     },
     {

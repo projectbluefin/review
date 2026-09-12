@@ -16,5 +16,7 @@
 # The appliance build stage generates its own SPDX document for the four
 # archives it fetches (omp, node, pi, gh) plus the review mode itself.
 !scripts/generate-appliance-sbom.py
+# The isolated contributor image writes its own minimal component manifest.
+!scripts/generate-contribute-sbom.py
 **/__pycache__/
 **/*.pyc

@@ -699,6 +699,14 @@ assert_file_contains "--env GOOSE_MODEL=gpt-5.6-sol" "$runner_log"
 assert_file_contains "--env GOOSE_THINKING_EFFORT=medium" "$runner_log"
 assert_file_not_contains "GOOSE_CONTEXT_LIMIT" "$runner_log"
 
+begin "review-container: the luna profile is forwarded with its model default"
+reset_logs
+RECIPE_ARGS=(luna)
+run_recipe review-container GH_READY=1
+assert_file_contains "--env GOOSE_MODEL=gpt-5.6-luna" "$runner_log"
+assert_file_contains "--env GOOSE_THINKING_EFFORT=medium" "$runner_log"
+assert_file_not_contains "GOOSE_CONTEXT_LIMIT" "$runner_log"
+
 begin "review-container: an effort argument overrides the profile default"reset_logs
 RECIPE_ARGS=(opus5 max)
 run_recipe review-container GH_READY=1
@@ -711,7 +719,7 @@ run_recipe review-container GH_READY=1
 assert_nonzero_status "$STATUS" "an unknown profile must not launch anything"
 assert_contains "unknown model profile 'gpt-9'" "$OUT"
 assert_contains "Known profiles" "$OUT"
-assert_contains "gemini (gemini-3.8-flash), sol (gpt-5.6-sol), opus5 (claude-opus-5), k3 (kimi-k3)" "$OUT"
+assert_contains "gemini (gemini-3.8-flash), luna (gpt-5.6-luna), sol (gpt-5.6-sol), opus5 (claude-opus-5), k3 (kimi-k3)" "$OUT"
 
 begin "review-container: an unknown thinking effort is one actionable error"
 reset_logs

@@ -83,6 +83,7 @@ opus_model := "claude-opus-5"
 opus_context_limit := "264000"
 # Kimi K3's default window is ~1M tokens, so the same clamp applies.
 sol_model := "gpt-5.6-sol"
+luna_model := "gpt-5.6-luna"
 k3_model := "kimi-k3"
 k3_context_limit := "264000"
 # The fsdk-derived contributor image, used by every recipe that starts a
@@ -649,7 +650,7 @@ resolve_goose_selection() {
   return 0
 }
 # Turn a short profile name plus an optional thinking effort into GOOSE_MODEL /
-# GOOSE_THINKING_EFFORT / GOOSE_CONTEXT_LIMIT. Four profiles, no picker:
+# GOOSE_THINKING_EFFORT / GOOSE_CONTEXT_LIMIT. Five profiles, no picker:
 # an empty profile is the default one. Profiles are defaults, never overrides —
 # an explicit GOOSE_* value in the environment still wins.
 resolve_model_profile() {
@@ -670,6 +671,11 @@ resolve_model_profile() {
       PROFILE_EFFORT="medium"
       PROFILE_CONTEXT_LIMIT=""
       ;;
+    luna|gpt-luna|gptluna)
+      PROFILE_MODEL="${LUNA_MODEL}"
+      PROFILE_EFFORT="medium"
+      PROFILE_CONTEXT_LIMIT=""
+      ;;
     k3|kimi)
       PROFILE_MODEL="${K3_MODEL}"
       PROFILE_EFFORT="max"
@@ -677,7 +683,7 @@ resolve_model_profile() {
       ;;
     *)
       echo "ERROR: unknown model profile '${profile}'." >&2
-      echo "  Known profiles: gemini (${GEMINI_MODEL}), sol (${SOL_MODEL}), opus5 (${OPUS_MODEL}), k3 (${K3_MODEL})." >&2
+      echo "  Known profiles: gemini (${GEMINI_MODEL}), luna (${LUNA_MODEL}), sol (${SOL_MODEL}), opus5 (${OPUS_MODEL}), k3 (${K3_MODEL})." >&2
       return 1
       ;;
   esac
@@ -1330,6 +1336,7 @@ review-container profile="" effort="":
     OPUS_MODEL="{{opus_model}}"
     OPUS_CONTEXT_LIMIT="{{opus_context_limit}}"
     SOL_MODEL="{{sol_model}}"
+    LUNA_MODEL="{{luna_model}}"
     K3_MODEL="{{k3_model}}"
     K3_CONTEXT_LIMIT="{{k3_context_limit}}"
 
@@ -1545,6 +1552,7 @@ review-queue *queue_args:
     OPUS_MODEL="{{opus_model}}"
     OPUS_CONTEXT_LIMIT="{{opus_context_limit}}"
     SOL_MODEL="{{sol_model}}"
+    LUNA_MODEL="{{luna_model}}"
     K3_MODEL="{{k3_model}}"
     K3_CONTEXT_LIMIT="{{k3_context_limit}}"
 
