@@ -26,8 +26,8 @@ import subprocess
 import sys
 import threading
 import time
-from urllib.parse import urlsplit
 from collections import Counter
+from collections.abc import Sequence
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -119,6 +119,71 @@ from tui.model_profiles import (
 if TYPE_CHECKING:
     from tui.review_engine import ReviewBatch, ReviewEvent
     from tui.review_snapshot import BatchReviewItem, BatchSnapshot
+
+# --- Layered re-exports -------------------------------------------------
+# The UI, I/O adapters, and pure domain rules were extracted out of this
+# module (projectbluefin/review#446). The real implementations now live in
+# image/tui/domain/* (no Textual imports) and image/tui/adapters/*; the names
+# below are re-exported so existing ``tui.<fn>`` imports keep working.
+
+from tui.domain import mechanical as _mechanical
+from tui.domain import queue_rules as _queue_rules
+from tui.domain.markers import (
+    ascii_ui_requested,
+    no_color_requested,
+    reduced_motion_requested,
+    ui_glyph,
+    ui_span,
+    ui_style,
+)
+from tui.adapters import gh as _gh
+
+reviewer_standing = _mechanical.reviewer_standing
+dependency_subject = _mechanical.dependency_subject
+renovate_update_types = _mechanical.renovate_update_types
+mechanical_reason = _mechanical.mechanical_reason
+RENOVATE_BOTS = _mechanical.RENOVATE_BOTS
+MECHANICAL_UPDATE_TYPES = _mechanical.MECHANICAL_UPDATE_TYPES
+MECHANICAL_CHECK_OK = _mechanical.MECHANICAL_CHECK_OK
+MAINTAINER_ASSOCIATIONS = _mechanical.MAINTAINER_ASSOCIATIONS
+
+classify_action = _queue_rules.classify_action
+effective_check_state = _queue_rules.effective_check_state
+authoritative_checks = _queue_rules.authoritative_checks
+classify_queue_item = _queue_rules.classify_queue_item
+stop_style = _queue_rules.stop_style
+ci_marker = _queue_rules.ci_marker
+
+bounded_detail = _gh.bounded_detail
+hive_api_base = _gh.hive_api_base
+LIVE_PR_FIELDS = _gh.LIVE_PR_FIELDS
+MUTATION_TIMEOUT = _gh.MUTATION_TIMEOUT
+HIVE_TIMEOUT = _gh.HIVE_TIMEOUT
+
+
+def gh(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
+    return _gh.gh(*args, timeout=timeout)
+
+
+def _run_mutation(
+    command: list[str] | Sequence[str],
+    timeout: int = MUTATION_TIMEOUT,
+    idempotent: bool = False,
+) -> subprocess.CompletedProcess:
+    return _gh._run_mutation(command, timeout=timeout, idempotent=idempotent)
+
+
+def fetch_live_review(repository: str, number: int) -> dict:
+    return _gh.fetch_live_review(repository, number)
+
+
+def hive_token() -> str:
+    return _gh.hive_token()
+
+
+def hive_get(path: str) -> hive_api.Result:
+    return _gh.hive_get(path)
+
 
 GITHUB_ORG = "projectbluefin"
 # The queue is one paginated GraphQL search: every open pull request in the
@@ -214,41 +279,6 @@ MAX_RE_REVIEW_NEW_EVIDENCE = 8
 SENSITIVE_RE_REVIEW_PATHS = (".github/workflows/",)
 
 SLAY_DELAYS = [0.4, 0.3, 0.25, 0.35]
-
-
-def _enabled_environment_flag(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {
-        "1", "true", "yes", "on"
-    }
-
-
-def no_color_requested() -> bool:
-    """Honor the standard opt-out without removing textual state words."""
-    return "NO_COLOR" in os.environ
-
-
-def ascii_ui_requested() -> bool:
-    """Use printable markers when the operator explicitly requests ASCII."""
-    return _enabled_environment_flag("BLUEFIN_REVIEW_ASCII")
-
-
-def reduced_motion_requested() -> bool:
-    """Disable decorative queue animation when the terminal requests it."""
-    return _enabled_environment_flag("BLUEFIN_REVIEW_REDUCED_MOTION") or _enabled_environment_flag(
-        "TEXTUAL_REDUCED_MOTION"
-    )
-
-
-def ui_glyph(unicode_glyph: str, ascii_glyph: str) -> str:
-    return ascii_glyph if ascii_ui_requested() else unicode_glyph
-
-
-def ui_style(style: str) -> str:
-    return "" if no_color_requested() else style
-
-
-def ui_span(text: str, style: str) -> str:
-    return f"[{style}]{text}[/]" if style else text
 
 
 SLAY_FRAMES = [
@@ -401,60 +431,12 @@ STEER_PLACEHOLDER = (
 )
 STEER_PLACEHOLDER_COMPACT = "[/] steer highlighted PR · Enter run · Esc back"
 
-# The bot whose pull requests can be classified as mechanical. The login is
-# configurable because the Renovate installation differs per deployment: this
-# organisation runs it as `app/mergeraptor`, and hard-coding one name is how a
-# correct classifier silently matches nothing somewhere else.
-RENOVATE_BOTS = frozenset(
-    login.strip().lower()
-    for login in os.environ.get(
-        "BLUEFIN_REVIEW_RENOVATE_BOTS",
-        "app/mergeraptor,app/renovate,renovate[bot],renovate-bot",
-    ).split(",")
-    if login.strip()
-)
-
-# The update types current policy already covers. A major update is a semantic
-# decision about the dependency, so it never qualifies for a mechanical branch
-# update no matter how green the branch is.
-MECHANICAL_UPDATE_TYPES = frozenset({"digest", "pin", "patch", "minor"})
-
-# A check that says anything else — running, queued, failed, absent — is not
-# evidence that the branch is currently green.
-MECHANICAL_CHECK_OK = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
-
 # The live evidence the mechanical classifier consumes. `body` is Renovate's
 # own update-type metadata; every other field is GitHub's own account of the
 # pull request's state.
 MECHANICAL_FIELDS = (
     "author,state,isDraft,mergeable,mergeStateStatus,body,statusCheckRollup"
 )
-
-
-def hive_api_base() -> str:
-    """The selected hub's HTTPS root.
-
-    The launcher may select a registered deployment, and the image hook
-    supplies the default. Token-bearing dashboard requests never use plaintext
-    transport or URLs containing user information.
-    """
-    hub = os.environ.get("HIVE_HUB", "")
-    if "," in hub:
-        return ""
-    if hub.startswith("wss://"):
-        http = "https://" + hub[len("wss://") :]
-    elif hub.startswith("https://"):
-        http = hub
-    else:
-        return ""
-    try:
-        parsed = urlsplit(http)
-        if not parsed.hostname or parsed.username or parsed.password:
-            return ""
-        parsed.port
-    except ValueError:
-        return ""
-    return http[: -len("/contribute")] if http.endswith("/contribute") else http
 
 
 # The order a maintainer wants, which is not the order GitHub returns. The
@@ -492,12 +474,6 @@ REVIEW_SCOPE = os.environ.get(
 REVIEW_SCOPE_VERSION = os.environ.get(
     "BLUEFIN_REVIEW_SCOPE_VERSION", "image-v1"
 )
-LIVE_PR_FIELDS = (
-    "author,state,baseRefOid,headRefOid,isDraft,mergeable,mergeStateStatus,"
-    "reviewDecision,additions,deletions,changedFiles,updatedAt,body,"
-    "closingIssuesReferences,statusCheckRollup,labels,reviews,"
-    "isCrossRepository,maintainerCanModify"
-)
 
 # bluefin-review's exit status for a review whose checks did not all return a
 # verdict. 'goose review' exits 0 in that case and still prints a finding
@@ -510,20 +486,6 @@ STOP_GRACE_SECONDS = 5.0
 # The docs-update agent task is tracked work, not a silent stub; the
 # handler below names the issue.
 DOCS_UPDATE_ISSUE = "projectbluefin/review#134"
-
-
-MAINTAINER_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
-
-
-def reviewer_standing(association: str) -> str:
-    """Maintainer or community, from GitHub's own author association.
-
-    GitHub already decides this per review: OWNER, MEMBER and COLLABORATOR
-    carry write access to the repository, everything else does not. Reading
-    it off the review costs nothing, where asking the permissions API costs
-    one round trip per reviewer per stop.
-    """
-    return "maintainer" if association in MAINTAINER_ASSOCIATIONS else "community"
 
 
 def escape(text: str) -> str:
@@ -562,50 +524,6 @@ def link(text: str, url: str) -> str:
     colon in `https:` otherwise.
     """
     return f'[link="{url}"]{escape(text)}[/link]'
-
-
-def gh(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
-    # Bare subprocess.run calls replaced by throttled gh_client.read
-    return gh_client_read(*args, timeout=timeout)
-
-
-def _run_mutation(
-    command: list[str] | Sequence[str],
-    timeout: int = MUTATION_TIMEOUT,
-    idempotent: bool = False,
-) -> subprocess.CompletedProcess:
-    # Bare subprocess.run(command) replaced by gh_client.run_mutation with deadlines
-    return gh_client_run_mutation(command, timeout=timeout, idempotent=idempotent)
-
-
-def fetch_live_review(repository: str, number: int) -> dict:
-    result = gh(
-        "pr",
-        "view",
-        str(number),
-        "--repo",
-        repository,
-        "--json",
-        LIVE_PR_FIELDS,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            bounded_detail(
-                (result.stderr or result.stdout).strip()
-                or f"GitHub could not read {repository}#{number}"
-            )
-        )
-    try:
-        live = json.loads(result.stdout)
-    except (json.JSONDecodeError, RecursionError) as error:
-        raise ValueError(
-            f"GitHub returned malformed evidence for {repository}#{number}"
-        ) from error
-    if not isinstance(live, dict):
-        raise ValueError(
-            f"GitHub returned malformed evidence for {repository}#{number}"
-        )
-    return live
 
 
 @dataclass(frozen=True)
@@ -864,11 +782,6 @@ def compare_hunk_regions(repository: str, old_head: str, new_head: str) -> Compa
         return CompareEvidence(mapping_uncertain=True, capability_available=False)
 
 
-def bounded_detail(detail: str) -> str:
-    detail = re.sub(r"[\x00-\x1f\x7f]+", " ", str(detail))
-    return " ".join(detail.split())[:240]
-
-
 def activity_age(timestamp: float | None) -> str:
     """A compact age for a cached dashboard snapshot."""
     if timestamp is None:
@@ -881,35 +794,6 @@ def activity_age(timestamp: float | None) -> str:
     if seconds < 86400:
         return f"{seconds // 3600}h ago"
     return f"{seconds // 86400}d ago"
-
-
-def hive_token() -> str:
-    """The hub bearer token: GH_TOKEN when exported, else the host's own gh
-    login. The dashboard runs where the maintainer is already authed with
-    gh; requiring a second, separately exported token is how a connected
-    hub reads as unreachable. Read-only either way."""
-    token = os.environ.get("GH_TOKEN", "").strip()
-    if token:
-        return token
-    try:
-        result = gh("auth", "token", timeout=15)
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    return result.stdout.strip() if result.returncode == 0 else ""
-
-
-def hive_get(path: str) -> hive_api.Result:
-    """Read one hub endpoint. Read-only, and never fatal.
-
-    Consulting Hive must not be able to break the dashboard. The result keeps
-    routing, authentication, authorization, network, malformed-response, and
-    server failures distinct without exposing credentials.
-    """
-    base = hive_api_base()
-    token = hive_token()
-    if not base:
-        return hive_api.Result(False, "configuration", "not configured", {})
-    return hive_api.request(f"{base}{path}", token, timeout=HIVE_TIMEOUT)
 
 
 def _bound_map(mapping: dict, limit: int) -> None:
@@ -954,155 +838,6 @@ def trace(record: dict) -> None:
     """
     record = {"ts": datetime.now(timezone.utc).isoformat(), **record}
     _trace_logger().info(json.dumps(record, separators=(",", ":")))
-
-
-def dependency_subject(title: str) -> str | None:
-    """Normalise a title down to the dependency it updates (walker parity)."""
-    s = title.lower()
-    s = re.sub(r"^\w+(\([^)]*\))?:\s*", "", s)
-    for pattern in (
-        r"update module\s+(\S+)",
-        r"update dependency\s+(\S+)",
-        r"update\s+(\S+)\s+docker\s+(?:tag|digest)",
-        r"update\s+(\S+)\s+action",
-        r"update\s+(\S+)\s+digest",
-        r"update\s+(\S+)\s+to\s+v?[\d.]",
-    ):
-        found = re.search(pattern, s)
-        if found:
-            return re.sub(r":[^:/]*$", "", found.group(1).strip())
-    return None
-
-
-def renovate_update_types(body: str) -> set[str]:
-    """The update types Renovate declares in its own pull request body.
-
-    Renovate writes one row per updated package into a `| Package | Update |
-    Change |` table, and the Update cell carries the type it decided on.
-    Reading that cell is not an inference from the title: it is the bot's own
-    metadata about what it changed.
-    """
-    types: set[str] = set()
-    columns: list[str] = []
-    for raw in body.splitlines():
-        line = raw.strip()
-        if not line.startswith("|"):
-            columns = []
-            continue
-        cells = [cell.strip() for cell in line.strip("|").split("|")]
-        lowered = [cell.lower() for cell in cells]
-        if "update" in lowered and "package" in lowered:
-            columns = lowered
-            continue
-        if not columns or set(line) <= set("|-: "):
-            continue
-        index = columns.index("update")
-        if index < len(cells) and cells[index]:
-            types.add(cells[index].lower())
-    return types
-
-
-def mechanical_reason(author: str, live: dict) -> str | None:
-    """Why this branch is safe to *update*, or None when it is not.
-
-    MECHANICAL describes exactly one operation — merging the base branch into
-    a green, mergeable branch that is merely behind — and says nothing about
-    whether the dependency change itself should be approved or merged. Every
-    signal below is live GitHub evidence or Renovate's own metadata. A
-    dependency-shaped title proves nothing and is deliberately not consulted:
-    that heuristic is duplicate evidence, not a safety boundary.
-    """
-    if not live:
-        return None
-    login = (author or (live.get("author") or {}).get("login") or "").lower()
-    if login not in RENOVATE_BOTS:
-        return None
-    if (live.get("state") or "OPEN").upper() != "OPEN":
-        return None
-    if live.get("isDraft"):
-        return None
-    if (live.get("mergeable") or "").upper() != "MERGEABLE":
-        return None
-    if (live.get("mergeStateStatus") or "").upper() != "BEHIND":
-        return None
-    checks = authoritative_checks(live)
-    if not checks:
-        return None
-    for check in checks:
-        outcome = str(check.get("conclusion") or check.get("state") or "").upper()
-        if outcome not in MECHANICAL_CHECK_OK:
-            return None
-    types = renovate_update_types(live.get("body") or "")
-    if not types or not types <= MECHANICAL_UPDATE_TYPES:
-        return None
-    kinds = "/".join(sorted(types))
-    return f"{kinds} update by {login}, every check green, mergeable but behind"
-
-
-def stop_style(action: str, mergeable: str, checks: str, review: str) -> str:
-    """The colour a row is worth, from the snapshot's own state fields.
-
-    A hundred rows of identical grey is a queue you read linearly. These
-    states are already in every snapshot item, so colour costs nothing and
-    turns the list into something scannable: what is ready, what is merely
-    stuck behind its own branch, and what nobody can act on yet.
-    """
-    if no_color_requested():
-        return ""
-    if mergeable == "dirty":
-        return ""
-    if checks == "failure":
-        return "red"
-    if action == "ready-for-human-merge":
-        return "bold green"
-    if action in ("review", "triage") or review == "approved":
-        return "cyan"
-    if action == "investigate" or checks == "unknown":
-        return "grey62"
-    return ""
-
-
-def ci_marker(checks: str) -> str:
-    """Carry the snapshot's CI state as text, not colour alone."""
-    return {
-        "success": f"{ui_glyph('✓', '+')} CI GREEN",
-        "failure": f"{ui_glyph('✗', 'x')} CI FAILED",
-        "pending": f"{ui_glyph('…', '.')} CI PENDING",
-        "unknown": "? CI UNKNOWN",
-    }.get(checks, "? CI UNKNOWN")
-
-
-def authoritative_checks(live: dict) -> list[dict]:
-    """Return the latest run for each stable current-head check context.
-
-    GitHub's pull-request ``statusCheckRollup`` is fetched together with
-    ``headRefOid``, so every entry belongs to that exact current head. Reruns
-    may leave older entries in the rollup; a check-run context is its workflow
-    plus job name, while a commit status context is its context string.
-    """
-    latest: dict[tuple[str, ...], tuple[tuple[str, str, int], dict]] = {}
-    ungrouped: list[dict] = []
-    for index, check in enumerate(live.get("statusCheckRollup") or []):
-        if not isinstance(check, (dict, Mapping)):
-            continue
-        typename = str(check.get("__typename") or "")
-        name = str(check.get("name") or "")
-        context = str(check.get("context") or "")
-        if typename == "CheckRun" or name:
-            key = ("check-run", str(check.get("workflowName") or ""), name)
-        elif typename == "StatusContext" or context:
-            key = ("status-context", context)
-        else:
-            ungrouped.append(check)
-            continue
-        rank = (
-            str(check.get("startedAt") or ""),
-            str(check.get("completedAt") or ""),
-            index,
-        )
-        if key not in latest or rank > latest[key][0]:
-            latest[key] = (rank, check)
-    return [item[1] for item in sorted(latest.values(), key=lambda item: item[0])] + ungrouped
 
 
 CI_LOG_MAX_BYTES = 64 * 1024
@@ -1432,19 +1167,6 @@ def sanitize_ci_log(
     return ("available", lines) if lines else ("empty", [])
 
 
-def effective_check_state(snapshot: str, live: dict) -> str:
-    """Prefer fetched check evidence, retaining the snapshot when absent."""
-    checks = authoritative_checks(live)
-    if not checks:
-        return snapshot or "unknown"
-    outcomes = [check.get("conclusion") or check.get("state") or "PENDING" for check in checks]
-    if any(outcome in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED") for outcome in outcomes):
-        return "failure"
-    if any(outcome not in ("SUCCESS", "NEUTRAL", "SKIPPED") for outcome in outcomes):
-        return "pending"
-    return "success"
-
-
 # The merge queue's segments, in the order a maintainer drains them, with the
 # same colours the rows use so the bar and the list agree.
 QUEUE_SEGMENTS = [
@@ -1455,24 +1177,6 @@ QUEUE_SEGMENTS = [
     ("conflicts", "conflicts", "red"),
     ("unclear", "unclear", "grey62"),
 ]
-
-
-def classify_action(check_state: str, mergeable_state: str, review_state: str) -> str:
-    """The queue's recommended action, classified from live GitHub evidence.
-
-    First match wins: a failing check is actionable before a conflict is,
-    incomplete evidence is a task of its own, and only a fully green,
-    approved pull request is ready for a human merge.
-    """
-    if check_state == "failure":
-        return "fix-ci"
-    if mergeable_state == "dirty":
-        return "resolve-conflicts"
-    if "unknown" in (check_state, mergeable_state, review_state):
-        return "investigate"
-    if review_state == "approved":
-        return "ready-for-human-merge"
-    return "review"
 
 
 def carries_verdict_by(reviews: object, login: str) -> bool:
@@ -1640,27 +1344,6 @@ def org_issue_item(node: dict) -> dict:
         "created_at": str(node.get("createdAt") or ""),
         "updated_at": str(node.get("updatedAt") or ""),
     }
-
-
-def classify_queue_item(item: dict) -> str:
-    """Which segment of a repository's merge queue this pull request sits in.
-
-    First match wins, and the order is the maintainer's: something already
-    handed to the sweep is queued no matter what else is true of it, and a
-    conflict outranks a failing check because it blocks the check from
-    meaning anything.
-    """
-    if item.get("mergeable_state") == "dirty":
-        return "conflicts"
-    if item.get("check_state") == "failure":
-        return "ci"
-    if "lgtm" in (item.get("labels") or []):
-        return "queued"
-    if item.get("recommended_action") == "ready-for-human-merge":
-        return "ready"
-    if item.get("recommended_action") == "review":
-        return "review"
-    return "unclear"
 
 
 def meter_bar(counts: dict[str, int], width: int = 24) -> str:
