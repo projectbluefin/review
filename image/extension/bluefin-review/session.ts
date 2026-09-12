@@ -10,10 +10,21 @@
  * keeps its tool spans, and each tool span keeps a short log tail.
  */
 
-import type { Span } from "./trace.ts";
+import type { Span, TraceClass } from "./trace.ts";
 
 const MAX_TURNS = 6;
 const MAX_LOG_LINES = 12;
+
+/**
+ * A tool call that was cancelled rather than failed. The queue moved on or the
+ * maintainer interrupted, so this is normal flow — rendered as `skipped`, not a
+ * red `✘`. Detected from the result text: omp surfaces cancellation as a
+ * message, and matching a few known words is the cheapest reliable signal.
+ */
+function isCancellation(result: unknown): boolean {
+	const text = typeof result === "string" ? result : JSON.stringify(result ?? "");
+	return /cancel|abort|interrupt|no longer needed|superseded/i.test(text);
+}
 
 interface ToolArgs {
 	command?: unknown;
@@ -97,11 +108,14 @@ export class SessionTrace {
 		if (!turn) return;
 		turn.endedAt = now;
 		const failed = (turn.children ?? []).some((child) => child.status === "failure");
-		turn.status = failed ? "failure" : "success";
+		const cancelled = (turn.children ?? []).some((child) => child.status === "skipped");
+		turn.status = failed ? "failure" : cancelled ? "skipped" : "success";
+		turn.cls = failed ? undefined : cancelled ? ("cancelled" as TraceClass) : undefined;
 		for (const child of turn.children ?? []) {
 			if (child.status === "running") {
 				child.status = "skipped";
 				child.endedAt = now;
+				child.cls = "cancelled";
 			}
 		}
 	}
@@ -135,8 +149,15 @@ export class SessionTrace {
 	endTool(toolCallId: string, result: unknown, isError: boolean, now: number): void {
 		const span = this.toolsByCallId.get(toolCallId);
 		if (!span) return;
-		span.status = isError ? "failure" : "success";
 		span.endedAt = now;
+		if (isCancellation(result)) {
+			// Cancelled is normal, not a failure: skip the span and say why.
+			span.status = "skipped";
+			span.cls = "cancelled";
+		} else {
+			span.status = isError ? "failure" : "success";
+			span.cls = isError ? ("tool" as TraceClass) : undefined;
+		}
 		const lines = textOf(result).filter((line) => line.trim().length > 0);
 		if (lines.length > 0) span.logs = lines.slice(-MAX_LOG_LINES);
 		this.toolsByCallId.delete(toolCallId);

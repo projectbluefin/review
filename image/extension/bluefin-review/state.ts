@@ -14,7 +14,7 @@
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Span } from "./trace.ts";
+import { type TraceClass, classStatus, type Span } from "./trace.ts";
 import { GLYPH, type SpanStatus } from "./glyphs.ts";
 
 /** Bytes read from the tail of a JSONL log. */
@@ -393,8 +393,17 @@ export function hasRecordedFindings(snapshot: StateSnapshot, key: string): boole
 	return false;
 }
 
-/** `run_state.RunState` → span status. */
-export function runStateStatus(state: string): SpanStatus {
+/**
+ * `run_state.RunState` → trace class (issue #465 failure taxonomy).
+ *
+ * The visual status is derived, so the icon can never drift from the reason. The
+ * important split: the run-state machine's own failures are *environment* and
+ * *tool* failures, never a `pr-check` failure. A `head_changed` record is the
+ * #471 workspace mismatch — the exact thing that used to render as a red `✘`
+ * resembling a PR test failure; it is a workspace/environment failure, and the
+ * queue badge (which comes from GitHub, not here) is left green accordingly.
+ */
+export function classifyRunState(state: string): TraceClass {
 	switch (state) {
 		case "pending":
 		case "retry_at":
@@ -410,14 +419,41 @@ export function runStateStatus(state: string): SpanStatus {
 		case "escalation_required":
 		case "blocked":
 		case "human_review_missing":
+			// The review needs a human or an environment the machine cannot supply:
+			// findings to act on, not a hard failure of the PR's own checks.
 			return "findings";
+		case "review_missing":
+		case "review_incomplete":
+		case "review_unparsable":
+			// The review ran but produced no usable evidence: unavailable.
+			return "verification";
+		case "head_changed":
+			// Reviewed a head that is no longer live: a workspace/environment failure.
+			return "environment";
+		case "mutation_failed":
+			// The fix/agent step failed, not the PR's own checks.
+			return "tool";
 		default:
-			return "failure";
+			// Unknown run state is a failure, but never attribute it to the PR's
+			// checks: an unclassified machine state is an environment problem.
+			return "environment";
 	}
 }
 
-/** `review_engine.ReviewEvent` state → span status. */
-export function reviewEventStatus(state: string): SpanStatus {
+/** `run_state.RunState` → span status. */
+export function runStateStatus(state: string): SpanStatus {
+	return classStatus(classifyRunState(state));
+}
+
+/**
+ * `review_engine.ReviewEvent` state → trace class.
+ *
+ * A cancelled review is normal — the maintainer or the queue moved on — so it is
+ * `cancelled`, which renders as `skipped`, not a failure. Unknown event states
+ * are an environment failure rather than a tool failure: never blame the agent
+ * for a state the engine emitted that this reducer does not recognise.
+ */
+export function classifyReviewEvent(state: string): TraceClass {
 	switch (state) {
 		case "running":
 			return "running";
@@ -428,14 +464,19 @@ export function reviewEventStatus(state: string): SpanStatus {
 		case "findings":
 			return "findings";
 		case "cancelled":
-			return "skipped";
+			return "cancelled";
 		default:
-			return "failure";
+			return "environment";
 	}
 }
 
-/** `landing.PR_STATES` → span status. */
-export function landingStateStatus(state: string): SpanStatus {
+/** `review_engine.ReviewEvent` state → span status. */
+export function reviewEventStatus(state: string): SpanStatus {
+	return classStatus(classifyReviewEvent(state));
+}
+
+/** `landing.PR_STATES` → trace class. */
+export function classifyLanding(state: string): TraceClass {
 	switch (state) {
 		case "diagnosing":
 		case "fixing":
@@ -450,8 +491,13 @@ export function landingStateStatus(state: string): SpanStatus {
 		case "blocked":
 			return "findings";
 		default:
-			return "failure";
+			return "environment";
 	}
+}
+
+/** `landing.PR_STATES` → span status. */
+export function landingStateStatus(state: string): SpanStatus {
+	return classStatus(classifyLanding(state));
 }
 
 /** A phase the log has moved past cannot still be running. */
@@ -503,6 +549,7 @@ export function buildPipelineSpans(
 				.filter(Boolean)
 				.join(` ${GLYPH.dot} `),
 			status,
+			cls: classifyRunState(run.state),
 			startedAt: run.createdAt || undefined,
 			endedAt: status === "running" ? undefined : run.updatedAt || undefined,
 		});
@@ -520,6 +567,7 @@ export function buildPipelineSpans(
 				// A step the log has already moved past is finished, whatever it was
 				// called while it ran: only the newest event may still be in flight.
 				status: settled ? settledStatus(reviewEventStatus(event.state)) : reviewEventStatus(event.state),
+				cls: classifyReviewEvent(event.state),
 				startedAt: event.timestamp,
 				endedAt: settled ? reviewEvents[index + 1]!.timestamp : undefined,
 				badge: event.state === "cached" ? "CACHED" : undefined,
@@ -544,7 +592,13 @@ export function buildPipelineSpans(
 						label: item.name,
 						detail: item.evidence,
 						status:
-							item.state === "verified" ? ("success" as const) : item.state === "skipped" ? ("skipped" as const) : ("findings" as const),
+							item.state === "verified" ? ("success" as const) : item.state === "skipped" ? ("cancelled" as const) : ("findings" as const),
+						cls:
+							item.state === "verified"
+								? ("success" as TraceClass)
+								: item.state === "skipped"
+									? ("cancelled" as TraceClass)
+									: ("verification" as TraceClass),
 					})),
 				],
 			});
@@ -582,6 +636,7 @@ export function buildPipelineSpans(
 					label: event.done ? "done" : (event.state ?? event.watchStatus ?? "event"),
 					detail,
 					status: settled ? settledStatus(own) : own,
+					cls: event.done ? ("success" as TraceClass) : classifyLanding(event.state ?? ""),
 					endedAt: settled ? landingEvents[index + 1]!.timestamp : undefined,
 				};
 			}),

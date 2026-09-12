@@ -22,6 +22,77 @@ import {
 } from "./glyphs.ts";
 import { truncateToWidth } from "./width.ts";
 
+/**
+ * Why a span is red, if it is. The failure taxonomy of issue #465.
+ *
+ * The visual `SpanStatus` only says "failed" or "not"; this says *what* failed
+ * so the five classes the invariant names never read the same: a real PR check,
+ * an unavailable verification, a review-environment failure, an agent/tool
+ * failure, and a cancellation. Non-failure spans carry their own value too
+ * (`success`, `findings`, `running`, `pending`), so the taxonomy is the single
+ * reason a span carries rather than a second boolean next to `status`.
+ */
+export type TraceClass =
+	| "pending"
+	| "running"
+	| "success"
+	| "cached"
+	| "findings"
+	/** Work was cancelled on purpose — normal, not a failure. */
+	| "cancelled"
+	/** A GitHub check on the pull request failed — the one a maintainer acts on. */
+	| "pr-check"
+	/** Verification evidence is unavailable or incomplete (workspace mismatch, #471). */
+	| "verification"
+	/** The review/workspace environment failed, not the PR's own checks. */
+	| "environment"
+	/** An agent tool execution failed. */
+	| "tool";
+
+/**
+ * The visible right-hand badge for a class. Empty for the non-failure classes,
+ * which need no label: a green check and a cancelled span already say what they
+ * mean. A failure class always renders its tag so the taxonomy is seen, not
+ * inferred from a shared red `✘`.
+ */
+export const TRACE_CLASS_LABEL: Record<TraceClass, string> = {
+	pending: "",
+	running: "",
+	success: "",
+	cached: "CACHED",
+	findings: "",
+	cancelled: "CANCELLED",
+	"pr-check": "CHECK",
+	verification: "UNVERIFIED",
+	environment: "WORKSPACE",
+	tool: "TOOL",
+};
+
+/** Badge text for a span's class, or "" when the class needs no label. */
+export function traceClassBadge(cls?: TraceClass): string {
+	return cls ? TRACE_CLASS_LABEL[cls] : "";
+}
+
+/**
+ * The visual `SpanStatus` a class renders as. Every failure class collapses to
+ * `failure` (a red `✘` either way) and `cancelled` to `skipped`; the taxonomy
+ * lives in `cls`, not in a fifth shade of red. This keeps the icon vocabulary
+ * stable while the reason a span failed becomes distinct.
+ */
+export function classStatus(cls: TraceClass): SpanStatus {
+	switch (cls) {
+		case "cancelled":
+			return "skipped";
+		case "pr-check":
+		case "verification":
+		case "environment":
+		case "tool":
+			return "failure";
+		default:
+			return cls;
+	}
+}
+
 export interface Span {
 	/** Stable across refreshes: cursor position and expansion survive a re-poll. */
 	id: string;
@@ -29,9 +100,16 @@ export interface Span {
 	/** Dim trailing context: author, reason, counts. */
 	detail?: string;
 	status: SpanStatus;
+	/**
+	 * Why a span is red, if it is. The failure taxonomy of issue #465: the visual
+	 * `status` only says "failed", this says *what* failed so a real PR check,
+	 * an unavailable verification, a review-environment failure, an agent/tool
+	 * failure, and a cancellation never read the same. Rendered as a badge.
+	 */
+	cls?: TraceClass;
 	startedAt?: number;
 	endedAt?: number;
-	/** Right-hand badge, e.g. `CACHED` or `ERROR`. */
+	/** Right-hand badge, e.g. `CACHED` or `ERROR`. Folded with the class label. */
 	badge?: string;
 	/** Streamed output; tailed under the span while it is expanded. */
 	logs?: string[];
@@ -112,7 +190,11 @@ function renderSpanRow(span: Span, prefix: string, options: TreeOptions): string
 		const text = ` ${formatDuration(elapsed)}`;
 		line += painter.fg(span.status === "running" ? "warning" : "dim", text);
 	}
-	if (span.badge) line += painter.fg(role, ` ${span.badge}`);
+	// The class label is the failure taxonomy made visible: a span that is merely
+	// "failed" still says *why*, so a workspace mismatch never masquerades as a
+	// PR check failure. An explicit badge (e.g. `CACHED`) wins when set.
+	const badge = span.badge ?? traceClassBadge(span.cls);
+	if (badge) line += painter.fg(role, ` ${badge}`);
 	if (span.detail) line += painter.fg("dim", ` ${GLYPH.dot} ${span.detail}`);
 
 	return truncateToWidth(line, options.width);
