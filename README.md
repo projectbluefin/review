@@ -17,12 +17,16 @@ brew install ublue-os/experimental-tap/bluefin-contributor-tools
 
 This installs the `bluefin` CLI with both `review` and `contribute` subcommands (as well as `bluefin-contribute`):
 
+
+```bash
+# Run an isolated Hive contributor worker
+bluefin-contribute
+```
+
+Maintainers: 
 ```bash
 # Review pull requests and inspect CI failures
-bluefin review
-
-# Run an isolated Hive contributor worker
-bluefin contribute
+bluefin-review
 ```
 
 > **Note:** `bluefin` requires [Apptainer](https://apptainer.org/docs/admin/main/installation.html) and the corresponding container SIF images (`BLUEFIN_REVIEW_SIF` and `BLUEFIN_CONTRIBUTE_SIF`).
