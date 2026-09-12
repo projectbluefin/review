@@ -1,6 +1,6 @@
 # Bluefin Review
 
-enslaving the oppressors since 2026
+Enslaving the oppressors since 2026
 
 **Review pull requests, inspect CI failures, and land changes from your terminal.**
 Bluefin Review brings the evidence and actions into one dashboard. You choose
@@ -13,15 +13,10 @@ Install `bluefin-contributor-tools` in one command from the [Universal Blue expe
 
 ```bash
 brew install ublue-os/experimental-tap/bluefin-contributor-tools
+bluefin-contribute
 ```
 
 This installs the `bluefin` CLI with both `review` and `contribute` subcommands (as well as `bluefin-contribute`):
-
-
-```bash
-# Run an isolated Hive contributor worker
-bluefin-contribute
-```
 
 Maintainers: 
 ```bash
