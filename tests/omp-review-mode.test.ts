@@ -19,7 +19,7 @@ import { truncateToWidth, visibleWidth } from "../image/extension/bluefin-review
 import { buildPipelineSpans, readStateSnapshot, landingStateStatus, runStateStatus } from "../image/extension/bluefin-review/state.ts";
 import { appendFileSync } from "node:fs";
 import { fetchDiff, fetchItemsByKey, fetchQueue, parseScope, searchExpression } from "../image/extension/bluefin-review/github.ts";
-import { EMPTY_HIVE, buildRankMap, fetchHive, resolveHub } from "../image/extension/bluefin-review/hive.ts";
+import { EMPTY_HIVE, buildRankMap, fetchHive, hiveFailureStatus, resolveHub } from "../image/extension/bluefin-review/hive.ts";
 import { categorize, prioritize } from "../image/extension/bluefin-review/priority.ts";
 import { BATCH_LIMIT, ReviewMode } from "../image/extension/bluefin-review/mode.ts";
 import { ReviewDashboard } from "../image/extension/bluefin-review/dashboard.ts";
@@ -1476,7 +1476,124 @@ test("the status tool names the authority that ordered the queue", async () => {
 		if (String(url).includes("/graphql")) return fakeFetch([])(url, init);
 		return { ok: false, status: 502, statusText: "Bad Gateway", json: async () => ({}) };
 	}, hubEnv);
-	assert.match(unreachable.content[0].text, /order: local — hive configured but unreachable \(.*502/);
+	// The header/status line is a concise fallback status, not the raw error.
+	assert.match(unreachable.content[0].text, /order: local — hive unavailable, configured but unreachable/);
+	// The raw diagnostic is kept behind the status, in the structured details.
+	assert.match(unreachable.details.hive.error ?? "", /502/, "the raw error stays in the status details, not the header");
+});
+
+// ---------------------------------------------------------------- hive fallback
+
+test("an optional Hive failure degrades to a concise fallback status", () => {
+	// Classified by signature, so a TLS cert mismatch, a timeout, a dropped
+	// connection and an auth failure each read as a distinct short label rather
+	// than a raw error string, and anything unknown falls back cleanly.
+	const tls = new Error("alert certificate name invalid");
+	(tls as { code?: string }).code = "ERR_TLS_CERT_ALTNAME_INVALID";
+	assert.equal(hiveFailureStatus(tls), "hive tls", "a TLS mismatch is a tls status");
+
+	const timeout = new Error("read failed");
+	(timeout as { code?: string }).code = "ETIMEDOUT";
+	assert.equal(hiveFailureStatus(timeout), "hive network");
+
+	const refused = new Error("connect failed");
+	(refused as { code?: string }).code = "ECONNREFUSED";
+	assert.equal(hiveFailureStatus(refused), "hive connection");
+
+	const denied = new Error("403 Forbidden");
+	assert.equal(hiveFailureStatus(denied), "hive unauthorized");
+
+	const dns = new Error("getaddrinfo ENOTFOUND hub");
+	assert.equal(hiveFailureStatus(dns), "hive network");
+
+	assert.equal(hiveFailureStatus("/api/contribute/status → 502 Bad Gateway"), "hive unavailable");
+});
+
+test("the rail header shows the concise status and never the raw error", () => {
+	const mode = new ReviewMode({ org: "projectbluefin", stateRoot: join(tmpdir(), "nope") });
+	mode.hive = {
+		...EMPTY_HIVE,
+		hub: "https://hive.example",
+		configured: true,
+		online: false,
+		error: "getaddrinfo ENOTFOUND hive.example",
+		fetchedAt: NOW,
+	};
+	mode.items = [queueItem()];
+	mode.reprioritize();
+
+	const rows = renderRail(mode, PLAIN_PAINTER, 120, NOW, 0, [], { compact: false });
+	assert.match(rows[0], /hive network/, "a network failure reads as a concise status");
+	assert.doesNotMatch(rows[0], /ENOTFOUND/, "the raw diagnostic must not dominate the header");
+	assert.doesNotMatch(rows[0], /hive\.example/, "the hub host is not a status line");
+	assert.equal(mode.orderSource(), "local", "a broken hub falls back to local order");
+});
+
+test("the status tool names all three optional-Hive states distinctly", async () => {
+	const hubEnv = { ...ISOLATED_ENV, HIVE_HUB: "https://hive.example" };
+	const statusFor = async (fetchImpl, env) => {
+		const pi = fakeHost();
+		const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env });
+		const ctx = fakeCtx();
+		ctx.ui.parent = ctx;
+		pi.flagValues.set("splash", false);
+		await pi.events.get("session_start")({}, ctx);
+		await review.whenStarted();
+		return await pi.tools.get("bluefin_review_status").execute("id", {});
+	};
+
+	// 1. Unconfigured: no hub at all.
+	const noHub = await statusFor(fakeFetch([]), ISOLATED_ENV);
+	assert.match(noHub.content[0].text, /order: local — no hive hub configured/);
+	assert.equal(noHub.details.hive.configured, false);
+
+	// 2. Online with nothing queued in this scope: not an error, just empty.
+	const quiet = await statusFor(
+		async (url, init) => {
+			if (String(url).includes("/graphql")) return fakeFetch([])(url, init);
+			const path = String(url).replace("https://hive.example", "");
+			return { ok: true, status: 200, statusText: "OK", json: async () => (path === "/api/v1/status" ? { actionable_items: 3 } : { queue: [], groups: [] }) };
+		},
+		hubEnv,
+	);
+	assert.match(quiet.content[0].text, /order: local — hive is online .* has queued nothing in this scope/);
+	assert.equal(quiet.details.hive.online, true);
+
+	// 3. Configured but broken: a concise status up front, the raw error behind it.
+	const broken = await statusFor(
+		async (url, init) => {
+			if (String(url).includes("/graphql")) return fakeFetch([])(url, init);
+			return { ok: false, status: 502, statusText: "Bad Gateway", json: async () => ({}) };
+		},
+		hubEnv,
+	);
+	assert.match(broken.content[0].text, /order: local — hive unavailable, configured but unreachable/);
+	assert.match(broken.details.hive.error ?? "", /502/, "the raw error is the diagnostic, kept in the status details");
+	assert.equal(broken.details.hive.online, false);
+});
+
+test("a hive-only session with a broken hub still fails visibly and concisely", async () => {
+	const hubEnv = { ...ISOLATED_ENV, HIVE_HUB: "https://hive.example" };
+	const hiveFetch = async (url, init) => {
+		if (String(url).includes("/graphql")) return fakeFetch([])(url, init);
+		return { ok: false, status: 502, statusText: "Bad Gateway", json: async () => ({}) };
+	};
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: hiveFetch, env: hubEnv });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	pi.flagValues.set("splash", false);
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+
+	// The failure is reported at startup, not swallowed by the fallback.
+	assert.ok(
+		ctx.notifications.some((n) => /hive unavailable, ordering locally/.test(n.message)),
+		`a broken hive must fail visibly at startup, got ${JSON.stringify(ctx.notifications)}`,
+	);
+	// Reported in concise form; the raw 502 is not what the maintainer sees.
+	const startupHive = ctx.notifications.find((n) => /ordering locally/.test(n.message));
+	assert.doesNotMatch(startupHive.message, /502/);
 });
 
 
