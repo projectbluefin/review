@@ -232,7 +232,9 @@ REDACTIONS = (
         ),
         "[redacted-secret]",
     ),
-    (re.compile(r"\b[A-Za-z0-9+/_-]{40,}={0,2}\b"), "[redacted-opaque]"),
+    # Opaque cryptographic hashes, tokens, or base64 strings (>= 40 chars without hyphens).
+    # Hyphenated names (e.g. k8s resource/workflow names) must not be redacted.
+    (re.compile(r"\b[A-Za-z0-9+/]{40,}={0,2}\b"), "[redacted-opaque]"),
 )
 
 

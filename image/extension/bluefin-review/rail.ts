@@ -35,6 +35,7 @@ export function tmuxReviewStatusBar(mode: ReviewMode, painter: Painter, width: n
 	const hive = mode.hive;
 	const hiveMode = hive.online ? "HIVE" : (hive.configured ? "OFFLINE" : "LOCAL");
 
+	const blueBg = "\x1b[48;2;30;41;59m"; // #1e293b
 	const bluefinBadge = "\x1b[48;2;29;78;216m\x1b[38;2;255;255;255m\x1b[1m 🦖 BLUEFIN \x1b[0m";
 	const reviewBadge = "\x1b[48;2;37;99;235m\x1b[38;2;255;255;255m review \x1b[0m";
 	const hiveBadge = `\x1b[48;2;30;64;175m\x1b[38;2;191;219;254m 🐝 ${hiveMode} \x1b[0m`;
@@ -44,26 +45,29 @@ export function tmuxReviewStatusBar(mode: ReviewMode, painter: Painter, width: n
 	if (item) {
 		const kind = item.type === "pr" ? "PR" : "ISSUE";
 		const repo = item.repo.includes("/") ? item.repo.split("/")[1] : item.repo;
-		activeTaskStr = `\x1b[38;2;96;165;250mTask: \x1b[1m\x1b[38;2;255;255;255m${kind} #${item.id}\x1b[0m\x1b[38;2;147;197;253m (${repo}) \x1b[38;2;59;130;246m| `;
+		activeTaskStr = `${blueBg}\x1b[38;2;96;165;250mTask: \x1b[1m\x1b[38;2;255;255;255m${kind} #${item.id}\x1b[0m${blueBg}\x1b[38;2;147;197;253m (${repo}) \x1b[38;2;59;130;246m| `;
 	}
 
 	const tally = mode.ciTally();
 	const issuesCount = mode.queueMode === "issues" ? mode.visibleItems().length : (hive.actionableItems ?? "-");
 	const prsCount = mode.queueMode === "prs" ? mode.visibleItems().length : tally.success + tally.failure + tally.pending;
 
-	let stats = `\x1b[38;2;147;197;253mIssues: \x1b[1m\x1b[38;2;255;255;255m${issuesCount}\x1b[0m\x1b[38;2;147;197;253m \x1b[38;2;59;130;246m| \x1b[38;2;147;197;253mPRs: \x1b[1m\x1b[38;2;255;255;255m${prsCount}\x1b[0m\x1b[38;2;147;197;253m`;
+	let stats = `${blueBg}\x1b[38;2;147;197;253mIssues: \x1b[1m\x1b[38;2;255;255;255m${issuesCount}\x1b[0m${blueBg}\x1b[38;2;147;197;253m \x1b[38;2;59;130;246m| \x1b[38;2;147;197;253mPRs: \x1b[1m\x1b[38;2;255;255;255m${prsCount}\x1b[0m${blueBg}\x1b[38;2;147;197;253m`;
 	if (hive.workers) {
-		stats += ` \x1b[38;2;59;130;246m| \x1b[38;2;147;197;253mWorkers: \x1b[1m\x1b[38;2;255;255;255m${hive.workers}\x1b[0m\x1b[38;2;147;197;253m`;
+		stats += ` \x1b[38;2;59;130;246m| \x1b[38;2;147;197;253mWorkers: \x1b[1m\x1b[38;2;255;255;255m${hive.workers}\x1b[0m${blueBg}\x1b[38;2;147;197;253m`;
 	}
 	if (hive.reviewers) {
-		stats += ` \x1b[38;2;59;130;246m| \x1b[38;2;147;197;253mReviewers: \x1b[1m\x1b[38;2;255;255;255m${hive.reviewers}\x1b[0m\x1b[38;2;147;197;253m`;
+		stats += ` \x1b[38;2;59;130;246m| \x1b[38;2;147;197;253mReviewers: \x1b[1m\x1b[38;2;255;255;255m${hive.reviewers}\x1b[0m${blueBg}\x1b[38;2;147;197;253m`;
 	}
 	const date = new Date(now);
 	const hours = String(date.getHours()).padStart(2, "0");
 	const minutes = String(date.getMinutes()).padStart(2, "0");
 	const timeStr = `\x1b[38;2;59;130;246m| \x1b[38;2;191;219;254m${hours}:${minutes}\x1b[0m`;
 
-	const bar = `${bluefinBadge}${reviewBadge}${hiveBadge} ${activeTaskStr}${stats} ${timeStr}`;
+	const content = `${bluefinBadge}${reviewBadge}${hiveBadge}${blueBg} ${activeTaskStr}${stats} ${timeStr}\x1b[0m`;
+	const contentWidth = visibleWidth(content);
+	const fillSpaces = Math.max(0, width - contentWidth);
+	const bar = `${bluefinBadge}${reviewBadge}${hiveBadge}${blueBg} ${activeTaskStr}${stats} ${timeStr}${" ".repeat(fillSpaces)}\x1b[0m`;
 	return truncateToWidth(bar, width);
 }
 

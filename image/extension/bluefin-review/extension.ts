@@ -15,7 +15,7 @@ import { DEFAULT_ORG, parseScope, resolveToken } from "./github.ts";
 import type { Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection } from "./mode.ts";
 import { themePainter } from "./paint.ts";
-import { type RailKey, ReviewHitlist, ReviewRail, statusSegment } from "./rail.ts";
+import { type RailKey, ReviewHitlist, ReviewRail, statusSegment, tmuxReviewStatusBar } from "./rail.ts";
 import type { KeyMatcher } from "./keys.ts";
 import { type ToolHost, registerTools } from "./tools.ts";
 import { BluefinAnsiSplash } from "./splash.ts";
@@ -54,6 +54,7 @@ interface UiLike {
 	input(title: string, placeholder?: string): Promise<string | undefined>;
 	setStatus(key: string, value: string | undefined): void;
 	setWidget(key: string, content: unknown, options?: { placement?: string }): void;
+	setFooter?(factory: ((tui: unknown, theme: unknown, footerData: unknown) => { render(width: number): string[]; invalidate?(): void; dispose?(): void }) | undefined): void;
 	setTitle(title: string): void;
 	pasteToEditor(text: string): void;
 	custom<T>(factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (result: T) => void) => unknown, options?: unknown): Promise<T>;
@@ -158,7 +159,7 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 				// Issues have no diff to land. Slaying one means producing the change
 				// it asked for and handing it to a human as a pull request.
 				return batch.every((entry) => entry.type === "issue")
-					? `Close out the following ${batch.length} queued issues by shipping the work, one pull request per issue:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each issue: first inspect if it has already been resolved or closed by an existing merged PR or commit on the default branch (check git log and closed-by PR references), or if the requested infrastructure change, DNS/redirect, or external condition is already active and verified complete. If the fix is already landed on the default branch or verified active live: confirm the evidence and close the issue directly with \`gh issue close <number> --repo <owner/repo> --reason completed --comment "<evidence of live resolution or commit>"\` instead of opening a duplicate pull request or leaving it open. Otherwise, read the issue and the repository's contract documents, implement what it asks for and nothing else, run the smallest existing test that covers the changed surface, then open a pull request that closes it with \`Closes <owner/repo>#<number>\` in the body. Someone else reviews and merges: never merge your own, never approve. Where an issue cannot be finished as asked, open no pull request for it and report an evidenced finding instead, naming what blocked you.\n\n${protocol}`
+					? `Close out the following ${batch.length} queued issues by shipping the work, one pull request per issue:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each issue: do not dismiss or conclude no_work_needed if there is an actionable bug, missing test, broken script, or underlying root cause to address. Diagnose the root cause, implement the fix, run the smallest existing test covering the changed surface, and open a pull request that closes it with \`Closes <owner/repo>#<number>\` in the body. Someone else reviews and merges: never merge your own, never approve. Only if an issue has genuinely already been merged by an earlier PR on the default branch: confirm that commit and close the issue directly with \`gh issue close <number> --repo <owner/repo> --reason completed --comment "<evidence of prior merged PR>"\`. Where an issue cannot be finished as asked, open no pull request for it and report an evidenced finding instead, naming what blocked you.\n\n${protocol}`
 					: `Execute the full fix-and-merge landing pass on the following ${batch.length} selected items:\n\n${list}\n\n${crossRepoHeader ? `${crossRepoHeader}\n\n` : ""}For each PR: review the diff, patch defects directly at source, fix failing tests, verify with focused contract tests, re-kick flaky CI checks (\`gh run rerun <run-id> --failed\`), and once checks are green, approve and squash-merge the pull request with \`gh pr review <id> --repo <repo> --approve\` and \`gh pr merge <id> --repo <repo> --squash\` (or \`--auto --squash\` plus \`lgtm\` label if governed by a merge queue ruleset). Do not leave actionable PRs unmerged once green. Once landed or blocked, immediately proceed to the next assignment.\n\n${protocol}`;
 			default:
 				break;
@@ -179,7 +180,7 @@ export function actionPrompt(action: DashboardAction, priority?: Priority): stri
 			// Issues have no diff to land. Slaying one means producing the change it
 			// asked for and handing it to a human as a pull request.
 			return action.item.type === "issue"
-				? `Close out ${cite(action.item)} by shipping the work. First inspect if the issue has already been resolved or closed by an existing merged PR or commit on the default branch (check git log and closed-by PR references), or if the requested infrastructure change, DNS/redirect, or external condition is already active and verified complete. If the fix is already landed on the default branch or verified active live: confirm the evidence and close the issue directly with \`gh issue close ${action.item.id} --repo ${action.item.repo} --reason completed --comment "<evidence of live resolution or commit>"\` instead of opening a duplicate pull request or leaving it open. Otherwise, read the issue and the repository's contract documents, implement what it asks for and nothing else, run the smallest existing test that covers the changed surface, then open a pull request against the default branch whose body contains \`Closes ${action.item.repo}#${action.item.id}\`. Someone else reviews and merges it: never merge your own, never approve it. If it cannot be finished as asked, open no pull request and report an evidenced finding naming what blocked you.${hive}`
+				? `Close out ${cite(action.item)} by implementing and shipping the solution. Do not dismiss or conclude with no_work_needed if there is any actionable bug, test failure, code change, documentation fix, or underlying root cause to address. Inspect the code, diagnose the problem, implement the fix, run the smallest existing test that covers the changed surface, then open a pull request against the default branch whose body contains \`Closes ${action.item.repo}#${action.item.id}\`. Someone else reviews and merges it: never merge your own, never approve it. Only if the issue has already been resolved or closed by an existing merged PR or commit on the default branch: confirm the evidence and close the issue directly with \`gh issue close ${action.item.id} --repo ${action.item.repo} --reason completed --comment "<evidence of live resolution or commit>"\`. Otherwise implement what it asks for and open the PR.${hive}`
 				: `Execute the full fix-and-merge landing pass on ${cite(action.item)}: review the diff, patch what is broken, fix and commit any failing tests or defects, ensure contract tests pass, re-kick transient CI failures (\`gh run rerun <run-id> --failed\`), and as soon as checks are green, approve and land the pull request: approve with \`gh pr review ${action.item.id} --repo ${action.item.repo} --approve\`, squash-merge with \`gh pr merge ${action.item.id} --repo ${action.item.repo} --squash\` (or enable auto-merge \`gh pr merge ${action.item.id} --repo ${action.item.repo} --auto --squash\` if using a merge queue), and apply \`lgtm\` label if required by branch protection/rulesets (\`gh pr edit ${action.item.id} --repo ${action.item.repo} --add-label lgtm\`). Once merged or if blocked by policy, advance immediately to the next queue assignment.${hive}`;
 		case "snapshot":
 			return `Submit the Argo workflow in deploy/argo-review-fsdk-build.yaml to build and push a container snapshot of the current tree, then report the workflow name and how to watch it.`;
@@ -225,6 +226,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	pi.registerFlag("splash", { description: "Show 1990s demoscene Razor 1911 ANSI splash screen", type: "boolean", default: true });
 	pi.registerFlag("repo", { description: "Review one repository: owner/repo, or org:name for a whole organization", type: "string" });
 	pi.registerFlag("skip-repo", { description: "Comma-separated repositories to skip (e.g. lab, projectbluefin/lab)", type: "string" });
+	pi.registerFlag("autoslay", { description: "Autoslay queue continuously in Hive priority order on startup", type: "boolean", default: false });
 	registerTools(pi as unknown as ToolHost, mode, () => started);
 
 	const repaint = () => tui?.requestRender();
@@ -419,6 +421,18 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		syncStatus(ctx);
 
 		await splash;
+		const flagAutoslay = pi.getFlag("autoslay");
+		if (flagAutoslay === true) {
+			autoslayActive = true;
+			const slayable = mode.slayableItems();
+			const items = (slayable.length > 0 ? slayable.slice(0, BATCH_LIMIT) : [mode.selected()].filter(Boolean)) as QueueItem[];
+			if (items.length > 0) {
+				const action: DashboardAction = { kind: "slay", item: items[0]!, items: items.length > 1 ? items : undefined };
+				void dispatch(ctx, action);
+				return;
+			}
+			autoslayActive = false;
+		}
 		// Opened, not awaited: `ctx.ui.custom` resolves when the maintainer closes
 		// the dashboard, and startup is over long before that.
 		void openDashboard(ctx);
@@ -476,6 +490,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			},
 			{ placement: "belowEditor" },
 		);
+
+		if (typeof ctx.ui.setFooter === "function") {
+			ctx.ui.setFooter((_hostTui: unknown, theme: unknown) => {
+				const painter = themePainter(theme as UiLike["theme"]);
+				return {
+					render(width: number): string[] {
+						return [tmuxReviewStatusBar(mode, painter, width, Date.now())];
+					},
+				};
+			});
+		}
 
 		mode.refreshState();
 		syncStatus(ctx);

@@ -137,6 +137,9 @@ if [[ "${1:-}" == "issues" ]]; then
 elif [[ "${1:-}" == "all" ]]; then
   ARGS+=(--all)
   shift
+elif [[ "${1:-}" == "autoslay" || "${1:-}" == "slay" ]]; then
+  ARGS+=(--autoslay)
+  shift
 fi
 
 exec omp --profile review --extension "$EXTENSION_PATH" ${ARGS[@]+"${ARGS[@]}"} "$@"

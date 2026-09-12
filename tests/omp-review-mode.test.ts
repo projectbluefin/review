@@ -280,11 +280,15 @@ function fakeCtx() {
 		statuses,
 		widgets,
 		overlays,
+		footers: [] as Array<unknown>,
 		pasted: [],
 		ui: {
 			notify: (message, level) => notifications.push({ message, level }),
 			setStatus: (key, value) => statuses.set(key, value),
 			setWidget: (key, content) => widgets.set(key, content),
+			setFooter(factory) {
+				this.parent.footers.push(factory);
+			},
 			setTitle: () => {},
 			pasteToEditor(text) {
 				this.parent.pasted.push(text);
@@ -1352,7 +1356,7 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 
 	assert.deepEqual(pi.labels, ["Bluefin Review"]);
 	assert.deepEqual([...pi.shortcuts.keys()].sort(), ["alt+b", "alt+i", "alt+j", "alt+k", "alt+o", "alt+s", "alt+u", "alt+x", "alt+y"]);
-	assert.deepEqual([...pi.flags.keys()].sort(), ["all", "issues", "pr", "repo", "skip-repo", "splash"]);
+	assert.deepEqual([...pi.flags.keys()].sort(), ["all", "autoslay", "issues", "pr", "repo", "skip-repo", "splash"]);
 	assert.deepEqual([...pi.tools.keys()].sort(), [
 		"bluefin_hive_lookup",
 		"bluefin_review_diff",
@@ -1372,7 +1376,10 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	assert.ok(ctx.statuses.get("bluefin_queue")?.includes("#7"), ctx.statuses.get("bluefin_queue"));
 	assert.equal(typeof ctx.widgets.get("bluefin-rail"), "function", "the rail is a component, not capped strings");
 	assert.equal(ctx.widgets.get("bluefin-hitlist"), undefined, "hitlist widget is removed to avoid editor crowding");
-
+	assert.equal(ctx.footers.length, 1, "footer is registered as the lower status line");
+	const footerComp = (ctx.footers[0] as (tui: unknown, theme: unknown) => { render(w: number): string[] })({}, ctx.ui.theme);
+	const footerRows = footerComp.render(120);
+	assert.ok(footerRows[0].includes("BLUEFIN"), "footer renders tmux status bar as very bottom row");
 	const diff = await pi.tools.get("bluefin_review_diff").execute("id", { pull_request: 42 });
 	assert.match(diff.content[0].text, /image\/entrypoint\.sh/);
 	assert.equal(diff.details.pull_request, 42);
