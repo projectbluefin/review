@@ -14,7 +14,7 @@
 ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08@sha256:1e5b5437116d78176d68a05e053ac750ca11b36c7da46bfa85d48c184201414c
 # Kept equal to justfile's hive_commit: host setup and the
 # image runtime use the same contributor relay protocol revision.
-ARG HIVE_COMMIT=ebd5db6adf95c2eceb77c1a4376f137af0836d4b
+ARG HIVE_COMMIT=eb37e0a7db5f1526632f399f395b2c3eabe040ed
 ARG NODE_VERSION=24.18.1
 ARG GH_VERSION=2.97.0
 ARG TMUX_VERSION=3.7b

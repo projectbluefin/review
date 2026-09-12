@@ -380,12 +380,9 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          # Staged into this repository's own namespace, not the release one:
-          # a fork builds and proves the image with its own token, and only
-          # the guarded publish job — which runs solely on the canonical
-          # repository, where these two are the same registry path — turns
-          # those digests into ':stable'. GHCR paths are lowercase.
-          staging="ghcr.io/${GITHUB_REPOSITORY,,}"
+          # Forks stage under their own contributor namespace; the canonical
+          # repository resolves to IMAGE and can assemble those subjects.
+          staging="ghcr.io/${GITHUB_REPOSITORY,,}-contributor"
           target="${staging}:sha-${GITHUB_SHA}-${ARCH}"
           podman push --format oci --authfile "${RUNNER_TEMP}/ghcr-auth.json" \
             --digestfile "${RUNNER_TEMP}/digest-${ARCH}.txt" \
@@ -527,11 +524,9 @@ jobs:
           [[ "$AMD64_DIGEST" != "$ARM64_DIGEST" ]] ||
             { echo "both architectures reported the same digest: ${AMD64_DIGEST}" >&2; exit 1; }
           export AMD64_DIGEST ARM64_DIGEST
-          # The per-architecture manifests were staged in this repository's own
-          # namespace by the build jobs. This job only runs on the canonical
-          # repository, so that path and the release path are the same, but
-          # naming it explicitly keeps the reference honest.
-          STAGING="ghcr.io/${GITHUB_REPOSITORY,,}"
+          # The per-architecture manifests and their attestations use the
+          # same contributor namespace as the published index.
+          STAGING="${IMAGE}"
           SOURCE_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
           export STAGING SOURCE_URL
 

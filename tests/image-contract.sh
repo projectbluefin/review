@@ -108,7 +108,31 @@ require tests/image-audit.sh 'if ! "$direct_copy"; then'
 require .github/workflows/publish-compat-image.yml \
   'SYFT_SELECT_CATALOGERS: "+sbom-cataloger"' \
   'sbom-path: review-sbom-${{ matrix.arch }}.spdx.json' \
-  '--require-attestations'
+  '--require-attestations' \
+  'IMAGE: ghcr.io/projectbluefin/review-contributor' \
+  'staging="ghcr.io/${GITHUB_REPOSITORY,,}-contributor"' \
+  'echo "image=${staging}"' \
+  'subject-name: ${{ steps.push.outputs.image }}' \
+  'STAGING="${IMAGE}"' \
+  'review:index "docker://${STAGING}@${entry#*:}"' \
+  'subject-name: ${{ env.IMAGE }}' \
+  'DERIVED_IMAGE: ${{ env.IMAGE }}@${{ steps.publish.outputs.digest }}'
+
+# Match literal workflow expressions, not shell expansions.
+# shellcheck disable=SC2016
+for field in 'subject-name: ${{ steps.push.outputs.image }}' 'subject-digest: ${{ steps.push.outputs.digest }}'; do
+  if [[ "$(grep -Fc "$field" .github/workflows/publish-compat-image.yml)" != 2 ]]; then
+    echo "::error file=.github/workflows/publish-compat-image.yml::both platform attestations must bind the pushed image and digest"
+    fail=1
+  fi
+done
+
+# shellcheck disable=SC2016
+if grep -Fq 'staging="ghcr.io/${GITHUB_REPOSITORY,,}"' .github/workflows/publish-compat-image.yml ||
+  grep -Fq 'STAGING="ghcr.io/${GITHUB_REPOSITORY,,}"' .github/workflows/publish-compat-image.yml; then
+  echo "::error file=.github/workflows/publish-compat-image.yml::platform staging must use the contributor namespace"
+  fail=1
+fi
 
 for path in \
   image/entrypoint.sh \

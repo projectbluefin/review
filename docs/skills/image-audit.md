@@ -53,6 +53,9 @@ container launch execution (`launcher.md`).
    `--report FILE` outputs markdown audit summaries. Reports are build
    artifacts and stay git-ignored.
 
+   Platform manifests and their attestations must use the contributor image
+   namespace consumed by the multi-architecture index and final audit.
+
 ## Common Rationalizations
 
 | Rationalization | Reality |

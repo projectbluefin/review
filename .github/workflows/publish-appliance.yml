@@ -519,7 +519,7 @@ jobs:
 
       - name: Generate release notes
         if: needs.metadata.outputs.release == 'true'
-        uses: projectbluefin/actions/bootc-build/generate-release-notes@v1
+        uses: projectbluefin/actions/bootc-build/generate-release-notes@2564c7bb30143104a9a1aebb4254359e174a8d81 # v1
         with:
           tag: v${{ needs.metadata.outputs.version }}
           output-file: ${{ runner.temp }}/CHANGELOG.md
@@ -528,7 +528,7 @@ jobs:
 
       - name: Publish GitHub Release assets
         if: needs.metadata.outputs.release == 'true'
-        uses: softprops/action-gh-release@c95fe1489396fe8a9ec87484f746654261073809 # v2.2.1
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           name: v${{ needs.metadata.outputs.version }}
           tag_name: v${{ needs.metadata.outputs.version }}
