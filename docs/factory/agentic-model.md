@@ -5,11 +5,19 @@ This document is the canonical local model for `review`. It adapts
 repository's two-mode review appliance. Read it after
 `AGENTS.md` and before task-specific skills.
 
-The published image derives from the pinned lab-runner base and includes the
-Goose/Hive contributor worker and maintainer dashboard. Its two launch modes
-share the same image while keeping Hive assignment authority separate from
-the human review surface.
+The repository ships two runtimes:
+1. The distroless review appliance (`image/appliance/Containerfile` ->
+   `ghcr.io/projectbluefin/review`), which packages the primary maintainer
+   review product: the Oh My Pi extension in `image/extension/bluefin-review/`,
+   runnable via `just review-appliance` or `bin/omp-review`. OMP owns agent
+   execution, sessions, tasks, and companion review tools.
+2. The contributor and compatibility runtime (`image/Containerfile` ->
+   `ghcr.io/projectbluefin/review-contributor`), which packages the Hive worker
+   and the retained Textual maintainer compatibility dashboard (`review-queue`).
 
+Hive assignment authority remains separate from the human review surface:
+Hive assigns contributor tasks, while maintainer review sessions consume Hive
+reads as optional, non-mutating context and ordering.
 The model is documentation: the launcher, image, tests, skills, and
 user-facing instructions must describe the same roles and authority
 boundaries. When source evidence changes the model, update this document and
@@ -23,12 +31,13 @@ session logs, or design scratchpads as competing explanations.
 | **Bluefin Agentic Factory Feedback Loop** | The lifecycle that turns agent work and test feedback into reviewed Bluefin changes. | The model for this repository. |
 | **Toil** | Repetitive, low-novelty maintenance work an under-maintained project needs: broken CI, stale pins, drifted documentation, unreproduced reports, untriaged issues, stalled branches. | Toil is the work this factory exists to absorb. |
 | **Contributor** | A contributor using the worker configuration to receive and complete Hive-assigned work. They are treated as a contributor, they just happen to specialize in the `clanker-queue`. It's a "subclass" of contributor like a video game RPG character. Same team, different specialization. | Hive assigns work; the worker implements only its assigned scope. |
-| **Maintainer/Reviewer** | A maintainer assessing an incoming pull request. This is a role, same team but this is an active review process, brainmeat needed. | The human decides review, approval, and merge. |
-| **Review Evidence** | Read-only pull-request, issue, verification, and merge-state context shown before a review. | Evidence informs a human; it never makes a decision. |
-| **Managed Reviewer Client** | A foreground, preconfigured Goose session that a Maintainer Reviewer may choose after examining Review Evidence. | It prepares a Review Draft. Its merge keys only execute a typed, human-confirmed decision: asking Hive's authenticated endpoint to create the App-authored exact-head approval and `lgtm` opt-in, or a maintainer's direct squash merge, which requires GitHub's `push` permission and never overrides branch protection. It decides nothing itself. It can also submit the maintainer's own review — approve, request changes, or comment — which merges nothing and arms nothing. |
+| **Maintainer/Reviewer** | A maintainer assessing an incoming pull request or issue. Active review process requiring human judgement and decision. | The human decides review, approval, and merge. |
+| **Review Evidence** | Read-only pull-request, issue, verification, trace, and merge-state context shown before a review. | Evidence informs a human; it never makes a decision. |
+| **Review Mode / Extension** | The primary maintainer review mode for Oh My Pi in `image/extension/bluefin-review/`. It provides the queue rail, dashboard, pipeline trace, companion agents (`bluefin-doctrine`, `bluefin-reviewer`, `bluefin-security`, `bluefin-correctness`, `bluefin-test-coverage`, `bluefin-simplicity`, `bluefin-ci-triage`, `k3-final-review`), and inspection tools. | OMP owns execution, session, and tool boundaries. |
+| **Managed Reviewer Client** | A foreground review session (OMP review mode, or retained compatibility Goose session) that a Maintainer Reviewer runs to examine evidence and prepare reviews. | It prepares a Review Draft or executes typed, human-confirmed decisions: App-authored approval with `lgtm` opt-in, or direct squash merge (gated on GitHub `push` permission). It decides nothing itself. |
 | **Portable Reviewer Prompt** | Markdown Review Evidence and queue instructions for a maintainer's own client. | It is context, not an assignment. |
-| **Bluefin PR Queue** | A cached, live GitHub view of open factory pull requests and suggested next actions. | GitHub is authoritative; the queue neither assigns work nor merges. |
-| **Dashboard Activity** | The high-priority, bounded display of active parent reviews, Check workers, landing agents, queued work, and freshness. | It reports live or retained evidence; it never assigns Hive work. |
+| **Bluefin PR Queue** | A live GitHub view of open factory pull requests and issues, optionally ordered by Hive positions when configured. | GitHub is authoritative for repo state; Hive orders when configured; the queue neither assigns work nor merges. |
+| **Dashboard Activity** | The high-priority, bounded display of active reviews, check workers, landing agents, queued work, pipeline trace, and freshness. | It reports live or retained evidence; it never assigns Hive work. |
 | **Review Draft** | Analysis, review text, or commands prepared for a Maintainer Reviewer. | A human explicitly considers and submits it. |
 
 Avoid classifying contributors by role; this isn't a class system it's the loadout a contributor chooses to use that day.
@@ -73,7 +82,13 @@ carries the operational form of this section.
 
 ## Repository boundary
 
-`review` owns the contributor image, credential handoff, and review context.
+`review` ships the review appliance image, the OMP extension, the contributor
+image, credential handoff, and review context.
+
+OMP owns agent execution, sessions, tasks, and companion review tool boundaries
+in the primary maintainer product. Hive reads remain optional, read-only
+context and queue ordering for maintainers.
+
 Hive owns the contributor WebSocket protocol, task selection, assignment prompt
 injection, the `contributor` tmux session, and output capture. The launcher
 must not decline, retry, or otherwise manage assignments mid-protocol; the
@@ -81,7 +96,6 @@ one permitted filter is own-work exclusion on the maintainer-facing queue
 view, so a reviewer never receives their own authored pull requests.
 Hive also owns contributor completion. Review may display a read-only Hive
 projection, but it never completes an assignment.
-
 The human Maintainer Reviewer is the decision point. A Factory Worker,
 Managed Reviewer Client, Portable Reviewer Prompt, Review Evidence view, or
 Bluefin PR Queue must never claim approval, queue-management, or

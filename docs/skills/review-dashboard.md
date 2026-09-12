@@ -3,15 +3,15 @@ name: review-dashboard
 version: "3.1"
 last_updated: 2026-09-09
 id: review-dashboard
-one_line_purpose: Change the maintainer dashboard without weakening its gate or hiding the queue.
+one_line_purpose: Maintain the Oh My Pi review extension and the retained Textual compatibility dashboard.
 entry_point: docs/skills/review-dashboard.md
 category: ci-ops
 mcp_compliance_level: partial
 optimization_status: draft
 status: active
 dependencies: []
-tags: [textual, tui, dashboard, review, maintainer]
-description: "Maintains image/tui/bluefin_review_tui.py: the mutation gate, the queue view, and its Textual patterns. Use when editing the dashboard or its pilot tests."
+tags: [omp, extension, dashboard, review, textual, maintainer]
+description: "Maintains the primary Oh My Pi review extension in image/extension/bluefin-review/ and the retained Textual compatibility dashboard in image/tui/bluefin_review_tui.py. Use when editing review UI or action seams."
 metadata:
   type: runbook
   context7-sources: [/websites/textual_textualize_io, /textualize/textual]
@@ -19,39 +19,61 @@ metadata:
 
 # Review Dashboard
 
-`just review-queue` reads the organization's open pull requests and open issues live through paginated GraphQL searches using the shipped GitHub CLI, carrying the review, mergeability, and CI-rollup evidence each recommended action is classified from. It opens on the pull-request view; `I` reaches issues and the mixed workboard when needed. `just review-queue owner/repo` reads that repository's open pull requests and issues the same way and normalizes them into repository-qualified queue rows. The flag form `--repo` narrows the queue to one repository without disabling mixed view or issue navigation. Work that is out of the maintainer's hands stays out of the queue: the authenticated maintainer's own pull requests and pull requests already carrying their APPROVED or CHANGES_REQUESTED verdict are hidden, and the status line counts both ("out of my hands: N own, M reviewed by me") so a shrunken queue never reads as a dead organization. The dashboard distinguishes ready, empty, missing, inaccessible, malformed, and failed sources; `R` rereads whichever source is active. A source failure displays an explicit error row and status message rather than rendering an empty successful queue.
+The primary maintainer review product is the Oh My Pi extension in
+`image/extension/bluefin-review/`, launched in source mode via `bin/omp-review`
+or packaged via `just review-appliance` and `image/appliance/Containerfile`.
+The retained Textual maintainer dashboard in `image/tui/bluefin_review_tui.py`
+is launched via `just review-queue` and serves compatibility consumers in
+`image/Containerfile`.
 
-The dashboard retains its last good live GitHub queue and read-only Hive view. Receipt-verified clean reviews, successful mutations or batch queues, and terminal landing completion request reconciliation. Requests coalesce with one bounded follow-up; there is no polling or Hive assignment/completion mutation. `R` is the explicit-read control; failed reads retain visibly aged data.
+## Oh My Pi Review Mode (Primary Maintainer Product)
+`bin/omp-review` and `just review-appliance` launch Oh My Pi in dedicated
+review mode. The extension provides:
 
-The display prefix comes from the image-owned `/opt/bluefin/config/display-brand`
-file (the source default is `Project Bluefin Review`); a missing file falls
-back to `Review`. It changes screen branding only and never changes repository
-targets or permissions.
+1. **Queue rail & status**: Live queue rail beneath editor with active bindings
+   (`alt+b` dashboard, `alt+j`/`alt+k` next/prev, `alt+i` PRs/issues, `alt+o` repo,
+   `alt+u` refresh, `alt+y` cite, `alt+x` select).
+2. **Review dashboard overlay**: Modal dashboard (`alt+b`) with keyboard navigation
+   (`j`/`k` move, `tab` pane, `h`/`l` fold, `/` filter, `r` review, `d` diff,
+   `a` approve+merge, `f` fix, `s` slay, `b` snapshot, `?` help, `q` close).
+   Right pane displays a pipeline trace (run state, review/landing events, findings).
+3. **Companion review agents**: Specialized task agents under
+   `image/extension/bluefin-review/agents/` (`bluefin-doctrine`, `bluefin-reviewer`,
+   `bluefin-security`, `bluefin-correctness`, `bluefin-test-coverage`,
+   `bluefin-simplicity`, `bluefin-ci-triage`, `k3-final-review`).
+4. **Inspection tools**: Registered tools in `tools.ts` (`bluefin_review_status`,
+   `bluefin_review_queue`, `bluefin_review_diff`, `bluefin_review_trace`,
+   `bluefin_hive_lookup`) returning real structured data.
+5. **Hive context**: When configured, Hive positions order the queue (read-only).
+   Otherwise, the queue is classified from live GitHub evidence into the action
+   vocabulary (`ready-for-human-merge`, `review`, `resolve-conflicts`, `fix-ci`,
+   `investigate`, `triage`).
+Detailed appliance instructions live in [`docs/appliance.md`](../appliance.md).
 
-`A` confirms the selected pull requests as a landing batch and returns the
-maintainer to the live queue. `w` opens the deliberate landing view, where
-`j`/`k` select an explicit batch target, `x` stops that target's owned process
-group, and Escape returns to the queue. The landing view reports observed
-stage, model and round when available, terminal/waiting/blocked/failed counts,
-elapsed time, and evidence age; it does not invent an ETA.
-The waiting count covers only explicit CI or publication waits; a pull request
-without a report is shown as `? unreported` rather than being counted as
-waiting. The landing viewer keeps only its batch controls visible in the
-clickable footer so the key labels remain readable at 120 columns; the CI
-failure hint likewise keeps its literal `i` and `Esc` controls. Standard and
-desktop layouts reserve 55% for queue rows so identity, CI, and action suffixes
-stay together. At compact widths, the activity panel keeps the active landing
-identity visible and the steering/key controls use a condensed layout.
+## Retained Textual Compatibility Dashboard
 
+`just review-queue` serves compatibility consumers in `image/Containerfile`.
+It reads open PRs and issues via GraphQL, displaying review, mergeability, and
+CI-rollup evidence. It retains the last good live GitHub queue and read-only Hive view.
+Receipt-verified clean reviews and terminal landing completion request
+reconciliation without polling. `R` explicitly refetches.
+`A` confirms the selected PRs as a landing batch and returns to the queue. `w` opens
+the landing view, where `j`/`k` select a batch target, `x` stops it, and Escape returns.
+The landing view reports observed stage, model, round, and terminal counts without inventing an ETA.
+Clickable footers keep controls visible across standard and compact layouts.
 ## When to Use
 
-Load this before editing `image/tui/bluefin_review_tui.py`,
-`tests/dashboard_pilot.py`, or `tests/dashboard-contract.sh` — the maintainer
-surface `just review-queue` opens.
+Load this before editing `image/extension/bluefin-review/` (the primary OMP
+extension), or before maintaining the retained Textual dashboard in
+`image/tui/bluefin_review_tui.py`, `tests/dashboard_pilot.py`, or
+`tests/dashboard-contract.sh`.
 
 ## When Not to Use
 
-Do not use this for the launcher ([`launcher.md`](launcher.md)), image build ([`image-build.md`](image-build.md)), or Hive protocol ([`hive-runtime.md`](hive-runtime.md)).
+Do not use this for the root launcher recipes ([`launcher.md`](launcher.md)),
+appliance or contributor image builds ([`image-build.md`](image-build.md)), or
+the Hive contributor WebSocket protocol ([`hive-runtime.md`](hive-runtime.md)).
+For general appliance setup and configuration, see [`docs/appliance.md`](../appliance.md).
 
 ## Semantic Foundation
 
@@ -76,21 +98,14 @@ Right-hand panes scroll evidence (`h`/`l`), `e` opens decisions, and `[u]` updat
 
 ## Textual Patterns
 
-Focused CI-evidence fixtures must disable unrelated mount-time queue, issue,
-Hive, and harness readers. An issue refresh can otherwise replace the synthetic
-PR selection while its CI callback is pending; keep an assertion that the
-fixture makes no unrelated GitHub calls rather than masking the race with sleeps.
-
-Verified against Context7 `/textualize/textual`:
-- **Bracket Escaping:** Always escape opening brackets in PR titles or git text via `escape(text)` so `[WIP]` or `[H]` do not corrupt Rich/Textual markup.
+Focused CI-evidence fixtures must disable unrelated mount-time readers so callbacks
+do not race. Verified against Context7 `/textualize/textual`:
+- **Bracket Escaping:** Always escape opening brackets in PR titles or git text via `escape(text)`.
 - **Quoted Links:** Terminal OSC 8 links require quotes: `[link="https://..."]`.
 - **Theme Variables:** Use theme pairs like `[$text-success on $success-muted]` for status bars.
-- **Thread Safety:** Never touch the DOM or call `query_one()` from worker threads. Dispatch updates through `self.call_from_thread(self.method, data)`.
-
-**Diffs get Pygments through Rich**: `Syntax(text, "diff", theme="ansi_dark")`. `ansi_dark` resolves to the terminal's own palette instead of assuming a background colour. `DiffScreen` keeps GitHub's complete response in bounded pages; `[` and `]` navigate them, while loading, success, and fetch error are distinct states. `[o]` is only an optional browser escape hatch.
-
-**Conversations get Textual's `Markdown` widget**. `CommentsScreen` renders an issue or pull request's opening post, comments, and reviews as one document ordered by timestamp across both kinds. A review with no body is dropped unless its state is `APPROVED` or `CHANGES_REQUESTED`, where the state *is* the verdict. `[C]` opens it from the queue, for issues too unlike the diff; `[c]` opens it from the review screen. A late refresh is discarded unless it matches the generation that asked for it.
-
+- **Thread Safety:** Never touch the DOM or call `query_one()` from worker threads.
+- **Diffs & Conversations:** Rich Pygments for diffs (`Syntax(text, "diff", theme="ansi_dark")`)
+  and Textual `Markdown` widget for conversations (`CommentsScreen`).
 ## Design Rules
 
 - **Show the whole queue by default.** Defaulting to one
@@ -126,11 +141,9 @@ Verified against Context7 `/textualize/textual`:
   requires a Renovate author, update type (`digest`, `pin`, `patch`, `minor`),
   an open non-draft pull request, `MERGEABLE` + `BEHIND`, and all checks green.
   `[U]` selects those stops for gated `[u]`.
-- **Distinguish the merge paths.** `a` requests Hive's App-authored approval
-  and applies `lgtm`. On a selection, `A` dispatches one landing agent for the
-  batch; without a selection `A` no-ops. `w` focuses the persistent batch controls.
-  `m` squashes
-  now (gated on `push` permission). `L` leaves a review and merges nothing.
+- **Distinguish the merge paths.** `a` requests Hive's App-authored approval and applies `lgtm`.
+  On a selection, `A` dispatches one landing agent for the batch; without selection `A` no-ops.
+  `w` focuses batch controls, `m` squashes now (gated on `push` permission), and `L` leaves a review.
   `$` ("slay") executes the full review weapon pipeline: reviews unreviewed PRs,
   dispatches automated fix-and-land if findings are detected, and enqueues batch
   landing if clean. Selected issues ride the same gate and dispatch an issue
@@ -140,35 +153,17 @@ Verified against Context7 `/textualize/textual`:
   Prior reviewed identities are captured before live refresh,
   and exact-head revalidation aborts landing when a pull request advances to a
   new head on GitHub, preventing stale approvals from landing unreviewed code.
-- **Mixed workboard and three-way view cycle:** The dashboard opens on pull
-  requests. `I` cycles through PRs only, issues only, and the mixed
-  workboard (both PRs and issues) (`prs -> issues -> mixed -> prs`).
-  Highlighting an issue renders its metadata and description in details, and
-  recent comments in context. Triage actions: `c` comments via `CommentBody`,
-  `CommentPreview`, and the typed issue-number gate; `x` closes the issue with a
-  triage comment behind the typed number gate; `o` opens in browser; `y` copies
-  handoff. PR actions (`r`, `v`, `m`, `u`, `a`/`A`, `L`) guard against
-  issues and apply to pull requests only; `$` applies to both kinds, giving
-  issues the fix-agent lane above.
+- **Mixed workboard and three-way view cycle:** The dashboard opens on PRs. `I` cycles
+  `prs -> issues -> mixed -> prs`. Issues display metadata/description and recent comments.
+  Triage actions: `c` comments, `x` closes with triage comment behind typed number gate,
+  `o` opens browser, `y` copies handoff. PR actions (`r`, `v`, `m`, `u`, `a`/`A`, `L`) guard against issues.
 - **Keyboard reference modal on `?`**: `?` opens `HelpScreen`, a modal
   grouping navigation, review, batching, and mutations with semantic accent and
   warning badges; dismisses cleanly with `?`, `q`, or `Esc`.
 - **Evidence-first CI failure triage card**: Failing, errored, or timed-out checks surface an immediate `CI FAILURE TRIAGE` section displaying the workflow name, job/check context, failing step, head SHA, execution timestamps, and direct evidence URLs.
-- **CI evidence stays bounded and untrusted**: Log acquisition is on demand and
-  tied to the selected repository, pull request, head, run, and attempt. Missing
-  logs, permission failures, transport failures, and available logs remain
-  distinct; displayed text is bounded, redacted, and stripped of terminal
-  controls.
-- **Review/action receipts stay observational**: A completed `ReviewResult` and
-  a successful correlated action are retained only in bounded session memory,
-  keyed by repository, pull request, and exact head. Supported categories keep
-  their identity (`approve`, `request-changes`, `approve-and-queue`, or a
-  verified `merge`); a queue request is not a completed merge. Missing
-  repository/PR provenance, stale heads, failed actions, comments, branch
-  updates, and unsupported actions are `unclassified`. The receipt describes an
-  evidence/action pair and has no approval or merge authority.
-- **Responsive screens preserve focus**: Small terminals condense activity, keep key rows visible, and expose compact CI evidence. Accent, warning, error, and muted metadata colors supplement text and icons.
-- **Empty queue celebration (`ALL SYSTEMS SLAY`)**: Draining active reviews triggers a one-shot 1.3s sequence ending in `ALL SYSTEMS SLAY`. Action-filtered views do not trigger celebration.
+- **CI evidence stays bounded and untrusted**: Log acquisition is on demand for selected repo, PR, head, run, attempt. Displayed text is bounded, redacted, and stripped of terminal controls.
+- **Review/action receipts stay observational**: A completed `ReviewResult` and correlated action are retained only in bounded session memory, keyed by repo, PR, and head. Receipts describe evidence/action pairs and have no merge authority.
+- **Responsive screens & celebration**: Small terminals condense activity and keep key rows visible. Draining active reviews triggers celebration (`ALL SYSTEMS SLAY`).
 - **Treat the Hive API as JSON, not a browser.** The read-only status probe reports missing config, credentials, transport failure, and concise states. Ranks `#N` are display evidence only.
 ## Batch Review and Landing
 
@@ -177,19 +172,18 @@ Batch landings partition across independent repository lanes via background agen
 ## Common Rationalizations & Red Flags
 
 - Two confirmations is reflex, not safety. The first prompt is the decision.
-- Never interpolate GitHub- or agent-sourced text without `escape()`.
-- Never access `self.query_one()` from worker threads.
+- Never interpolate GitHub- or agent-sourced text without `escape()`. Never access `query_one()` from worker threads.
 - Remote-sourced state must always display its age.
 - Headless tests verify logic; Pilot verifies live interaction and state transitions.
 ## Verification
 
 ```bash
-bash tests/dashboard-contract.sh     # static contract + the Textual pilot
+bash tests/omp-review-mode.sh          # OMP extension unit & contract tests
+bash tests/dashboard-contract.sh       # static contract + Textual pilot
 python3 tests/review_result_contract.py
 bash tests/image-contract.sh
 pre-commit run --all-files
 ```
-
 - [ ] Every new mutation runs through `mutate_all()` and shows its commands.
 - [ ] Multi-command actions are one gate, ordered so the first failure is harmless.
 - [ ] Failures mark the row; terminal landing outcomes require explicit reselection.

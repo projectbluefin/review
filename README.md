@@ -12,12 +12,12 @@ still apply.
 ## Quick start
 
 You need **Linux, rootless Podman, Git, `just`, and GitHub CLI (`gh`)**.
-For the default Goose backend, the launcher requires `goose` installed on your
-host (`goose configure` with GitHub Copilot). Codex uses host credential storage
-(`codex login`). In contrast, the distroless appliance recipes
-(`just review-appliance`, `just review-appliance-build`) need nothing on the host
-besides the container engine and Git credentials.
-
+The primary maintainer product is the distroless review appliance
+(`just review-appliance`, `just review-appliance-build`) or the local OMP mode
+(`bin/omp-review`), needing only a container engine and Git credentials.
+The retained compatibility recipes (`just review-queue`) provide a Textual
+dashboard via Goose (`goose configure` with GitHub Copilot) or Codex
+(`codex login`).
 ### 1. Get the launcher and sign in to GitHub
 
 ```bash
@@ -26,35 +26,12 @@ cd review
 gh auth login --web --hostname github.com --scopes repo,read:org
 ```
 
-### 2. Choose one review backend
+### 2. Choose your review entrypoint
 
-**Goose + GitHub Copilot — the default**
+**Bluefin Review appliance — primary maintainer product (one container, nothing else)**
 
-If you have not configured it, install Goose on your host and run
-`goose configure`, selecting GitHub Copilot. Then launch:
-
-```bash
-just review-queue
-```
-
-**Codex subscription — an alternative**
-
-Complete `codex login` on your host using file credential storage, then launch:
-
-```bash
-BLUEFIN_REVIEW_BACKEND=codex just review-queue
-```
-
-Codex selection does not require Goose or a Copilot credential on the host.
-A GitHub CLI login alone does **not** authenticate either review backend.
-See the [launcher guide](docs/skills/launcher.md) for authentication setup,
-model profiles, and troubleshooting. For the default Goose setup,
-`just review-doctor` checks readiness without starting an agent.
-
-**Bluefin Review appliance — one container, nothing else**
-
-`ghcr.io/projectbluefin/review` is a distroless image that carries the review
-mode, `omp`, `pi`, `gh` and `git` and needs nothing from the host but a
+`ghcr.io/projectbluefin/review` is a distroless image that carries the Oh My Pi
+review mode, `omp`, `pi`, `gh`, and `git` and needs nothing from the host but a
 container engine:
 
 ```bash
@@ -80,6 +57,26 @@ The same mode runs against a locally installed `omp` with `bin/omp-review`,
 which takes the same shortcuts: `bin/omp-review owner/repo`, `bin/omp-review 1284`,
 `bin/omp-review issues`.
 
+**Compatibility Textual dashboard — Goose or Codex**
+
+The retained Textual maintainer dashboard runs against `ghcr.io/projectbluefin/review-contributor:stable`:
+
+- **Goose + GitHub Copilot (default compatibility backend)**:
+  Install Goose on your host, run `goose configure` with GitHub Copilot, and launch:
+  ```bash
+  just review-queue
+  ```
+  For the default Goose setup, `just review-doctor` checks readiness without starting an agent.
+
+- **Codex subscription (alternative compatibility backend)**:
+  Complete `codex login` on your host using file credential storage, then launch:
+  ```bash
+  BLUEFIN_REVIEW_BACKEND=codex just review-queue
+  ```
+  Codex selection does not require Goose or a Copilot credential on the host.
+  A GitHub CLI login alone does **not** authenticate either review backend.
+  See the [launcher guide](docs/skills/launcher.md) for authentication setup,
+  model profiles, and troubleshooting.
 **Hive orders the queue when a project uses Hive.** With `HIVE_HUB` set or a
 contributor registration on the machine, the queue is Hive's work queue in
 Hive's positions, and a pull request that closes queued work inherits that

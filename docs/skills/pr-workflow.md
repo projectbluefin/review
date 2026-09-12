@@ -80,7 +80,7 @@ repository's contribution rules, which take precedence in their own tree.
 
 ## The Factory Label Contract
 
-See [`pr-labels.md`](pr-labels.md) for projectbluefin's canonical seven-label workflow contract and repository automation labels (`lgtm`, `override`, `security-advisory`).
+See [`pr-labels.md`](pr-labels.md) for projectbluefin's factory lifecycle labels, `3-clanker-queue` admission, `3-human-queue` routing, and the `lgtm` automation label.
 
 ## Reconciling Long-Lived Branches
 
