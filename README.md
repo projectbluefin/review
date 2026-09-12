@@ -188,7 +188,7 @@ is tracked in [#135](https://github.com/projectbluefin/review/issues/135).
 <details>
 <summary>Image provenance</summary>
 
-The image layers the pinned Hive runtime at `d0fc9ccf1796c408c43dc6be6d6315df00850781`.
+The image layers the pinned Hive runtime at `eb37e0a7db5f1526632f399f395b2c3eabe040ed`.
 See [image architecture and validation](docs/image-and-development.md).
 
 </details>
