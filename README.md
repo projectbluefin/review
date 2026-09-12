@@ -12,9 +12,7 @@ still apply.
 ## Quick start
 
 You need **Linux, rootless Podman, Git, `just`, and GitHub CLI (`gh`)**.
-For the default Goose backend, the launcher requires `goose` installed on your
-host (`goose configure` with GitHub Copilot). Codex uses host credential storage
-(`codex login`). In contrast, the distroless appliance recipes
+For the default OMP backend, the launcher requires the `omp` binary or the appliance image. Codex remains available as an alternative and uses host credential storage (`codex login`). In contrast, the distroless appliance recipes
 (`just review-appliance`, `just review-appliance-build`) need nothing on the host
 besides the container engine and Git credentials.
 
@@ -26,16 +24,11 @@ cd review
 gh auth login --web --hostname github.com --scopes repo,read:org
 ```
 
-### 2. Choose one review backend
+### 2. Choose one maintainer surface (backend)
 
-**Goose + GitHub Copilot — the default**
+**Oh My Pi (OMP) — the default maintainer surface**
 
-If you have not configured it, install Goose on your host and run
-`goose configure`, selecting GitHub Copilot. Then launch:
-
-```bash
-just review-queue
-```
+If you have the omp binary available on your host, use the omp maintainer surface. For a containerized appliance that includes omp, use the appliance mode described below. For local tests and host-backed launches see the launcher guide.
 
 **Codex subscription — an alternative**
 

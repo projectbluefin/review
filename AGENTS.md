@@ -1,8 +1,7 @@
 # review — Agent Operating Contract
 
 `review` is the Bluefin review appliance: one OCI image fork and a launcher.
-The `review-container` and `review-queue` recipes run the restored Goose/Hive
-worker and maintainer dashboard. Review owns the image, publication, launcher
+The `review-container` and `review-queue` recipes run the OMP maintainer extension/appliance and the associated maintainer UI. Review owns the image, publication, launcher
 credential handoff, and review context; Hive owns its contributor protocol, task
 selection, tmux session, prompt injection, and output capture.
 
