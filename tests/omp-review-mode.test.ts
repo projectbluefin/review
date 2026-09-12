@@ -1240,6 +1240,43 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	assert.ok(pi.messages.length > 0, "alt+s must dispatch autoslay user message in Hive priority order");
 });
 
+test("autoslay falls back to unranked PR batch review and slaying with 7 subagents and K3 review when no Hive-ranked items exist", async () => {
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	await review.whenStarted();
+
+	// Populate unranked open PRs with Hive configured/online so hiveOnly would normally show 0
+	const mode = new ReviewMode({ org: "projectbluefin", stateRoot: join(tmpdir(), "nope") });
+	mode.hive = {
+		...EMPTY_HIVE,
+		configured: true,
+		online: true,
+		hub: "https://hive.example",
+	};
+	const prs = [
+		prItem({ id: 101, repo: "projectbluefin/review", title: "first unranked pr" }),
+		prItem({ id: 102, repo: "projectbluefin/review", title: "second unranked pr" }),
+		prItem({ id: 103, repo: "projectbluefin/review", title: "third unranked pr" }),
+	];
+	mode.items = prs;
+	mode.reprioritize();
+
+	// hiveOnly hides them from visibleItems
+	assert.equal(mode.visibleItems().length, 0);
+	// slayableItems falls back to the unranked PR batch
+	const slayable = mode.slayableItems();
+	assert.equal(slayable.length, 3);
+	assert.equal(slayable[0].id, 101);
+
+	// The actionPrompt for the batch must include the 7-subagent cap and k3-final-review
+	const prompt = actionPrompt({ kind: "slay", item: slayable[0], items: slayable });
+	assert.match(prompt, /ONE subagent per issue\/PR/);
+	assert.match(prompt, /capped at a maximum of 7 concurrent subagents/);
+	assert.match(prompt, /k3-final-review/);
+	assert.match(prompt, /Execute the full fix-and-merge landing pass/);
+});
+
 // The timeout is the assertion: a handler that waits on its own work never
 // returns here, and node:test turns that into a failure instead of a hung suite.
 test("session_start returns without waiting for the queue or the intro", { timeout: 5000 }, async () => {

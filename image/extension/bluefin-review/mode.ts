@@ -327,6 +327,27 @@ export class ReviewMode {
 	}
 
 	/**
+	 * Items available for slay execution: visible items first, falling back to
+	 * unranked items in local priority order when no Hive-ranked items exist.
+	 */
+	slayableItems(): QueueItem[] {
+		const chosen = this.chosenItems();
+		if (chosen.length > 0) return chosen;
+		const visible = this.visibleItems();
+		if (visible.length > 0) return visible;
+		// Fallback: when Hive-only filter leaves 0 items, fall back to unranked items
+		let base = this.ranked.items.length === this.items.length ? this.ranked.items : this.items;
+		if (this.skipRepos.size > 0) {
+			base = base.filter((item) => {
+				const repoLower = item.repo.toLowerCase();
+				const shortName = repoLower.includes("/") ? repoLower.split("/")[1]! : repoLower;
+				return !this.skipRepos.has(repoLower) && !this.skipRepos.has(shortName);
+			});
+		}
+		return base;
+	}
+
+	/**
 	 * Re-read durable appliance state.
 	 *
 	 * Returns whether anything actually changed, so a poll that finds the same

@@ -517,7 +517,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const ctxToUse = (eventCtx as CtxLike | undefined) ?? activeCtx;
 		if (autoslayActive && ctxToUse) {
 			await refreshQueue(ctxToUse);
-			const nextBatch = mode.visibleItems();
+			const nextBatch = mode.slayableItems();
 			if (nextBatch.length > 0) {
 				const items = nextBatch.slice(0, BATCH_LIMIT);
 				const action: DashboardAction = { kind: "slay", item: items[0]!, items: items.length > 1 ? items : undefined };
@@ -621,12 +621,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			// Autoslay runs directly in strict Hive priority order across the queue,
 			// cycling continuously through assignments without requiring manual intervention.
 			autoslayActive = true;
-			const visible = mode.visibleItems();
-			const chosen = mode.chosenItems();
-			const items = (chosen.length > 0 ? chosen : (visible.length > 0 ? visible.slice(0, BATCH_LIMIT) : [mode.selected()].filter(Boolean))) as QueueItem[];
+			const slayable = mode.slayableItems();
+			const items = (slayable.length > 0 ? slayable.slice(0, BATCH_LIMIT) : [mode.selected()].filter(Boolean)) as QueueItem[];
 			if (items.length === 0) {
 				autoslayActive = false;
-				if (ctx.hasUI) ctx.ui.notify("No queue items available to slay in Hive priority order", "warning");
+				if (ctx.hasUI) ctx.ui.notify("No queue items available to slay", "warning");
 				return;
 			}
 			const action: DashboardAction = { kind: "slay", item: items[0]!, items: items.length > 1 ? items : undefined };
