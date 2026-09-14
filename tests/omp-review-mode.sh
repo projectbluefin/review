@@ -30,3 +30,8 @@ fi
 
 node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/omp-review-mode.test.ts tests/blueberry_mode.test.ts tests/pr_reader.test.ts tests/ci_mode.test.ts tests/reviewer_requests.test.ts
 bash tests/launcher-contract.sh
+
+# A green `node --test` run above proves each module compiles and behaves; it
+# does not prove the extension ever reaches it. That is the other half of the
+# same contract, so it runs from the same gate.
+bash tests/module-registry.sh
