@@ -123,6 +123,16 @@ version="$(bash scripts/review-appliance-version.sh)"
 [[ "$version" =~ ^[0-9]{2}\.[0-9]{2}\.[0-9]{2}$ ]] ||
   fail "version must be <fsdk-series>.<MM>, got '${version}'"
 
+# The version machinery itself, not just today's output. This runs here rather
+# than as a separate validate.yml step for the same reason the SBOM generator's
+# contract does below: the tag these scripts derive is part of this image's
+# contract, and running it from the appliance's own static half keeps it on the
+# every-commit path without needing a container engine.
+version_contract_output="$(bash tests/version-derivation.sh 2>&1)" || {
+  printf '%s\n' "$version_contract_output" >&2
+  fail "tests/version-derivation.sh failed"
+}
+
 # The FSDK series is read from the pinned base, never written down twice.
 base_series="$(sed -nE 's/^ARG FSDK_BASE_IMAGE=.*base:([0-9]{2}\.[0-9]{2}).*/\1/p' "$containerfile")"
 [[ "$version" == "${base_series}."* ]] ||
