@@ -1,7 +1,7 @@
 # Bluefin Contribute: an isolated interactive Hive + OMP worker.
 ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08@sha256:f4c4557fa9841639dfc0274d2ff014ac86e183a150a46d6e356b7731d57cc932
 ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:5217c4e4ed0d89a801e1e64d45c1191a8525ccae8aed6e234cd44382e9b3a143
-ARG HIVE_COMMIT=feaac6859a46d22c143420102cc3ab4e8687cd65
+ARG HIVE_COMMIT=bc929a202199fbed5ae43dbe50e58a98930f3bc1
 # renovate: datasource=github-releases depName=can1357/oh-my-pi
 ARG OMP_VERSION=18.1.22
 ARG OMP_X86_64_SHA256=9ccddf1091e01e08fea1f8e1208f8901cc90d5d098b16581672eeab03f118b81
