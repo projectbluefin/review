@@ -364,4 +364,127 @@ grep -q 'Replace it to update' <<<"$help_output" ||
 grep -q 'BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1' <<<"$help_output" ||
   fail "appliance help does not expose the explicit host-config opt-in"
 
+# An actual packaged autoslay launch with only modelRoles.default persisted
+# must start an advisor resolved through the role alias to that default model.
+# The advisor must be observable in its normal transcript without reporting inactive.
+# shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
+run '
+  set -eu
+  python3 - <<"PY"
+import http.server
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("content-length", 0))
+        body = self.rfile.read(length)
+        data = json.loads(body.decode("utf-8"))
+        resp = {
+            "id": "chatcmpl-contract",
+            "object": "chat.completion",
+            "created": 1677652288,
+            "model": data.get("model", "mock-model"),
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 8, "completion_tokens": 5, "total_tokens": 13}
+        }
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(resp).encode("utf-8"))
+
+    def log_message(self, format, *args):
+        pass
+
+server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+port = server.server_address[1]
+t = threading.Thread(target=server.serve_forever, daemon=True)
+t.start()
+
+try:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        agent_dir = os.path.join(tmpdir, ".omp/profiles/bluefin-review-appliance/agent")
+        os.makedirs(agent_dir, exist_ok=True)
+
+        with open(os.path.join(agent_dir, "models.yml"), "w", encoding="utf-8") as f:
+            f.write(f"""providers:
+  contract-mock:
+    baseUrl: http://127.0.0.1:{port}/v1
+    api: openai-completions
+    apiKey: dummy
+    models:
+      - id: mock-model
+        name: Mock Model
+        contextWindow: 100000
+        maxTokens: 32000
+""")
+
+        with open(os.path.join(agent_dir, "config.yml"), "w", encoding="utf-8") as f:
+            f.write("""modelRoles:
+  default: contract-mock/mock-model
+""")
+
+        cmd = [
+            "/usr/bin/bluefin-review-appliance",
+            "--autoslay",
+            "-p",
+            "--max-time", "15s",
+            "Reply exactly: ok"
+        ]
+        env = os.environ.copy()
+        env["HOME"] = tmpdir
+        env["GH_TOKEN"] = "dummy"
+
+        res = subprocess.run(cmd, env=env, capture_output=True, text=True)
+        if res.returncode != 0:
+            print("Appliance autoslay run failed:", res.returncode, file=sys.stderr)
+            print("STDOUT:", res.stdout, file=sys.stderr)
+            print("STDERR:", res.stderr, file=sys.stderr)
+            sys.exit(1)
+
+        advisor_transcripts = []
+        for root, dirs, files in os.walk(tmpdir):
+            for file in files:
+                path = os.path.join(root, file)
+                if file == "__advisor.jsonl":
+                    advisor_transcripts.append(path)
+                elif file.endswith(".log") and file.startswith("omp."):
+                    with open(path, encoding="utf-8") as fp:
+                        for line in fp:
+                            lower = line.lower()
+                            if "advisor inactive" in lower or "no model assigned" in lower:
+                                print(f"Log reported inactive advisor: {line}", file=sys.stderr)
+                                sys.exit(1)
+
+        if not advisor_transcripts:
+            print("No __advisor.jsonl found in session", file=sys.stderr)
+            sys.exit(1)
+
+        found_resolved_model = False
+        for transcript in advisor_transcripts:
+            with open(transcript, encoding="utf-8") as fp:
+                for line in fp:
+                    entry = json.loads(line)
+                    msg = entry.get("message", {})
+                    if msg.get("role") == "assistant":
+                        if msg.get("provider") == "contract-mock" and msg.get("model") == "mock-model":
+                            found_resolved_model = True
+                            break
+
+        if not found_resolved_model:
+            print("Advisor did not record assistant message with resolved default model", file=sys.stderr)
+            sys.exit(1)
+finally:
+    server.shutdown()
+PY
+' >/dev/null || fail "autoslay advisor failed to resolve role alias to user default model"
+
 echo "appliance-contract: runtime contract holds ($((size / 1024 / 1024)) MiB, omp ${omp_version})"

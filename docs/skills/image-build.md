@@ -1,6 +1,6 @@
 ---
 name: image-build
-version: "3.5"
+version: "3.6"
 last_updated: 2026-09-16
 id: image-build
 one_line_purpose: Build and pin the OMP review and contributor images.
@@ -66,6 +66,11 @@ model-specific runtime. Both OCI images leave model and effort selection to OMP.
     The scheduled Renovate workflow refreshes the GitHub release asset digests,
     merges the validated OMP update, and lets the resulting `main` push publish
     both images.
+16. Runtime contract tests for packaged appliances exercise configuration
+    resolution in addition to static YAML and CLI flags: an autoslay launch with
+    only `modelRoles.default` persisted must start an advisor that resolves
+    through the `@default` role alias to that user model without reporting
+    inactive.
 
 ## Pin maintenance
 
