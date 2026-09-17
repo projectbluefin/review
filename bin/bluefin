@@ -33,7 +33,7 @@ HIVE_COMMIT_DEFAULT="$(
   elif [[ -f "${root}/image/contribute/Containerfile" ]]; then
     sed -n 's/^ARG HIVE_COMMIT=\([0-9a-f]\{40\}\)$/\1/p' "${root}/image/contribute/Containerfile"
   else
-    printf '67530919a135cbc466d1e0961770028842c80876\n'
+    printf 'a9f5ed287438df93194d80d0330866fd210ef50b\n'
   fi
 )"
 
