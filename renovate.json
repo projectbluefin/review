@@ -23,12 +23,14 @@
       "managerFilePatterns": [
         "/(^|/)justfile$/",
         "/(^|/)image/contribute/Containerfile$/",
-        "/(^|/)README\\.md$/"
+        "/(^|/)README\\.md$/",
+        "/(^|/)bin/bluefin$/"
       ],
       "matchStrings": [
         "hive_commit := \"(?<currentDigest>[0-9a-f]{40})\"",
         "ARG HIVE_COMMIT=(?<currentDigest>[0-9a-f]{40})",
-        "layers the pinned Hive runtime at `(?<currentDigest>[0-9a-f]{40})`"
+        "layers the pinned Hive runtime at `(?<currentDigest>[0-9a-f]{40})`",
+        "printf '(?<currentDigest>[0-9a-f]{40})\\\\n'"
       ],
       "currentValueTemplate": "v4",
       "depNameTemplate": "hivecommons/hive",
