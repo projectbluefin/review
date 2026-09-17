@@ -143,6 +143,16 @@ forbid "$containerfile" 'PI_VERSION' 'NODE_VERSION' 'pi-coding-agent' '/usr/bin/
 # for `set -e` is a RUN whose failures are invisible.
 grep -qE '^SHELL ' "$containerfile" && fail "SHELL is ignored under --format oci; set options inside each RUN"
 
+# Issue #609: the appliance is a queue, not a checkout of the selected repo.
+# Its worker clones the target once into a unique $HOME/worktrees path and never
+# runs from a parent Git checkout, so OMP must not derive filesystem isolation
+# from the empty container /workspace. The config disables parent-checkout
+# isolation and keeps apply off so no workspace is written back to /workspace.
+grep -qF 'task:' .omp/config.yml || fail ".omp/config.yml must define a task: block"
+grep -qF 'isolation:' .omp/config.yml || fail ".omp/config.yml must disable OMP task isolation"
+grep -qF 'enabled: false' .omp/config.yml || fail ".omp/config.yml must set task.isolation.enabled: false"
+grep -qF 'apply: false' .omp/config.yml || fail ".omp/config.yml must retain task.isolation.apply: false"
+
 version="$(bash scripts/review-appliance-version.sh)"
 [[ "$version" =~ ^[0-9]{2}\.[0-9]{2}\.[0-9]{2}$ ]] ||
   fail "version must be <fsdk-series>.<MM>, got '${version}'"

@@ -7,6 +7,16 @@
 # Deliberately absent: modelRoles.default. The model *you* drive is yours to
 # choose; these settings apply only to agents spawned while working in this repo.
 task:
+  # The Review appliance is a queue and orchestration environment, not a
+  # checkout of the selected repository (AGENTS.md; issue #609). Each worker
+  # clones its target once into a unique $HOME/worktrees path and never runs
+  # from a parent Git checkout, so deriving OMP filesystem isolation from the
+  # empty container /workspace rejects every task before it starts. Disable
+  # parent-checkout isolation; keep apply off so no workspace is ever written
+  # back to /workspace.
+  isolation:
+    enabled: false
+    apply: false
   agentModelOverrides:
     scout: github-copilot/gemini-3.8-flash
     sonic: github-copilot/gemini-3.8-flash

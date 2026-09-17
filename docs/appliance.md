@@ -59,6 +59,24 @@ distroless runtime closure. Reviewers use the bundled static validators and
 live hosted-check evidence, and report any local verification gap instead of
 installing packages into the appliance.
 
+### The workspace is not a checkout
+
+The appliance is a queue and orchestration environment, not a checkout of the
+selected repository. Its container sets `WORKDIR /workspace` and mounts a fresh,
+empty, repository-scoped workspace; that emptiness is deliberate. Each worker
+clones its target exactly once into a unique `$HOME/worktrees/<owner>-<repo>`
+path under the home volume and works there. A review-ready pull request is the
+issue worker's terminal deliverable; worker changes are never written back to
+`/workspace`.
+
+Because of this, `task.isolation.enabled` is `false` in `.omp/config.yml` (issue
+#609). OMP derives filesystem isolation from a parent Git checkout in the cwd;
+with an empty `/workspace` that rejects every task before it starts, and a
+manual clone merely fails later on the deterministic isolation-directory
+cleanup. `task.isolation.apply` stays `false` so no workspace is ever written
+back to `/workspace`. PR review workers stay read-only; PR repair workers follow
+the same unique-clone model.
+
 ## Versioning
 
 FSDK's scheme with one component added: `<fsdk-series>.<tool-revision>`.
