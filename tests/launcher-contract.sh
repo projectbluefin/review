@@ -157,7 +157,12 @@ touch "$kvm"
 chmod 0666 "$kvm"
 cat >"$scratch/bin/podman" <<EOF
 #!/usr/bin/env bash
-[[ "\${1:-}" == info ]] && exit 0
+[[ "\${1:-}" == info ]] && {
+  if [[ "\$*" == *OCIRuntimes* ]]; then
+    printf '%s\n' "\${FAKE_KRUN_PATH:-$scratch/bin/krun}"
+  fi
+  exit 0
+}
 if [[ "\${1:-} \${2:-} \${3:-}" == "system connection list" ]]; then
   [[ "\${FAKE_REMOTE_DEFAULT:-}" != 1 ]] || printf 'remote\tssh://engine.example.test/run/podman.sock\ttrue\n'
   exit 0
@@ -426,6 +431,30 @@ assert_bluefin_review "--issues projectbluefin/review" "--issues --repo projectb
 assert_bluefin_review "projectbluefin/review#463 --issues" "--repo projectbluefin/review --pr 463 --issues"
 assert_bluefin_review "projectbluefin/review autoslay" "--repo projectbluefin/review --autoslay --advisor"
 
+# --- 2b. krun registered through crun-krun (issue #610) ----------------------
+# A Podman runtime-registration name need not match a PATH executable: the host
+# registers 'krun' -> '/usr/bin/crun-krun'. With no PATH 'krun' the launcher
+# must still select Podman by resolving the configured runtime from 'podman
+# info', and must not fall back to Apptainer. The real configured runtime
+# (crun-krun) is exercised, not a stubbed 'command -v krun'.
+crun_krun="$scratch/bin/crun-krun"
+cat >"$crun_krun" <<'EOF'
+#!/usr/bin/env bash
+# Stand-in for the crun binary Podman registers as the 'krun' runtime.
+exit 0
+EOF
+chmod +x "$crun_krun"
+# No 'krun' on PATH: only the crun-krun registration exists.
+mv "$scratch/bin/krun" "$scratch/krun"
+: >"$mock_podman_log"
+FAKE_KRUN_PATH="$crun_krun" "${repo_root}/bin/bluefin" review projectbluefin/review >/dev/null 2>&1
+crun_call="$(grep '^run ' "$mock_podman_log" | head -1)"
+[[ -n "$crun_call" ]] || fail "crun-krun registration did not select Podman"
+[[ "$crun_call" == *"run --runtime=krun --rm --interactive --tty"* ]] ||
+  fail "crun-krun launch did not use the krun runtime: $crun_call"
+[[ "$crun_call" == *":/home/bluefin:rw"* ]] || fail "crun-krun launch did not use target-specific state: $crun_call"
+mv "$scratch/krun" "$scratch/bin/krun"
+
 # --- 3. Hermetic test of bin/omp-review (Source launcher) ----------------------
 
 mock_omp_log="$scratch/omp.log"
@@ -645,11 +674,14 @@ conn.close()
 
 mock_cred_bin="$scratch/cred-bin"
 mkdir -p "$mock_cred_bin"
-cat >"$mock_cred_bin/podman" <<'EOF'
+cat >"$mock_cred_bin/podman" <<EOF
 #!/usr/bin/env bash
-case "${1:-} ${2:-}" in
-  "info "|"pull "*|"image exists") exit 0 ;;
-  "run "*) echo "$GH_TOKEN $COPILOT_INTEGRATION_ID"; exit 0 ;;
+case "\${1:-} \${2:-}" in
+  "info "*)
+    [[ "\$*" == *OCIRuntimes* ]] && printf '%s\n' "$mock_cred_bin/krun"
+    exit 0 ;;
+  "pull "*|"image exists") exit 0 ;;
+  "run "*) echo "\$GH_TOKEN \$COPILOT_INTEGRATION_ID"; exit 0 ;;
 esac
 exit 0
 EOF

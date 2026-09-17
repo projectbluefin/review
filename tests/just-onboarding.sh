@@ -51,7 +51,15 @@ EOF
 cat >"$fake_bin/podman" <<'EOF'
 #!/usr/bin/env bash
 set -eu
-[[ "${1:-}" == info ]] && { [[ "${FAKE_PODMAN_INFO_FAIL:-0}" != 1 ]]; exit; }
+[[ "${1:-}" == info ]] && {
+  [[ "${FAKE_PODMAN_INFO_FAIL:-0}" != 1 ]] || exit 1
+  # Report the runtime Podman registers as 'krun' (issue #610). Resolving it
+  # via PATH lets a test point the registration at crun-krun with no PATH 'krun'.
+  [[ "$*" == *OCIRuntimes* ]] && {
+    if [[ "${REVIEW_FAKE_KRUN_RUNTIME:-krun}" == crun-krun ]]; then command -v crun-krun; else command -v krun; fi
+  }
+  exit 0
+}
 printf '%s\n' "$*" >>"${PODMAN_LOG:?}"
 if [[ "${1:-}" == run && -n "${EXPECT_EXTENSION:-}" ]]; then
   previous=""
@@ -130,6 +138,10 @@ cat >"$fake_bin/krun" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
+cat >"$fake_bin/crun-krun" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
 cat >"$fake_bin/squashfuse_ll" <<'EOF'
 #!/usr/bin/env bash
 exit 0
@@ -200,6 +212,15 @@ contains '=== Review image ===' "$output"
 contains 'ghcr.io/projectbluefin/review:stable is resolvable' "$output"
 contains '=== Contributor image ===' "$output"
 contains 'ghcr.io/projectbluefin/contribute:stable is resolvable' "$output"
+
+scenario="krun registered through crun-krun selects Podman"
+mv "$fake_bin/krun" "$scratch/krun"
+export REVIEW_FAKE_KRUN_RUNTIME=crun-krun
+run_just review-queue owner/repo
+[[ "$status" -eq 17 ]] || fail "crun-krun registration did not select Podman (status $status): $output"
+log_contains 'run --runtime=krun --rm --interactive --tty --name bluefin-review-' "$podman_log"
+unset REVIEW_FAKE_KRUN_RUNTIME
+mv "$scratch/krun" "$fake_bin/krun"
 
 scenario="doctor diagnoses missing squashfuse"
 mv "$fake_bin/squashfuse_ll" "$scratch/squashfuse_ll"

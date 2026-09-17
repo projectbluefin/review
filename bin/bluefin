@@ -14,6 +14,15 @@ fail() {
   exit 1
 }
 
+kvm_runtime_path() {
+  # The 'krun' OCI runtime name Podman launches need not match an executable
+  # on PATH: a host can register 'krun' -> '/usr/bin/crun-krun' (crun-krun), so
+  # 'command -v krun' alone misses a working libkrun microVM. Podman is the
+  # authoritative source for what '--runtime=krun' runs, so resolve the
+  # configured path from 'podman info' and validate it exists.
+  podman info --format '{{.Host.OCIRuntimes.krun.path}}' 2>/dev/null
+}
+
 kvm_runtime_ready() {
   local device="${REVIEW_TEST_KVM_DEVICE:-/dev/kvm}"
   if ! command -v "$engine" >/dev/null 2>&1; then KVM_FAILURE="Podman is unavailable"; return 1; fi
@@ -40,7 +49,10 @@ kvm_runtime_ready() {
     KVM_FAILURE="remote Podman engines are unsupported by the packaged launcher"
     return 1
   fi
-  if ! command -v krun >/dev/null 2>&1; then KVM_FAILURE="the krun OCI runtime is unavailable"; return 1; fi
+  local runtime_path=""
+  runtime_path="$(kvm_runtime_path)"
+  [[ -n "$runtime_path" ]] || { KVM_FAILURE="the krun OCI runtime is not registered with Podman"; return 1; }
+  if [[ ! -x "$runtime_path" ]]; then KVM_FAILURE="the krun OCI runtime '${runtime_path}' is not executable"; return 1; fi
   if [[ ! -r "$device" || ! -w "$device" ]]; then KVM_FAILURE="${device} is not readable and writable"; return 1; fi
   return 0
 }
