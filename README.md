@@ -261,7 +261,7 @@ is tracked in [#135](https://github.com/projectbluefin/review/issues/135).
 <details>
 <summary>Image provenance</summary>
 
-The contributor image layers the pinned Hive runtime at `67530919a135cbc466d1e0961770028842c80876`; it contains no maintainer UI. `ghcr.io/projectbluefin/contribute` is the separate distroless Hive + OMP worker, and `ghcr.io/projectbluefin/review` is the maintainer-facing OMP appliance.
+The contributor image layers the pinned Hive runtime at `a9f5ed287438df93194d80d0330866fd210ef50b`; it contains no maintainer UI. `ghcr.io/projectbluefin/contribute` is the separate distroless Hive + OMP worker, and `ghcr.io/projectbluefin/review` is the maintainer-facing OMP appliance.
 See [image architecture and validation](docs/image-and-development.md).
 
 </details>
