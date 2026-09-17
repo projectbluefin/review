@@ -51,8 +51,9 @@ export const DASHBOARD_KEYS: readonly RailKey[] = [
 	{ chord: "H", label: "hive" },
 	{ chord: "L", label: "stage" },
 	{ chord: "d", label: "diff" },
-	{ chord: "v", label: "read" },
-	{ chord: "enter", label: "cite" },
+	{ chord: "enter", label: "read" },
+	{ chord: "v", label: "browser" },
+	{ chord: "i", label: "cite" },
 	{ chord: "o", label: "repo" },
 	{ chord: "/", label: "filter" },
 	{ chord: "q", label: "close" },
@@ -67,7 +68,9 @@ const HELP: readonly string[] = [
 	"  tab              toggle pull requests and issues",
 	"  t                switch between queue and trace panes",
 	"  p                pause or resume future repository waves",
-	"  v                read the highlighted pull request",
+	"  enter            read the highlighted pull request",
+	"  v                open the highlighted item in a browser",
+	"  i                cite the selection in the prompt",
 	"  h / l, ← / →     collapse or expand a trace span",
 	"  g / G            jump to first or last row",
 	"  H / L            toggle Hive-only / step Hive stages",
@@ -78,7 +81,6 @@ const HELP: readonly string[] = [
 	"  c                comment on selected item(s)",
 	"  f                fix selected item(s) in isolated workspaces",
 	"  d                inspect evidence (PR diff, issue discussion)",
-	"  enter            cite the selection in the prompt",
 	"  ?                close this help",
 	"  q, esc           close the workbench",
 	"",
@@ -624,11 +626,14 @@ export class ReviewDashboard {
 			case "d":
 				this.executeKey("d");
 				break;
+			case "enter":
+				this.executeKey("enter");
+				break;
 			case "v":
 				this.executeKey("v");
 				break;
-			case "enter":
-				this.executeKey("enter");
+			case "i":
+				this.executeKey("i");
 				break;
 			case "o":
 				this.executeKey("o");
@@ -834,13 +839,16 @@ export class ReviewDashboard {
 				return;
 			case "return":
 			case "enter":
-				this.emitAction({ kind: "reference", item, items });
-				return;
-			case "v":
 				if (item.type !== "pr") return;
 				this.showReader = true;
 				this.readerScroll = 0;
 				this.loadSelectedReaderDetail();
+				return;
+			case "v":
+				this.emitAction({ kind: "open_browser", item });
+				return;
+			case "i":
+				this.emitAction({ kind: "reference", item, items });
 				return;
 			case "C":
 				this.mode.toggleViewMode();
@@ -1319,6 +1327,10 @@ export class ReviewDashboard {
 		this.disableMouse();
 		this.stopTick?.();
 		this.stopTick = undefined;
+	}
+
+	get isReaderActive(): boolean {
+		return this.showReader;
 	}
 }
 

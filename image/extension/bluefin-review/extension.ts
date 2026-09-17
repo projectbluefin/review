@@ -742,6 +742,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (action.kind === "reference") {
 			const items = action.items && action.items.length > 0 ? action.items : [action.item];
 			ctx.ui.pasteToEditor(items.map((item) => `${item.repo}#${item.id} — ${item.title}\n${item.url}\n`).join("\n"));
+			const count = items.length;
+			ctx.ui.notify(`Cited ${count} queue ${count === 1 ? "item" : "items"} in prompt`, "info");
 			return;
 		}
 

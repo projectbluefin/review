@@ -1281,9 +1281,20 @@ test("dashboard navigates, folds, filters, and returns actions", (t) => {
 	assert.equal(action.kind, "slay");
 	assert.equal(action.item.id, 7);
 
-	dashboard.handleInput("\r");
+	dashboard.handleInput("i");
 	assert.equal(action.kind, "reference");
 	assert.equal(action.item.id, 7);
+
+	dashboard.handleInput("v");
+	assert.equal(action.kind, "open_browser");
+	assert.equal(action.item.id, 7);
+
+	dashboard.handleInput("\r");
+	assert.equal(dashboard.isReaderActive, true, "Enter opens reader for PR items");
+	dashboard.handleInput("q");
+	assert.equal(dashboard.isReaderActive, false, "q exits reader back to queue");
+	assert.equal(mode.selected().id, 7, "queue cursor preserved after exiting reader");
+
 	dashboard.handleInput("c");
 	assert.equal(action.kind, "comment");
 
@@ -3431,9 +3442,10 @@ test("issue admission gate handles positive admission, negative cases, and invar
 	}
 	{
 		const { dashboard, ctx, turn } = await setup({ number: 485, labels: [] });
-		dashboard.handleInput("\r");
+		dashboard.handleInput("i");
 		await turn();
 		assert.ok(ctx.pasted.length > 0, "cite/reference is read-only");
+		assert.ok(ctx.notifications.some((n) => n.level === "info" && n.message.includes("Cited 1 queue item")));
 	}
 	// fix on an unadmitted Review issue dispatches zero messages and notifies
 	{
@@ -3830,9 +3842,20 @@ test("OMP workbench mouse and click operability matches keyboard actions (#462)"
 	dashboard.handleClick(fPos + 1, keymapLineIdx);
 	assert.equal(lastAction?.kind, "fix", "clicking fix emits a non-landing work action");
 
-	const enterPos = keymapText.indexOf("enter cite");
+	const enterPos = keymapText.indexOf("enter read");
 	assert.ok(enterPos > 0);
 	dashboard.handleClick(enterPos + 1, keymapLineIdx);
+	assert.equal(dashboard.isReaderActive, true, "clicking read opens the reader");
+	dashboard.handleInput("q");
+
+	const vPos = keymapText.indexOf("v browser");
+	assert.ok(vPos > 0);
+	dashboard.handleClick(vPos + 1, keymapLineIdx);
+	assert.equal(lastAction?.kind, "open_browser", "clicking browser emits an open_browser action");
+
+	const iPos = keymapText.indexOf("i cite");
+	assert.ok(iPos > 0);
+	dashboard.handleClick(iPos + 1, keymapLineIdx);
 	assert.equal(lastAction?.kind, "reference", "clicking cite emits a reference action");
 
 	const APos = keymapText.indexOf("A all");
