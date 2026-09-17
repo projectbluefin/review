@@ -11,12 +11,14 @@ import test from "node:test";
 import {
 	PrDetailCache,
 	getNextPrKey,
+	issueDetailToLines,
 	prDetailToLines,
 	sanitizeMarkdown,
+	type IssueDetail,
 	type PrDetail,
 	type ReaderState,
 } from "../image/extension/bluefin-review/reader.ts";
-import { fetchPrDetail, parsePrDetail } from "../image/extension/bluefin-review/github.ts";
+import { fetchIssueDetail, fetchPrDetail, parseIssueDetail, parsePrDetail } from "../image/extension/bluefin-review/github.ts";
 
 test("sanitizeMarkdown strips ANSI escape codes", () => {
 	const rawWithAnsi = "\u001B[31mRed Alert\u001B[0m and \u001B[1;32mBold Green\u001B[0m text";
@@ -278,4 +280,107 @@ test("fetchPrDetail needs a credential", async () => {
 	const result = await fetchPrDetail("projectbluefin/review", 547, { fetchImpl: async () => ({ ok: false, status: 401, statusText: "x", json: async () => ({}) }) });
 	assert.equal(result.detail, undefined);
 	assert.match(String(result.error), /no GitHub credential/);
+});
+
+test("parseIssueDetail maps REST issue, comment, and timeline payloads", () => {
+	const detail = parseIssueDetail(
+		"projectbluefin/review",
+		611,
+		{
+			title: "issue rows advertise a reader",
+			body: "The reader is PR-only.",
+			user: { login: "joshyorko" },
+			state: "open",
+			labels: [{ name: "bug" }, { name: "workbench" }],
+			url: "https://github.com/projectbluefin/review/issues/611",
+		},
+		[
+			{ user: { login: "ada" }, created_at: "2026-01-01", body: "agreed" },
+		],
+		[
+			{ event: "cross_referenced", source: { issue: { number: 12, title: "boot KDE", state: "open", url: "https://github.com/projectbluefin/review/pull/12", pull_request: {} } } },
+			{ event: "closed", source: { issue: { number: 99 } } },
+			{ event: "cross_referenced", source: { issue: { number: 12, title: "boot KDE", state: "open", url: "https://github.com/projectbluefin/review/pull/12", pull_request: {} } } },
+		],
+	);
+	assert.equal(detail.repo, "projectbluefin/review");
+	assert.equal(detail.number, 611);
+	assert.equal(detail.title, "issue rows advertise a reader");
+	assert.equal(detail.state, "open");
+	assert.deepEqual(detail.labels, ["bug", "workbench"]);
+	assert.equal(detail.author, "joshyorko");
+	assert.equal(detail.comments[0].author, "ada");
+	// Only the cross-referenced PR is linked, de-duplicated, and the non-PR
+	// closed event is ignored.
+	assert.deepEqual(detail.linkedPullRequests, [{ number: 12, title: "boot KDE", state: "open", url: "https://github.com/projectbluefin/review/pull/12" }]);
+});
+
+test("issueDetailToLines renders body, comments, labels-free metadata, and linked PRs", () => {
+	const detail: IssueDetail = {
+		repo: "projectbluefin/review",
+		number: 611,
+		title: "issue reader",
+		body: "# Fix\n\nAdds an issue reader.\u001B[31m(bold)\u001B[0m",
+		author: "joshyorko",
+		state: "open",
+		labels: ["bug"],
+		comments: [
+			{ author: "ada\u001B[31m", createdAt: "2026-01-01\nforged", body: "Nice.\n\n<script>alert(1)</script>" },
+		],
+		linkedPullRequests: [{ number: 12, title: "boot KDE", state: "open", url: "https://github.com/projectbluefin/review/pull/12" }],
+	};
+
+	const lines = issueDetailToLines(detail);
+	const joined = lines.join("\n");
+	assert.ok(joined.includes("Adds an issue reader."), "body is rendered");
+	assert.ok(!joined.includes("\u001B["), "ANSI escapes are stripped from remote fields");
+	assert.ok(!joined.includes("<script>"), "script injection is stripped from comments");
+	assert.ok(joined.includes("@ada · 2026-01-01 forged"), "comment metadata stays on one sanitized line");
+	assert.ok(joined.includes("Linked pull requests"), "linked PRs are surfaced");
+	assert.ok(joined.includes("#12 [open] boot KDE"), "linked PR renders as number, state, title");
+});
+
+test("fetchIssueDetail fans out issue, comments, and timeline and never hits the PR diff endpoint", async () => {
+	const calls: string[] = [];
+	const fake = async (url: string) => {
+		calls.push(String(url));
+		const s = String(url);
+		if (s.includes("/issues/611/comments")) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => [{ user: { login: "ada" }, created_at: "2026-01-01", body: "agreed" }] };
+		}
+		if (s.includes("/issues/611/timeline")) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => [{ event: "cross_referenced", source: { issue: { number: 12, title: "boot KDE", state: "open", url: "https://github.com/projectbluefin/review/pull/12", pull_request: {} } } }] };
+		}
+		return { ok: true, status: 200, statusText: "OK", json: async () => ({ title: "issue reader", body: "body", user: { login: "joshyorko" }, state: "open", labels: [{ name: "bug" }], url: "https://github.com/projectbluefin/review/issues/611" }) };
+	};
+
+	const result = await fetchIssueDetail("projectbluefin/review", 611, { token: "t", fetchImpl: fake });
+	assert.equal(result.error, undefined);
+	assert.equal(result.detail?.title, "issue reader");
+	assert.equal(result.detail?.state, "open");
+	assert.equal(result.detail?.comments.length, 1);
+	assert.equal(result.detail?.linkedPullRequests.length, 1);
+	assert.ok(!calls.some((u) => u.includes("/pulls/611/files")), "the issue reader never calls the PR diff/files endpoint");
+	assert.ok(!calls.some((u) => u.includes("/pulls/611")), "the issue reader never calls the PR endpoint at all");
+});
+
+test("fetchIssueDetail fails closed on the issue read but tolerates a missing timeline", async () => {
+	// A failing issue read fails the whole detail.
+	const failing = async () => ({ ok: false, status: 401, statusText: "Unauthorized", json: async () => ({}) });
+	const failed = await fetchIssueDetail("projectbluefin/review", 611, { token: "t", fetchImpl: failing });
+	assert.equal(failed.detail, undefined);
+	assert.ok(failed.error, "a failing issue read is reported");
+
+	// A failing timeline yields no linked PRs rather than failing the read.
+	const timelineFails = async (url: string) => {
+		const s = String(url);
+		if (s.includes("/timeline")) return { ok: false, status: 403, statusText: "Forbidden", json: async () => ({}) };
+		if (s.includes("/comments")) return { ok: true, status: 200, statusText: "OK", json: async () => [{ user: { login: "ada" }, created_at: "2026-01-01", body: "agreed" }] };
+		return { ok: true, status: 200, statusText: "OK", json: async () => ({ title: "issue reader", body: "body", user: { login: "joshyorko" }, state: "open", labels: [], url: "https://github.com/projectbluefin/review/issues/611" }) };
+	};
+
+	const tolerated = await fetchIssueDetail("projectbluefin/review", 611, { token: "t", fetchImpl: timelineFails });
+	assert.equal(tolerated.error, undefined, "a missing timeline does not fail the read");
+	assert.equal(tolerated.detail?.title, "issue reader");
+	assert.equal(tolerated.detail?.linkedPullRequests.length, 0, "no linked PRs when the timeline is unavailable");
 });

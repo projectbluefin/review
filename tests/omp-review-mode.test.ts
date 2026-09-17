@@ -4154,3 +4154,74 @@ test("fix button dispatches workflowz wave for selected issues without requiring
 		"must not block with 'Hive is unavailable'",
 	);
 });
+
+const flush = () => new Promise((r) => setTimeout(r, 0));
+
+test("v opens a mode-aware reader for both issue and PR rows", (t) => {
+	const mode = new ReviewMode({ org: "projectbluefin" });
+	mode.items = [
+		queueItem({ id: 611, type: "issue", title: "issue rows advertise a reader", url: "https://github.com/projectbluefin/review/issues/611" }),
+		queueItem({ id: 42, type: "pr", title: "fix(launcher): resolve HIVE_HUB before mutating", url: "https://github.com/projectbluefin/review/pull/42" }),
+	];
+	let action;
+	const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, (result) => { action = result; }, () => {}, 160);
+	t.after(() => dashboard.dispose());
+	const frame = () => dashboard.render(160);
+
+	// An issue row opens the ISSUE READER, distinct from the PR reader.
+	mode.selectById("projectbluefin/review", 611);
+	dashboard.handleInput("v");
+	const issueFrame = frame();
+	assert.ok(issueFrame.some((r) => r.includes("ISSUE READER: projectbluefin/review#611 — issue rows advertise a reader")), "issue row opens the issue reader");
+	assert.ok(issueFrame.some((r) => r.includes("loading description, conversation, and linked pull requests")), "issue reader loads its own fields");
+	assert.ok(!issueFrame.some((r) => r.includes("PR READER")), "the issue reader is not the PR reader");
+	assert.equal(action, undefined, "opening the reader starts no agent turn or mutation");
+
+	// A PR row opens the PR READER.
+	mode.selectById("projectbluefin/review", 42);
+	dashboard.handleInput("v");
+	const prFrame = frame();
+	assert.ok(prFrame.some((r) => r.includes("PR READER: projectbluefin/review#42 — fix(launcher): resolve HIVE_HUB before mutating")), "PR row opens the PR reader");
+	assert.ok(prFrame.some((r) => r.includes("loading description and conversation")), "PR reader loads its own fields");
+	assert.equal(action, undefined, "opening the reader starts no agent turn or mutation");
+});
+
+test("the issue reader renders a populated issue without touching the PR diff", async (t) => {
+	const mode = new ReviewMode({ org: "projectbluefin" });
+	mode.items = [
+		queueItem({ id: 611, type: "issue", title: "issue reader", url: "https://github.com/projectbluefin/review/issues/611" }),
+	];
+	mode.token = "test-token";
+	const calls: string[] = [];
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async (url: string) => {
+		calls.push(String(url));
+		const s = String(url);
+		if (s.includes("/issues/611/comments")) return { ok: true, status: 200, statusText: "OK", json: async () => [{ user: { login: "ada" }, created_at: "2026-01-01", body: "agreed" }] };
+		if (s.includes("/issues/611/timeline")) return { ok: true, status: 200, statusText: "OK", json: async () => [{ event: "cross_referenced", source: { issue: { number: 12, title: "boot KDE", state: "open", url: "https://github.com/projectbluefin/review/pull/12", pull_request: {} } } }] };
+		return { ok: true, status: 200, statusText: "OK", json: async () => ({ title: "issue reader", body: "Adds an issue reader.", user: { login: "joshyorko" }, state: "open", labels: [{ name: "bug" }], url: "https://github.com/projectbluefin/review/issues/611" }) };
+	}) as typeof fetch;
+	t.after(() => { globalThis.fetch = originalFetch; });
+
+	const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, () => {}, () => {}, 160);
+	t.after(() => dashboard.dispose());
+
+	mode.selectById("projectbluefin/review", 611);
+	dashboard.handleInput("v");
+	await flush();
+
+	const frame = frameAfter(dashboard);
+	assert.ok(frame.some((r) => r.includes("Adds an issue reader.")), "the issue body is rendered");
+	assert.ok(frame.some((r) => r.includes("@ada")), "the issue conversation is rendered");
+	assert.ok(frame.some((r) => r.includes("#12 [open] boot KDE")), "a linked pull request is rendered");
+	assert.ok(!calls.some((u) => u.includes("/pulls/611/files")), "the issue reader never calls the PR diff/files endpoint");
+
+	// Refreshing re-fetches and keeps the issue reader populated (not the stale
+	// loading state), proving the issue detail cache is wired like the PR cache.
+	mode.selectById("projectbluefin/review", 611);
+	dashboard.handleInput("r");
+	await flush();
+	assert.ok(frameAfter(dashboard).some((r) => r.includes("Adds an issue reader.")), "refreshing the issue keeps the issue reader cached");
+});
+
+const frameAfter = (dashboard: { render: (w: number) => string[] }) => dashboard.render(160);

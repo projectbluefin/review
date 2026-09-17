@@ -11,7 +11,7 @@
 
 import { execFileSync } from "node:child_process";
 import { deadlineSignal } from "./deadline.ts";
-import type { PrDetail, PrComment, PrReview } from "./reader.ts";
+import type { IssueComment, IssueDetail, LinkedPullRequest, PrComment, PrDetail, PrReview } from "./reader.ts";
 
 export type QueueMode = "prs" | "issues";
 export type CiStatus = "success" | "failure" | "pending";
@@ -998,4 +998,148 @@ export async function fetchPrDetail(
 			reviews.payload,
 		),
 	};
+}
+
+interface IssuePayload {
+	title?: string;
+	body?: string | null;
+	user?: { login?: string } | null;
+	state?: string;
+	labels?: Array<{ name?: string }> | null;
+	url?: string;
+}
+
+interface CommentPayload {
+	user?: { login?: string } | null;
+	created_at?: string;
+	body?: string | null;
+}
+
+/** One cross-referenced timeline event naming a pull request linked to the issue. */
+interface TimelineIssue {
+	number?: number;
+	title?: string;
+	state?: string;
+	url?: string;
+	pull_request?: unknown;
+}
+
+interface TimelineEvent {
+	event?: string;
+	source?: { issue?: TimelineIssue };
+}
+
+/**
+ * The native reading surface of one issue (issue #611).
+ *
+ * Populated from the issue, its conversation comments, and its timeline. The
+ * timeline backs only the linked-pull-request list; the issue reader never
+ * calls the PR diff/files endpoint and never starts an agent turn.
+ */
+export function parseIssueDetail(
+	repo: string,
+	number: number,
+	issue: IssuePayload = {},
+	comments: ReadonlyArray<CommentPayload> = [],
+	timelineEvents: ReadonlyArray<TimelineEvent> = [],
+): IssueDetail {
+	const conversation: IssueComment[] = comments.slice(0, 50).map((comment) => ({
+		author: comment.user?.login || "?",
+		body: comment.body ?? "",
+		createdAt: comment.created_at ?? "",
+	}));
+	const seen = new Set<number>();
+	const linked: LinkedPullRequest[] = [];
+	for (const event of timelineEvents) {
+		const source = event?.source?.issue;
+		// A cross-referenced event names the pull request that links to this issue.
+		if (event?.event !== "cross_referenced" || !source || !source.pull_request) continue;
+		const prNumber = source.number;
+		if (typeof prNumber !== "number" || seen.has(prNumber)) continue;
+		seen.add(prNumber);
+		linked.push({
+			number: prNumber,
+			title: source.title ?? "(untitled)",
+			state: source.state ?? "unknown",
+			url: source.url ?? "",
+		});
+	}
+	const labels = (issue.labels ?? []).map((label) => label.name ?? "").filter(Boolean);
+	return {
+		repo,
+		number,
+		title: issue.title ?? "(untitled)",
+		body: issue.body ?? "",
+		author: issue.user?.login ?? "unknown",
+		state: issue.state ?? "unknown",
+		labels,
+		comments: conversation,
+		linkedPullRequests: linked,
+		url: issue.url ?? "",
+	};
+}
+
+export interface IssueDetailResult {
+	detail?: IssueDetail;
+	error?: string;
+	cancelled?: boolean;
+}
+
+/**
+ * Fetch the reading surface of one issue: its body, metadata, conversation
+ * comments, and linked pull requests, for the native issue reader (issue #611).
+ *
+ * Three bounded REST reads are fanned out: the issue, its conversation, and its
+ * timeline. The issue and comments are the reading surface itself, so either
+ * failing read fails the detail rather than rendering a half-truth. The timeline
+ * only backs the linked-PR list, so a missing or forbidden timeline yields no
+ * linked PRs instead of failing the whole read. None of these touch the PR
+ * diff/files endpoint, and no read starts an agent turn.
+ */
+export async function fetchIssueDetail(
+	repo: string,
+	issueNumber: number,
+	options: FetchOptions = {},
+): Promise<IssueDetailResult> {
+	const { token, signal } = options;
+	const doFetch = options.fetchImpl ?? fetch;
+	if (!token) {
+		return { detail: undefined, error: "no GitHub credential (set GH_TOKEN or run gh auth login)" };
+	}
+	const deadline = deadlineSignal(options.timeoutMs ?? 15_000, signal);
+	const readJson = async <T>(url: string): Promise<{ payload?: T; error?: string }> => {
+		try {
+			const response = await doFetch(url, { headers: headers(token), signal: deadline, redirect: "error" });
+			if (!response.ok) {
+				return { error: `GitHub REST ${response.status} ${response.statusText}` };
+			}
+			return { payload: (await response.json()) as T };
+		} catch (error) {
+			if (signal?.aborted) return { error: "cancelled" };
+			return { error: error instanceof Error ? error.message : String(error) };
+		}
+	};
+
+	const base = `https://api.github.com/repos/${repo}`;
+	const [issue, comments, timeline] = await Promise.all([
+		readJson<{ title?: string; body?: string | null; user?: { login?: string } | null; state?: string; labels?: Array<{ name?: string }> | null; url?: string }>(
+			`${base}/issues/${issueNumber}`,
+		),
+		readJson<Array<{ user?: { login?: string } | null; created_at?: string; body?: string | null }>>(
+			`${base}/issues/${issueNumber}/comments?per_page=100`,
+		),
+		readJson<Array<Record<string, unknown>>>(
+			`${base}/issues/${issueNumber}/timeline?filter=all&per_page=100`,
+		),
+	]);
+
+	const coreError = [issue.error, comments.error].find(Boolean);
+	if (coreError) {
+		return { detail: undefined, error: coreError };
+	}
+	if (comments.payload && !Array.isArray(comments.payload)) {
+		return { detail: undefined, error: "GitHub returned malformed comments payload" };
+	}
+	const linkedEvents = Array.isArray(timeline.payload) ? timeline.payload : [];
+	return { detail: parseIssueDetail(repo, issueNumber, issue.payload ?? {}, comments.payload, linkedEvents) };
 }

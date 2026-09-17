@@ -34,6 +34,46 @@ export interface ReaderState {
 }
 
 /**
+ * One conversation comment on an issue, for the native issue reader (issue #611).
+ * Mirrors ``PrComment`` so the issue conversation renders through the same
+ * sanitizer and formatting the PR reader already uses.
+ */
+export interface IssueComment {
+	author: string;
+	body: string;
+	createdAt: string;
+}
+
+/**
+ * A pull request linked to an issue through a cross-referenced timeline event.
+ * The issue reader shows these without pretending an issue has a PR head, review
+ * decision, or CI state.
+ */
+export interface LinkedPullRequest {
+	number: number;
+	title: string;
+	state: string;
+	url: string;
+}
+
+/**
+ * The native reading surface of one issue, for issue #611. Populated through
+ * ``fetchIssueDetail`` from the issue, comments, and timeline endpoints only.
+ */
+export interface IssueDetail {
+	repo: string;
+	number: number;
+	title: string;
+	body: string;
+	author: string;
+	state: string;
+	labels: string[];
+	comments: IssueComment[];
+	linkedPullRequests: LinkedPullRequest[];
+	url: string;
+}
+
+/**
  * Strips terminal ANSI escape sequences and script tags from untrusted remote markdown.
  */
 export function sanitizeMarkdown(raw: string): string {
@@ -63,15 +103,15 @@ export function sanitizeMarkdown(raw: string): string {
  * LRU cache bounded to maxEntries for PR details.
  * Cache key: `${repo}#${prNumber}@${headSha}`.
  */
-export class PrDetailCache {
+export class PrDetailCache<T = PrDetail> {
 	private readonly maxEntries: number;
-	private readonly map = new Map<string, PrDetail>();
+	private readonly map = new Map<string, T>();
 
 	constructor(maxEntries = 50) {
 		this.maxEntries = maxEntries > 0 ? maxEntries : 50;
 	}
 
-	get(key: string): PrDetail | undefined {
+	get(key: string): T | undefined {
 		const entry = this.map.get(key);
 		if (entry === undefined) {
 			return undefined;
@@ -82,7 +122,7 @@ export class PrDetailCache {
 		return entry;
 	}
 
-	set(key: string, detail: PrDetail): void {
+	set(key: string, detail: T): void {
 		if (this.map.has(key)) {
 			this.map.delete(key);
 		} else if (this.map.size >= this.maxEntries) {
@@ -150,6 +190,41 @@ export function prDetailToLines(detail: PrDetail | undefined): string[] {
 				lines.push(bodyText ? bodyText : "_(no body)_");
 				lines.push("");
 			}
+		}
+	}
+	return lines;
+}
+
+export function issueDetailToLines(detail: IssueDetail | undefined): string[] {
+	if (!detail) return ["(no issue selected)"];
+	const lines: string[] = [];
+	const inline = (value: string): string => sanitizeMarkdown(value).replace(/[\r\n]+/g, " ").trim();
+	const body = sanitizeMarkdown(detail.body);
+	if (body) {
+		lines.push(...body.split("\n"));
+	} else {
+		lines.push("_(no description)_");
+	}
+	if (detail.comments.length > 0) {
+		lines.push("", "── Conversation ──", "");
+		for (const comment of detail.comments) {
+			const author = inline(comment.author);
+			const who = author ? `@${author}` : "?";
+			const stamp = comment.createdAt ? ` · ${inline(comment.createdAt)}` : "";
+			lines.push(`${who}${stamp}`);
+			const bodyText = sanitizeMarkdown(comment.body);
+			lines.push(bodyText ? bodyText : "_(comment)_");
+			lines.push("");
+		}
+	} else {
+		lines.push("", "── No comments yet ──");
+	}
+	if (detail.linkedPullRequests.length > 0) {
+		lines.push("", "── Linked pull requests ──", "");
+		for (const pr of detail.linkedPullRequests) {
+			const state = inline(pr.state) || "unknown";
+			const title = inline(pr.title) || "_(untitled)_";
+			lines.push(`#${pr.number} [${state}] ${title}`);
 		}
 	}
 	return lines;

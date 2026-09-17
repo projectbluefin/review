@@ -18,8 +18,8 @@ import { BATCH_LIMIT, type ReviewMode, ciGlyph } from "./mode.ts";
 import { type RailKey, keymapBar, orderSourceLabel, priorityChip, workbenchProgressBar } from "./rail.ts";
 import { type RenderedRow, type Span, defaultExpanded, findSpan, hasChildren, renderSpanTree, visibleSpanIds } from "./trace.ts";
 import { fitToWidth, truncateToWidth, visibleWidth } from "./width.ts";
-import { PrDetailCache, prDetailToLines, sanitizeMarkdown, type PrDetail } from "./reader.ts";
-import { fetchPrDetail } from "./github.ts";
+import { PrDetailCache, issueDetailToLines, prDetailToLines, sanitizeMarkdown, type PrDetail, type IssueDetail } from "./reader.ts";
+import { fetchIssueDetail, fetchPrDetail } from "./github.ts";
 export type DashboardAction =
 	| { kind: "close" }
 	| { kind: "slay"; item: QueueItem; items?: QueueItem[] }
@@ -67,7 +67,7 @@ const HELP: readonly string[] = [
 	"  tab              toggle pull requests and issues",
 	"  t                switch between queue and trace panes",
 	"  p                pause or resume future repository waves",
-	"  v                read the highlighted pull request",
+	"  v                read the highlighted item",
 	"  h / l, ← / →     collapse or expand a trace span",
 	"  g / G            jump to first or last row",
 	"  H / L            toggle Hive-only / step Hive stages",
@@ -170,11 +170,12 @@ export class ReviewDashboard {
 	private traceRowSpans: (string | "hive" | undefined)[] = [];
 	private showReader = false;
 	private readerScroll = 0;
-	private readerDetail: PrDetail | undefined;
+	private readerDetail: PrDetail | IssueDetail | undefined;
 	private readerLoading = false;
 	private readerError = "";
 	private readerRequestGeneration = 0;
 	private prDetailCache = new PrDetailCache(50);
+	private readonly issueDetailCache = new PrDetailCache<IssueDetail>(50);
 
 	private readonly tui: TuiLike;
 	private readonly painter: Painter;
@@ -706,7 +707,10 @@ export class ReviewDashboard {
 			}
 			if (key === "u") {
 				const item = this.mode.selected();
-				if (item) this.prDetailCache.clear();
+				if (item) {
+					this.prDetailCache.clear();
+					this.issueDetailCache.clear();
+				}
 				this.readerScroll = 0;
 				this.loadSelectedReaderDetail();
 				return;
@@ -837,7 +841,6 @@ export class ReviewDashboard {
 				this.emitAction({ kind: "reference", item, items });
 				return;
 			case "v":
-				if (item.type !== "pr") return;
 				this.showReader = true;
 				this.readerScroll = 0;
 				this.loadSelectedReaderDetail();
@@ -866,7 +869,12 @@ export class ReviewDashboard {
 		return `${item.repo}#${item.id}@${item.headSha ?? ""}`;
 	}
 
-	/** Load the selected item's reading surface through the PR-detail cache. */
+	/** Issue rows have no head, so the reader cache keys on repo#number only. */
+	private issueCacheKey(item: QueueItem): string {
+		return `${item.repo}#${item.id}`;
+	}
+
+	/** Load the selected item's reading surface through its object-detail cache. */
 	private loadSelectedReaderDetail(): void {
 		const item = this.mode.selected();
 		if (!item) {
@@ -886,6 +894,35 @@ export class ReviewDashboard {
 	}
 
 	private async fetchReaderDetail(item: QueueItem, generation: number): Promise<void> {
+		// Issue rows read through the native issue reader; PRs through the PR reader.
+		// The issue path never touches the PR diff/files endpoint and never starts an
+		// agent turn (issue #611).
+		if (item.type === "issue") {
+			const key = this.issueCacheKey(item);
+			const cached = this.issueDetailCache.get(key);
+			if (cached !== undefined) {
+				if (generation === this.readerRequestGeneration) {
+					this.readerDetail = cached;
+					this.readerLoading = false;
+					this.tui.requestRender();
+				}
+				return;
+			}
+			const result = await fetchIssueDetail(item.repo, item.id, this.mode.tokenOptions());
+			if (generation !== this.readerRequestGeneration) return;
+			if (result.detail) {
+				this.issueDetailCache.set(key, result.detail);
+				this.readerDetail = result.detail;
+				this.readerError = "";
+			} else {
+				this.readerDetail = undefined;
+				this.readerError = result.error ?? "could not read issue";
+			}
+			this.readerLoading = false;
+			this.tui.requestRender();
+			return;
+		}
+
 		const key = this.readerCacheKey(item);
 		const cached = this.prDetailCache.get(key);
 		if (cached !== undefined) {
@@ -1245,16 +1282,27 @@ export class ReviewDashboard {
 		const item = this.mode.selected();
 
 		if (this.showReader && item) {
-			lines.push(this.painter.bold(this.painter.fg("accent", `PR READER: ${item.repo}#${item.id} — ${sanitizeMarkdown(item.title)}`)));
-			lines.push(this.painter.fg("dim", `Author: @${sanitizeMarkdown(item.author)} · Head: ${item.headSha ? item.headSha.slice(0, 7) : "unknown"} · URL: ${item.url}`));
+			const isIssue = item.type === "issue";
+			const detail = this.readerDetail as (PrDetail | IssueDetail) | undefined;
+			lines.push(this.painter.bold(this.painter.fg("accent", `${isIssue ? "ISSUE READER" : "PR READER"}: ${item.repo}#${item.id} — ${sanitizeMarkdown(item.title)}`)));
+			const labels = (isIssue && detail ? (detail as IssueDetail).labels : undefined) ?? item.labels;
+			const stateText = (isIssue && detail ? (detail as IssueDetail).state : undefined) ?? "unknown";
+			const meta = isIssue
+				? `Author: @${sanitizeMarkdown(item.author)} · State: ${sanitizeMarkdown(stateText)} · Labels: ${(labels as string[]).map(sanitizeMarkdown).join(", ") || "none"} · URL: ${item.url}`
+				: `Author: @${sanitizeMarkdown(item.author)} · Head: ${item.headSha ? item.headSha.slice(0, 7) : "unknown"} · URL: ${item.url}`;
+			lines.push(this.painter.fg("dim", meta));
 			lines.push(this.painter.fg("border", "─".repeat(width)));
-			lines.push(truncateToWidth(this.painter.fg("dim", `Status: ${item.reviewState} · CI: ${item.ciStatus ?? "none"}`), width));
-			const detailLines = prDetailToLines(this.readerDetail);
+			if (!isIssue) {
+				lines.push(truncateToWidth(this.painter.fg("dim", `Status: ${item.reviewState} · CI: ${item.ciStatus ?? "none"}`), width));
+			}
+			const detailLines = isIssue ? issueDetailToLines(detail as IssueDetail | undefined) : prDetailToLines(detail as PrDetail | undefined);
 			let linesToShow = detailLines;
 			if (this.readerError) {
-				linesToShow = [`(could not read PR: ${this.readerError})`];
+				linesToShow = [`(could not read ${isIssue ? "issue" : "PR"}: ${this.readerError})`];
 			} else if (this.readerLoading) {
-				linesToShow = ["(loading description and conversation…)"];
+				linesToShow = isIssue
+					? ["(loading description, conversation, and linked pull requests…)"]
+					: ["(loading description and conversation…)"];
 			}
 			const available = Math.max(2, bodyHeight - 2);
 			const slice = linesToShow.slice(this.readerScroll, this.readerScroll + available);
@@ -1262,15 +1310,26 @@ export class ReviewDashboard {
 				lines.push(truncateToWidth(this.painter.fg("text", line), width));
 			}
 			while (lines.length < bodyHeight) lines.push("");
-			const readerKeys: RailKey[] = [
-				{ chord: "j/k", label: "scroll" },
-				{ chord: "ctrl+d/u", label: "page" },
-				{ chord: "n/p", label: "next/prev" },
-				{ chord: "u", label: "refresh" },
-				{ chord: "c", label: "reply" },
-				{ chord: "o", label: "browser" },
-				{ chord: "q/esc", label: "back" },
-			];
+			// The issue reader has no reply surface, so it advertises only actions it
+			// can perform (issue #611): never one that silently rejects the row.
+			const readerKeys: RailKey[] = isIssue
+				? [
+					{ chord: "j/k", label: "scroll" },
+					{ chord: "ctrl+d/u", label: "page" },
+					{ chord: "n/p", label: "next/prev" },
+					{ chord: "u", label: "refresh" },
+					{ chord: "o", label: "browser" },
+					{ chord: "q/esc", label: "back" },
+				]
+				: [
+					{ chord: "j/k", label: "scroll" },
+					{ chord: "ctrl+d/u", label: "page" },
+					{ chord: "n/p", label: "next/prev" },
+					{ chord: "u", label: "refresh" },
+					{ chord: "c", label: "reply" },
+					{ chord: "o", label: "browser" },
+					{ chord: "q/esc", label: "back" },
+				];
 			lines.push(keymapBar(this.painter, readerKeys, width));
 			return lines;
 		}
