@@ -1,0 +1,7 @@
+# Default Bluefin Review routing: Copilot-backed roles.
+# Agent definitions select these aliases; OMP resolves the concrete selectors.
+modelRoles:
+  fast: github-copilot/gemini-3.8-flash
+  general: github-copilot/gemini-3.8-flash
+  review: github-copilot/gemini-3.8-flash:high
+  final: github-copilot/kimi-k3:max

@@ -1,30 +1,31 @@
 # Project settings for projectbluefin/review development.
 #
 # The interactive model remains the user's choice through /model. Repository
-# subagents are pinned so reviews and CI-oriented fan-out use one affordable,
-# reproducible model family; this file is not copied into either runtime image.
+# subagents select semantic roles so the active routing profile owns concrete
+# provider/model choices; this file is not copied into either runtime image.
 #
 # Deliberately absent: modelRoles.default. The model *you* drive is yours to
 # choose; these settings apply only to agents spawned while working in this repo.
 task:
   agentModelOverrides:
-    scout: github-copilot/gemini-3.8-flash
-    sonic: github-copilot/gemini-3.8-flash
-    task: github-copilot/gemini-3.8-flash
-    reviewer: github-copilot/gemini-3.8-flash:high
-    security-reviewer: github-copilot/gemini-3.8-flash:high
-    bluefin-doctrine: github-copilot/gemini-3.8-flash:high
-    bluefin-ci-triage: github-copilot/gemini-3.8-flash
-    bluefin-correctness: github-copilot/gemini-3.8-flash:high
-    bluefin-security: github-copilot/gemini-3.8-flash:high
-    bluefin-test-coverage: github-copilot/gemini-3.8-flash:high
-    bluefin-simplicity: github-copilot/gemini-3.8-flash:high
-    bluefin-reviewer: github-copilot/gemini-3.8-flash:high
-    bluefin-queue-triage: github-copilot/gemini-3.8-flash:high
+    scout: "@fast"
+    sonic: "@fast"
+    task: "@general"
+    reviewer: "@review"
+    security-reviewer: "@review"
+    bluefin-doctrine: "@review"
+    bluefin-ci-triage: "@fast"
+    bluefin-correctness: "@review"
+    bluefin-security: "@review"
+    bluefin-test-coverage: "@review"
+    bluefin-simplicity: "@review"
+    bluefin-reviewer: "@review"
+    bluefin-queue-triage: "@review"
 modelRoles:
-  review: github-copilot/gemini-3.8-flash:high
   fast: github-copilot/gemini-3.8-flash
+  general: github-copilot/gemini-3.8-flash
+  review: github-copilot/gemini-3.8-flash:high
+  final: github-copilot/kimi-k3:max
   advisor: "@default"
-
 advisor:
   syncBacklog: 1

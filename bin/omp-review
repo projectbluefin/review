@@ -108,6 +108,28 @@ if [[ ! -e "$EXTENSION_PATH" ]]; then
   exit 1
 fi
 
+# Native OMP routing roles are supplied by one of the packaged profile
+# overlays. The launcher selects an overlay; it never resolves providers.
+routing_profile="${BLUEFIN_REVIEW_ROUTING_PROFILE:-copilot-mixed}"
+case "$routing_profile" in
+  copilot-mixed | codex-subscription)
+    ;;
+  *)
+    echo "omp-review: unknown routing profile '$routing_profile'; expected copilot-mixed or codex-subscription" >&2
+    exit 2
+    ;;
+esac
+routing_config="$SCRIPT_DIR/image/appliance/profiles/${routing_profile}.yml"
+if [[ ! -f "$routing_config" ]]; then
+  echo "omp-review: routing profile '$routing_profile' is missing: $routing_config" >&2
+  exit 2
+fi
+if [[ -n "${PI_CONFIG_FILES:-}" ]]; then
+  export PI_CONFIG_FILES="${PI_CONFIG_FILES}:$routing_config"
+else
+  export PI_CONFIG_FILES="$routing_config"
+fi
+
 # 5. Ensure organization & repository skills are projected for agent discovery
 if [[ -f "$SCRIPT_DIR/docs/skills/index.json" && -f "$SCRIPT_DIR/scripts/generate-skills.py" ]]; then
   python3 "$SCRIPT_DIR/scripts/generate-skills.py" \

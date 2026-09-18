@@ -1,6 +1,7 @@
 ---
 name: bluefin-doctrine
 description: Read-only reviewer that judges a Project Bluefin pull request against the repository's own contract — AGENTS.md, docs/factory, docs/skills, and the launcher/image/test seams — and reports findings by severity with file:line evidence.
+model: "@review"
 tools: read, grep, glob, bash, yield
 read-summarize: false
 ---

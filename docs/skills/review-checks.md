@@ -38,11 +38,12 @@ policy belong here or in `policy.ts`; OMP owns agent execution and workflowz.
 
 ## Rules
 
-1. Agent definitions omit provider, model, and effort. OMP resolves the user's
-   active choice for every companion agent.
-2. Review agents read evidence and return findings. They never comment, submit
-   reviews, approve, enqueue, push, or merge. Enforce that boundary in their
-   tool allowlist: a prompt prohibition alone is not a capability boundary.
+1. Shipped definitions select semantic OMP roles such as `@fast` and `@review`.
+   The active routing profile resolves those roles to concrete providers,
+   models, and effort levels; no provider mapping is duplicated in agent prose.
+2. Review agents read evidence and return findings. They never comment, submit,
+   approve, enqueue, push, or merge. Enforce that boundary in their tool
+   allowlist: a prompt prohibition alone is not a capability boundary.
 3. Verdict labels such as `clean` are recommendations returned to the
    coordinator, never authorization for the reviewer to mutate GitHub.
 4. The coordinator must preserve specialist evidence and surface uncertainty;

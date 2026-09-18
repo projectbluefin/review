@@ -1,0 +1,7 @@
+# Opt-in Bluefin Review routing for the authenticated Codex subscription.
+# These are native OMP modelRoles selectors; auth remains OMP's concern.
+modelRoles:
+  fast: openai-codex/gpt-5.6-luna
+  general: openai-codex/gpt-5.6-terra
+  review: openai-codex/gpt-5.6-sol:high
+  final: openai-codex/gpt-5.6-sol:max

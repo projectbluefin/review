@@ -22,12 +22,27 @@ modelRoles:
 advisor:
   syncBacklog: 1
 
-
 eval:
   workpool:
     freshAgents: true
 
+# Agent definitions and task overrides use semantic aliases. The selected
+# routing profile supplies fast/general/review/final concrete selectors.
 task:
+  agentModelOverrides:
+    scout: "@fast"
+    sonic: "@fast"
+    task: "@general"
+    reviewer: "@review"
+    security-reviewer: "@review"
+    bluefin-doctrine: "@review"
+    bluefin-ci-triage: "@fast"
+    bluefin-correctness: "@review"
+    bluefin-security: "@review"
+    bluefin-test-coverage: "@review"
+    bluefin-simplicity: "@review"
+    bluefin-reviewer: "@review"
+    bluefin-queue-triage: "@review"
   maxConcurrency: 4
   maxRecursionDepth: 1
   maxRuntimeMs: 3600000

@@ -1,6 +1,7 @@
 ---
 name: bluefin-security
 description: Specialized application security reviewer — analyzes diffs for vulnerabilities, unsafe shell/subprocesses, credential exposure, privilege boundaries, and injection hazards.
+model: "@review"
 tools: read, grep, glob, bash, yield
 read-summarize: false
 ---

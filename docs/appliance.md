@@ -138,13 +138,24 @@ target-specific home and set `BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1`. The
 appliance never edits host configuration directly. Git HTTPS requests use the
 bundled `gh auth git-credential` helper, scoped to `github.com`; credential
 values remain in the inherited environment and credential protocol, not image
-layers or process arguments. The immutable invocation overlay enables fresh
-workflowz agents, caps task concurrency at four and recursion at one, isolates
-task worktrees without auto-applying them, uses a one-hour task deadline and a
-bounded request budget, keeps tool intent traces out of model context, and
-selects low text verbosity. OMP resolves every model and effort choice from the
-user's active configuration; the appliance and its agents impose no model
-mapping or filtering.
+configuration. The immutable invocation overlay enables fresh workflowz agents,
+caps task concurrency at four and recursion at one, isolates task worktrees
+without auto-applying them, uses a one-hour task deadline and a bounded request
+budget, keeps tool intent traces out of model context, and selects low text
+verbosity.
+
+Review agents use native OMP role aliases. `BLUEFIN_REVIEW_ROUTING_PROFILE`
+defaults to `copilot-mixed`; set it to `codex-subscription` for the explicit
+OpenAI Codex subscription route. The profile is a config overlay, not an OMP
+profile namespace: it supplies `fast`, `general`, `review`, and `final`
+`modelRoles`, while `/model` continues to control the root session without
+rewriting those named roles.
+
+Profile selection is preflight. An unknown selector, missing profile file,
+malformed overlay, or missing role fails before an agent is dispatched. After a
+valid role resolves, OMP may fall back to the parent model when the selected
+provider has no usable authentication; that fallback can cross providers, so
+these routes are not a strict provider lock.
 
 
 ### The agents it carries
@@ -152,8 +163,8 @@ mapping or filtering.
 The agent definitions under `/usr/share/bluefin/review/extension/agents` ship
 with the image and are discovered by OMP directly. They cover doctrine,
 correctness, security, test coverage, simplicity, CI triage, queue triage, and
-coordinated review. They deliberately omit model and effort fields, leaving both
-choices to the user's active OMP configuration.
+coordinated review. They select semantic role aliases; the selected routing
+profile owns concrete model and effort values.
 
 ### Returned work first, then Hive order
 

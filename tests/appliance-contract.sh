@@ -95,10 +95,32 @@ require "$containerfile" \
   'ENTRYPOINT ["/usr/bin/bluefin-review-appliance"]' \
   'COPY --chmod=0755 image/appliance/entrypoint.sh /out/usr/bin/bluefin-review-appliance' \
   'COPY image/appliance/config.yml /out/usr/share/bluefin/review/appliance-config.yml' \
+  'COPY image/appliance/profiles /out/usr/share/bluefin/review/profiles' \
   'io.projectbluefin.review.appliance="true"' \
   'org.opencontainers.image.version="${REVIEW_VERSION}"' \
   'org.opencontainers.image.revision="${REVIEW_REVISION}"'
-require image/appliance/config.yml 'advisor: "@default"' 'syncBacklog: 1' 'symbolPreset: nerd'
+require image/appliance/config.yml \
+  'advisor: "@default"' \
+  'syncBacklog: 1' \
+  'symbolPreset: nerd' \
+  'agentModelOverrides:' \
+  'scout: "@fast"' \
+  'task: "@general"' \
+  'bluefin-reviewer: "@review"'
+require image/appliance/profiles/copilot-mixed.yml \
+  'fast: github-copilot/gemini-3.8-flash' \
+  'general: github-copilot/gemini-3.8-flash' \
+  'review: github-copilot/gemini-3.8-flash:high' \
+  'final: github-copilot/kimi-k3:max'
+require image/appliance/profiles/codex-subscription.yml \
+  'fast: openai-codex/gpt-5.6-luna' \
+  'general: openai-codex/gpt-5.6-terra' \
+  'review: openai-codex/gpt-5.6-sol:high' \
+  'final: openai-codex/gpt-5.6-sol:max'
+for agent in image/extension/bluefin-review/agents/*.md; do
+  grep -qE '^model: "@(fast|general|review|final)"$' "$agent" ||
+    fail "${agent} must select a semantic OMP model role"
+done
 python3 - image/extension/bluefin-review/.mcp.json <<'PY' || fail "bundled MCP configuration is invalid"
 import json
 import sys
@@ -180,17 +202,38 @@ entrypoint_tmp="$(mktemp -d)"
 trap 'rm -rf "$entrypoint_tmp"' EXIT
 cat >"$entrypoint_tmp/omp" <<'EOF'
 #!/usr/bin/bash
+printf 'PI_CONFIG_FILES=%s\n' "${PI_CONFIG_FILES:-}"
+printf '%s\n' "$@" >>"${ENTRYPOINT_CALLS:?}"
 printf '%s\n' "$@"
 EOF
 chmod +x "$entrypoint_tmp/omp"
+export ENTRYPOINT_CALLS="$entrypoint_tmp/calls"
+: >"$ENTRYPOINT_CALLS"
 default_args="$(PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
 grep -qx 'bluefin-review-appliance' <<<"$default_args" ||
   fail "the appliance entrypoint did not select its isolated profile"
+grep -q '/profiles/copilot-mixed.yml' <<<"$default_args" ||
+  fail "the appliance entrypoint did not append the default routing profile"
+codex_args="$(BLUEFIN_REVIEW_ROUTING_PROFILE=codex-subscription PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
+grep -q '/profiles/codex-subscription.yml' <<<"$codex_args" ||
+  fail "the appliance entrypoint did not append the Codex routing profile"
+if [[ ! -s "$ENTRYPOINT_CALLS" ]]; then
+  fail "the appliance entrypoint did not dispatch the valid routing profile"
+fi
 [[ "$(grep -cx -- '--advisor' <<<"$default_args")" -eq 1 ]] ||
   fail "the appliance did not enable exactly one OMP advisor"
 inherited_args="$(BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1 PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
 grep -qx 'review' <<<"$inherited_args" ||
   fail "the explicit host omp configuration opt-in did not select the review profile"
+: >"$ENTRYPOINT_CALLS"
+set +e
+unknown_output="$(BLUEFIN_REVIEW_ROUTING_PROFILE=unknown PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version 2>&1)"
+unknown_status=$?
+set -e
+[[ "$unknown_status" -ne 0 ]] || fail "the appliance accepted an unknown routing profile"
+grep -q 'expected copilot-mixed or codex-subscription' <<<"$unknown_output" ||
+  fail "unknown routing profile diagnostic was not actionable"
+[[ ! -s "$ENTRYPOINT_CALLS" ]] || fail "unknown routing profile reached omp"
 autoslay_args="$(PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --autoslay)"
 [[ "$(grep -cx -- '--advisor' <<<"$autoslay_args")" -eq 1 ]] ||
   fail "autoslay duplicated the always-on OMP advisor"
@@ -323,14 +366,38 @@ run 'set -eu; test -w "$HOME"; test "$HOME" = /home/bluefin' >/dev/null ||
 run '
   set -eu
   test -x /usr/bin/bluefin-review-appliance
-  test "$PI_CONFIG_FILES" = /usr/share/bluefin/review/appliance-config.yml
-  test "$(omp config get symbolPreset)" = nerd
-  test "$(omp config get startup.checkUpdate)" = false
+  case "$PI_CONFIG_FILES" in
+    /usr/share/bluefin/review/appliance-config.yml) ;;
+    *) echo "unexpected PI_CONFIG_FILES=$PI_CONFIG_FILES" >&2; exit 1 ;;
+  esac
+  base=/usr/share/bluefin/review/appliance-config.yml
+  copilot=/usr/share/bluefin/review/profiles/copilot-mixed.yml
+  codex=/usr/share/bluefin/review/profiles/codex-subscription.yml
+  role() {
+    local configs="$1" name="$2"
+    PI_CONFIG_FILES="$configs" omp config get modelRoles --json | jq -r ".value.${name}"
+  }
+  test "$(role "$base:$copilot" fast)" = github-copilot/gemini-3.8-flash
+  test "$(role "$base:$copilot" review)" = github-copilot/gemini-3.8-flash:high
+  test "$(role "$base:$codex" general)" = openai-codex/gpt-5.6-terra
+  test "$(role "$base:$codex" final)" = openai-codex/gpt-5.6-sol:max
+  printf "%s\n" "modelRoles:" "  review: openai-codex/gpt-5.6-luna" > /tmp/project-routing.yml
+  test "$(role "/tmp/project-routing.yml:$base:$copilot" review)" = github-copilot/gemini-3.8-flash:high
+  printf "%s\n" "modelRoles:" "  review: [" > /tmp/malformed-routing.yml
+  if PI_CONFIG_FILES="$base:/tmp/malformed-routing.yml" omp config get modelRoles.review >/tmp/malformed-routing.out 2>&1; then
+    exit 1
+  fi
+  grep -q "Failed to parse config overlay" /tmp/malformed-routing.out
+  if PI_CONFIG_FILES="$base:$copilot" HOME=/tmp/omp-routing-home XDG_CONFIG_HOME=/tmp/omp-routing-config \
+    omp --no-session --no-tools --model @missing -p noop >/tmp/missing-role.out 2>&1; then
+    exit 1
+  fi
+  grep -q "Model \"@missing\" not found" /tmp/missing-role.out
   test -f /usr/share/bluefin/review/extension/index.ts
   test -d /usr/share/bluefin/review/extension/agents
   test -f /usr/share/bluefin/review/extension/.mcp.json
   test -f /usr/share/bluefin/review/sbom.spdx.json
-' >/dev/null || fail "the review mode, its settings overlay, or its SBOM is missing from the image"
+' >/dev/null || fail "the review mode, routing overlays, or its settings contract is missing from the image"
 
 # Nothing inside may install anything.
 # shellcheck disable=SC2016 # Expanded by the container's shell, not this one.
@@ -371,5 +438,7 @@ grep -q 'Replace it to update' <<<"$help_output" ||
   fail "appliance help does not explain replacement semantics"
 grep -q 'BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1' <<<"$help_output" ||
   fail "appliance help does not expose the explicit host-config opt-in"
+grep -q 'BLUEFIN_REVIEW_ROUTING_PROFILE' <<<"$help_output" ||
+  fail "appliance help does not expose the routing profile selector"
 
 echo "appliance-contract: runtime contract holds ($((size / 1024 / 1024)) MiB, omp ${omp_version})"

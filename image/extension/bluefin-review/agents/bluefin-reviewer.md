@@ -1,6 +1,7 @@
 ---
 name: bluefin-reviewer
 description: Master reviewer for Project Bluefin pull requests. Coordinates doctrine, correctness, security, test coverage, and Ponytail simplicity across diffs and pipeline traces, producing maintainer-ready verdicts.
+model: "@review"
 tools: read, grep, glob, hive_workbench_diff, hive_workbench_trace, hive_workbench_lookup
 read-summarize: false
 ---

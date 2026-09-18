@@ -126,6 +126,7 @@ RUN set -eu; \
 COPY --chown=65532:65532 image/extension/bluefin-review /out/usr/share/bluefin/review/extension
 COPY --chmod=0755 image/appliance/entrypoint.sh /out/usr/bin/bluefin-review-appliance
 COPY image/appliance/config.yml /out/usr/share/bluefin/review/appliance-config.yml
+COPY image/appliance/profiles /out/usr/share/bluefin/review/profiles
 # Fail the build here rather than in a maintainer's terminal: every staged
 # binary must resolve its interpreter and libraries against the staged closure.
 RUN set -eu; \

@@ -96,10 +96,13 @@ for arg in "$@"; do
 done
 if [[ "${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
   injected=()
-  for name in GH_TOKEN OPENAI_API_KEY CONTEXT7_API_KEY HIVE_HUB AWS_BEARER_TOKEN_BEDROCK AWS_REGION AWS_DEFAULT_REGION; do
+  for name in GH_TOKEN OPENAI_API_KEY CONTEXT7_API_KEY HIVE_HUB AWS_BEARER_TOKEN_BEDROCK AWS_REGION AWS_DEFAULT_REGION BLUEFIN_REVIEW_ROUTING_PROFILE; do
     source_name="APPTAINERENV_${name}"
     [[ -v "$source_name" ]] && injected+=("$name=${!source_name}")
   done
+  if [[ "${EXPECT_APPTAINER_ROUTING_PROFILE:-}" ]]; then
+    [[ "${APPTAINERENV_BLUEFIN_REVIEW_ROUTING_PROFILE:-}" == "$EXPECT_APPTAINER_ROUTING_PROFILE" ]] || exit 19
+  fi
   injected+=("EXPECT_CONTEXT7_CREDENTIAL=${EXPECT_CONTEXT7_CREDENTIAL:-0}")
   env -i "${injected[@]}" /bin/bash -c '
     [[ "$GH_TOKEN" == test-gh-token &&
@@ -181,7 +184,7 @@ run_just() {
   : >"$podman_log"
   : >"$kubectl_log"
   set +e
-  output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_TEST_FUSE_DEVICE="${REVIEW_TEST_FUSE_DEVICE:-/dev/null}" FAKE_PODMAN_INFO_FAIL="${FAKE_PODMAN_INFO_FAIL:-0}" FAKE_NO_SKOPEO="${FAKE_NO_SKOPEO:-0}" FAKE_PULL_FAIL="${FAKE_PULL_FAIL:-0}" FAKE_IMAGE_MISSING="${FAKE_IMAGE_MISSING:-0}" REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color COLORTERM=truecolor "$real_just" --justfile "$root/justfile" "$@" 2>&1)"
+  output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" REVIEW_TEST_KVM_DEVICE="$kvm" REVIEW_TEST_FUSE_DEVICE="${REVIEW_TEST_FUSE_DEVICE:-/dev/null}" FAKE_PODMAN_INFO_FAIL="${FAKE_PODMAN_INFO_FAIL:-0}" FAKE_NO_SKOPEO="${FAKE_NO_SKOPEO:-0}" FAKE_PULL_FAIL="${FAKE_PULL_FAIL:-0}" FAKE_IMAGE_MISSING="${FAKE_IMAGE_MISSING:-0}" EXPECT_APPTAINER_ROUTING_PROFILE="${EXPECT_APPTAINER_ROUTING_PROFILE:-}" BLUEFIN_REVIEW_ROUTING_PROFILE="${BLUEFIN_REVIEW_ROUTING_PROFILE:-}" REVIEW_GH_TOKEN=test-gh-token TERM=xterm-256color COLORTERM=truecolor "$real_just" --justfile "$root/justfile" "$@" 2>&1)"
   status=$?
   set -e
 }
@@ -269,7 +272,7 @@ contains 'detached contributor containers are not supported' "$output"
 scenario="KVM preflight failure falls back to Apptainer"
 : >"$apptainer_log"
 set +e
-output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" GH_TOKEN=test-gh-token OPENAI_API_KEY=test-provider-token CONTEXT7_API_KEY=test-context7-token HIVE_HUB= EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_CONTEXT7_CREDENTIAL=1 FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
+output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" GH_TOKEN=test-gh-token OPENAI_API_KEY=test-provider-token CONTEXT7_API_KEY=test-context7-token HIVE_HUB= BLUEFIN_REVIEW_ROUTING_PROFILE=codex-subscription EXPECT_APPTAINER_ROUTING_PROFILE=codex-subscription EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_CONTEXT7_CREDENTIAL=1 FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
 status=$?
 set -e
 [[ "$status" -eq 18 ]] || fail "expected fake Apptainer exit 18, got $status"
@@ -352,6 +355,7 @@ run_just review-queue --issues
 log_contains 'run --runtime=krun --rm --interactive --tty --name bluefin-review-' "$podman_log"
 log_contains 'ghcr.io/projectbluefin/review:stable --issues --advisor' "$podman_log"
 log_contains '--env CONTEXT7_API_KEY' "$podman_log"
+log_contains '--env BLUEFIN_REVIEW_ROUTING_PROFILE' "$podman_log"
 run_just review-queue autoslay
 [[ "$status" -eq 17 ]] || fail "expected fake container exit 17, got $status"
 log_contains 'ghcr.io/projectbluefin/review:stable --autoslay --advisor' "$podman_log"

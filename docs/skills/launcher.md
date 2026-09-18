@@ -132,11 +132,17 @@ cannot silently bypass validation.
 Repository, `--pr`, and `--issues` arguments must reach the appliance unchanged.
 Every review launch passes OMP's built-in `--advisor` flag exactly once. The
 source launcher also normalizes its parser-fallback path, and the packaged
-entrypoint repeats the normalization for direct image launches. The appliance
-configuration maps `modelRoles.advisor` to `@default` rather than selecting a
-provider.
+entrypoint repeats the normalization for direct image launches.
+The appliance configuration maps `modelRoles.advisor` to `@default` and uses
+`BLUEFIN_REVIEW_ROUTING_PROFILE` for native role routing:
+`copilot-mixed` is the default and `codex-subscription` is opt-in. The
+selector appends an OMP config overlay; it does not implement provider
+selection. `/model` remains the root-session choice and does not rewrite named
+roles. If OMP cannot authenticate a child role, its documented parent-model
+fallback may cross providers.
 The optional contributor argument names an isolated instance and its
-`contributor.<org-repo>.env`; Hive still selects work. OMP owns model choice.
+`contributor.<org-repo>.env`; Hive still selects work. OMP owns model choice
+and dispatch.
 
 ## Verification
 

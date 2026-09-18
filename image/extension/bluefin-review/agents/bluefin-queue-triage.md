@@ -1,6 +1,7 @@
 ---
 name: bluefin-queue-triage
 description: Authoritative triage and classification agent for Project Bluefin. Analyzes incoming issues and unranked PRs against live Hive hub state, extracts closing references, and maps them to Hive triage stages.
+model: "@review"
 tools: read, grep, glob, bash, yield, hive_workbench_lookup, hive_workbench_queue, hive_workbench_status
 read-summarize: false
 ---

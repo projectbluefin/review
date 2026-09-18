@@ -190,12 +190,15 @@ for arg in "\$@"; do
 done
 if [[ "\${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
   injected=()
-  for name in GH_TOKEN OPENAI_API_KEY AWS_BEARER_TOKEN_BEDROCK AWS_REGION AWS_DEFAULT_REGION; do
+  for name in GH_TOKEN OPENAI_API_KEY AWS_BEARER_TOKEN_BEDROCK AWS_REGION AWS_DEFAULT_REGION BLUEFIN_REVIEW_ROUTING_PROFILE; do
     source_name="APPTAINERENV_\${name}"
     [[ -v "\$source_name" ]] && injected+=("\$name=\${!source_name}")
   done
   if [[ "\${EXPECT_APPTAINER_HIVE:-}" == 1 ]]; then
     [[ "\${APPTAINERENV_HIVE_HUB:-}" == https://hive.example.test ]] || exit 19
+  fi
+  if [[ "\${EXPECT_APPTAINER_ROUTING_PROFILE:-}" ]]; then
+    [[ "\${APPTAINERENV_BLUEFIN_REVIEW_ROUTING_PROFILE:-}" == "\$EXPECT_APPTAINER_ROUTING_PROFILE" ]] || exit 19
   fi
   env -i "\${injected[@]}" /bin/bash -c '
     [[ "\$GH_TOKEN" == mock-token && "\$OPENAI_API_KEY" == test-provider-token ]] || exit 19
@@ -252,6 +255,8 @@ assert_bluefin_review() {
   podman_call="$(grep '^run ' "$mock_podman_log")"
   [[ "$podman_call" == *"run --runtime=krun --rm --interactive --tty"* ]] || fail "review did not use the krun OCI runtime: $podman_call"
   [[ "$podman_call" == *"--name bluefin-review-"* ]] || fail "review did not use an isolated instance name: $podman_call"
+  [[ "$podman_call" == *"--env BLUEFIN_REVIEW_ROUTING_PROFILE"* ]] ||
+    fail "review did not forward its routing profile selector: $podman_call"
   [[ "$podman_call" == *":/home/bluefin:rw"* ]] || fail "review did not use target-specific state: $podman_call"
   [[ "$podman_call" == *":/tmp:rw,z"* ]] || fail "review did not use instance-backed scratch storage: $podman_call"
 
@@ -361,7 +366,7 @@ set -e
 rm -f "$scratch/bin/cp"
 mv "$scratch/bin/krun" "$scratch/krun"
 : >"$mock_apptainer_log"
-fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_HIVE=1 OPENAI_API_KEY=test-provider-token REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review projectbluefin/review 2>&1)" || fail "review Apptainer fallback lost credentials"
+fallback_output="$(BLUEFIN_REVIEW_ROUTING_PROFILE=codex-subscription EXPECT_APPTAINER_ROUTING_PROFILE=codex-subscription EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_HIVE=1 OPENAI_API_KEY=test-provider-token REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review projectbluefin/review 2>&1)" || fail "review Apptainer fallback lost credentials"
 [[ "$fallback_output" == *"using the isolated Apptainer fallback"* ]] || fail "review fallback warning is missing"
 [[ "$fallback_output" == *"✓ bluefin launcher revision:"* ]] || fail "review fallback missing launcher revision: $fallback_output"
 [[ "$fallback_output" == *"! review appliance image identity unavailable for ghcr.io/projectbluefin/review:stable."* ]] || fail "review fallback missing identity report without registry probe: $fallback_output"
@@ -429,9 +434,11 @@ assert_bluefin_review "projectbluefin/review autoslay" "--repo projectbluefin/re
 # --- 3. Hermetic test of bin/omp-review (Source launcher) ----------------------
 
 mock_omp_log="$scratch/omp.log"
+mock_omp_env="$scratch/omp-env"
 cat >"$scratch/bin/omp" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >>"$mock_omp_log"
+printf '%s\n' "\${PI_CONFIG_FILES:-}" >>"$mock_omp_env"
 exit 0
 EOF
 chmod +x "$scratch/bin/omp"
@@ -439,15 +446,19 @@ chmod +x "$scratch/bin/omp"
 assert_omp_review() {
   local input="$1"
   local expected_flags="$2"
+  local routing_profile="${3:-copilot-mixed}"
   [[ "$expected_flags" == *--advisor* ]] || expected_flags="$expected_flags --advisor"
-  rm -f "$mock_omp_log"
+  rm -f "$mock_omp_log" "$mock_omp_env"
 
   # shellcheck disable=SC2086
-  "${repo_root}/bin/omp-review" $input >/dev/null 2>&1 || fail "bin/omp-review failed for: $input"
+  BLUEFIN_REVIEW_ROUTING_PROFILE="$routing_profile" PI_CONFIG_FILES='' "${repo_root}/bin/omp-review" $input >/dev/null 2>&1 ||
+    fail "bin/omp-review failed for: $input"
 
   [[ -f "$mock_omp_log" ]] || fail "bin/omp-review did not invoke omp for: $input"
   local omp_call
   omp_call="$(cat "$mock_omp_log")"
+  assert_eq "$(cat "$mock_omp_env")" "$repo_root/image/appliance/profiles/${routing_profile}.yml" \
+    "bin/omp-review $input routing overlay"
 
   # omp --profile review --extension <path> [FLAGS...]
   local passed_flags
@@ -465,6 +476,17 @@ assert_omp_review "projectbluefin/review#463" "--repo projectbluefin/review --pr
 assert_omp_review "--issues projectbluefin/review" "--issues --repo projectbluefin/review"
 assert_omp_review "projectbluefin/review#463 --issues" "--repo projectbluefin/review --pr 463 --issues"
 assert_omp_review "projectbluefin/review autoslay" "--repo projectbluefin/review --autoslay --advisor"
+assert_omp_review "projectbluefin/review" "--repo projectbluefin/review" codex-subscription
+: >"$mock_omp_log"
+: >"$mock_omp_env"
+set +e
+unknown_routing_output="$(BLUEFIN_REVIEW_ROUTING_PROFILE=unknown PI_CONFIG_FILES='' "${repo_root}/bin/omp-review" projectbluefin/review 2>&1)"
+unknown_routing_status=$?
+set -e
+[[ "$unknown_routing_status" -ne 0 ]] || fail "source launcher accepted an unknown routing profile"
+[[ "$unknown_routing_output" == *"expected copilot-mixed or codex-subscription"* ]] ||
+  fail "source launcher unknown routing diagnostic was not actionable"
+[[ ! -s "$mock_omp_log" ]] || fail "source launcher dispatched an unknown routing profile"
 
 # --- 4. Contributor aliases launch independent KVM appliances -----------------
 mkdir -p "$HOME/.config/hive"

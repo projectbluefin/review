@@ -1,6 +1,7 @@
 ---
 name: bluefin-test-coverage
 description: Specialized test adequacy and regression reviewer — ensures diffs are backed by rigorous, deterministic automated tests, boundary checks, and regression tests for fixes.
+model: "@review"
 tools: read, grep, glob, bash, yield
 read-summarize: false
 ---

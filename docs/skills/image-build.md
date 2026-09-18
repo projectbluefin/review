@@ -25,16 +25,19 @@ The repository ships two images:
 | `ghcr.io/projectbluefin/review` | `image/appliance/Containerfile` | OMP maintainer workbench and extension |
 | `ghcr.io/projectbluefin/contribute` | `image/contribute/Containerfile` | Hive-assigned OMP worker |
 
-There is no `review-contributor` image, SIF package, alternate agent harness, or
-model-specific runtime. Both OCI images leave model and effort selection to OMP.
+There is no `review-contributor` image, SIF package, or alternate agent
+harness. Both OCI images run OMP; only the review appliance carries checked-in
+OMP role-routing overlays for its bounded `copilot-mixed` and opt-in
+`codex-subscription` modes.
 
 ## Rules
 
 1. Pin base images by tag and digest. Pin fetched artifacts by version and
    architecture-specific SHA-256.
 2. Build natively per architecture; do not claim QEMU results as native evidence.
-3. Never place credentials, user configuration, workspaces, or provider choices
-   in an image layer.
+3. Never place credentials, user configuration, workspaces, or provider auth
+   state in an image layer. Checked-in review role overlays are policy, not
+   credential state.
 4. Do not add package managers or duplicate a tool already present in the pinned
    FSDK closure.
 5. The review appliance carries OMP, its extension, GitHub CLI, the minimal

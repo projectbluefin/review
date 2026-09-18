@@ -7,9 +7,12 @@ The repository ships two OMP-owned images:
 - `ghcr.io/projectbluefin/contribute`, built by
   `image/contribute/Containerfile`, carries Hive's contributor relay and OMP.
 
-Neither image selects a provider, model, or thinking effort. OMP resolves those
-inside each appliance. Local launchers prefer Podman's `krun` runtime and KVM,
-then fall back explicitly to isolated Apptainer execution.
+The contributor image leaves provider, model, and thinking-effort selection to
+OMP. The review image additionally ships two native OMP routing overlays:
+`copilot-mixed` is the default and `codex-subscription` is opt-in. Local
+launchers select an overlay by name; OMP still resolves roles, effort, auth,
+and execution. Both launchers prefer Podman's `krun` runtime and KVM, then
+fall back explicitly to isolated Apptainer execution.
 
 Both images pin FSDK bases by tag and digest and pin fetched runtime assets by
 architecture-specific SHA-256. The contributor image installs the root

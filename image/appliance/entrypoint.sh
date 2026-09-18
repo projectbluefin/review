@@ -11,6 +11,31 @@ if [ "${BLUEFIN_REVIEW_INHERIT_OMP_CONFIG:-0}" = 1 ]; then
   profile="review"
 fi
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+routing_profile="${BLUEFIN_REVIEW_ROUTING_PROFILE:-copilot-mixed}"
+case "$routing_profile" in
+copilot-mixed | codex-subscription)
+  ;;
+*)
+  echo "unknown Bluefin Review routing profile '$routing_profile'; expected copilot-mixed or codex-subscription" >&2
+  exit 2
+  ;;
+esac
+routing_dir="/usr/share/bluefin/review/profiles"
+if [ ! -d "$routing_dir" ]; then
+  routing_dir="$script_dir/profiles"
+fi
+routing_config="$routing_dir/${routing_profile}.yml"
+if [ ! -f "$routing_config" ]; then
+  echo "Bluefin Review routing profile '$routing_profile' is missing: $routing_config" >&2
+  exit 2
+fi
+if [ -n "${PI_CONFIG_FILES:-}" ]; then
+  export PI_CONFIG_FILES="${PI_CONFIG_FILES}:$routing_config"
+else
+  export PI_CONFIG_FILES="$routing_config"
+fi
+
 # Set up default git identity from the authenticated GitHub user if git identity is unset.
 # This ensures fixers and automated merges do not fail with 'Committer identity unknown'
 # or commit with unverified/unattributed emails that trip branch protection rulesets.
@@ -49,6 +74,9 @@ Appliance lifecycle:
   This image is immutable. Replace it to update; `omp update` is disabled.
   Host OMP profiles and their MCP servers are isolated by default. Set
   BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1 to explicitly use the host `review` profile.
+  BLUEFIN_REVIEW_ROUTING_PROFILE=copilot-mixed is the default; set it to
+  codex-subscription for the explicit Codex subscription route. OMP may fall
+  back to the parent model when child authentication is unavailable.
 EOF
   exit 0
   ;;
