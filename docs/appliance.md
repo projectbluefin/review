@@ -87,6 +87,14 @@ startup update check, and `omp update` exits with instructions to pull a newer
 image. This keeps the running artifact identical to what was verified and
 published.
 
+Because `stable` is a moving alias, the `bluefin` launcher verifies the image
+before it runs: every pull of a `ghcr.io/projectbluefin/*` ref is checked
+against the build-provenance attestation the publish workflow pushes to the
+registry (`gh attestation verify oci://<ref>@<digest> --repo projectbluefin/review`),
+and a launch that fails verification refuses to run the image. Locally built
+`localhost/*` images and caller-supplied override refs are the operator's own
+trust decision and are not verified.
+
 ## Running it
 
 State lives under `/home/bluefin`: OMP sessions, logs, caches, provider

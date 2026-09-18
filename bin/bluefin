@@ -170,11 +170,45 @@ image_ref_is_moving() {
   esac
   ! podman image exists "localhost/$1"
 }
+# The published appliances are moving tags; the publish workflow pushes a
+# Sigstore build-provenance attestation for every digest, so a pulled image is
+# verified against that attestation before it is allowed to run. Only
+# ghcr.io/projectbluefin/* refs are covered: localhost builds and
+# caller-supplied override refs are the operator's own responsibility. A host
+# without gh cannot verify and runs unverified with a warning — but a host
+# with gh that fails verification never runs the image.
+verify_image_provenance() {
+  local ref="$1" product="$2" digest="${3:-}" subject
+  case "$ref" in
+    ghcr.io/projectbluefin/*) ;;
+    *) return 0 ;;
+  esac
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "! ${product} image ${ref} is unverified: install gh to check its build-provenance attestation." >&2
+    return 0
+  fi
+  subject="$ref"
+  [[ -z "$digest" ]] || subject="${ref%@sha256:*}@${digest}"
+  gh attestation verify "oci://${subject}" --repo projectbluefin/review >/dev/null ||
+    fail "${product} image ${subject} failed build-provenance attestation verification; refusing to run it."
+  echo "✓ ${product} image provenance verified against projectbluefin/review attestations." >&2
+}
+
+pulled_image_digest() {
+  local digest
+  digest="$(podman image inspect --format '{{.Digest}}' "$1" 2>/dev/null)" || return 0
+  [[ "$digest" == sha256:* ]] && printf '%s\n' "$digest"
+}
 
 ensure_image() {
   local ref="$1" product="$2" containerfile="$3" override="$4"
   if image_ref_is_moving "$ref"; then
-    podman pull "$ref" && return 0
+    if podman pull "$ref"; then
+      # Verify the exact digest just pulled: the local store now holds those
+      # bits, so a later tag move cannot swap what runs.
+      verify_image_provenance "$ref" "$product" "$(pulled_image_digest "$ref")"
+      return 0
+    fi
     if podman image exists "$ref"; then
       echo "! could not refresh ${ref}; using the local copy, which may be out of date." >&2
       return 0
@@ -189,7 +223,10 @@ ensure_image() {
     return 1
     ;;
   esac
-  podman pull "$ref" && return 0
+  if podman pull "$ref"; then
+    verify_image_provenance "$ref" "$product" "$(pulled_image_digest "$ref")"
+    return 0
+  fi
   echo "ERROR: cannot obtain ${product} image ${ref}." >&2
   echo "  Set ${override} to a published tag or digest." >&2
   return 1
@@ -1050,6 +1087,11 @@ run_review() {
   local apptainer_image="$image"
   [[ "$apptainer_image" == *://* || "$apptainer_image" == *.sif || -f "$apptainer_image" ]] || apptainer_image="docker://${apptainer_image}"
   report_apptainer_image_identity "$image" "review appliance" "$is_override" "$MIN_REVIEW_APPLIANCE_VERSION"
+  # Apptainer pulls the docker:// ref itself, so verify the registry ref
+  # before it does. A tag could still move between this check and the pull;
+  # the Podman path above verifies the exact pulled digest and stays the
+  # preferred launch.
+  verify_image_provenance "$image" "review"
   prepare_apptainer_environment
   exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" \
     --home "${home}:/home/bluefin" \
@@ -1143,6 +1185,8 @@ run_contribute() {
   local apptainer_image="$image"
   [[ "$apptainer_image" == *://* || "$apptainer_image" == *.sif || -f "$apptainer_image" ]] || apptainer_image="docker://${apptainer_image}"
   report_apptainer_image_identity "$image" "contributor" "$is_override" "$MIN_CONTRIBUTOR_VERSION"
+  # See run_review: Apptainer pulls the ref itself, so verify it first.
+  verify_image_provenance "$image" "contributor"
   prepare_apptainer_environment
   exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" \
     --home "${home}:/home/bluefin" \
