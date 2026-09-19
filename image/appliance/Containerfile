@@ -24,7 +24,7 @@ ARG FSDK_BASE_IMAGE=ghcr.io/projectbluefin/base:26.08@sha256:f4c4557fa9841639dfc
 # The builder is the shell-enabled sibling of the same FSDK series, so the
 # binaries staged out of it link against the base's own glibc.
 # renovate: datasource=docker depName=ghcr.io/projectbluefin/lab-runner
-ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:5217c4e4ed0d89a801e1e64d45c1191a8525ccae8aed6e234cd44382e9b3a143
+ARG FSDK_BUILDER_IMAGE=ghcr.io/projectbluefin/lab-runner:26.08@sha256:c2f4496bcdc3f6e6eea4678574b44a0032e4ef1a2477b5ea9fd15dc651040c26
 
 # renovate: datasource=github-releases depName=can1357/oh-my-pi
 ARG OMP_VERSION=18.2.1
