@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Write the SPDX manifest for the distroless Hive + OMP contributor image."""
+"""Write the SPDX manifest for the distroless Hive + OMP contributor image.
+
+The publish workflow ingests this document through syft's sbom-cataloger, which
+keeps name, version and externalRefs when it merges an embedded document, and
+drops the rest. A package therefore has to carry a purl locator to survive the
+merge with its identity intact, and the verified digest has to ride inside that
+locator as the purl spec's checksum qualifier rather than only in the SPDX
+``checksums`` block the merge discards. scripts/generate-appliance-sbom.py emits
+the same shape for the same reason; the two generators stay separate files
+because each is COPY-ed alone into its build stage.
+"""
 from __future__ import annotations
 
 import argparse
@@ -16,7 +26,20 @@ def sha(value: str, name: str) -> str:
     return value
 
 
-def package(name: str, version: str, download: str, checksum: str | None = None) -> dict:
+def with_checksum_qualifier(purl: str, checksum: str | None) -> str:
+    """Attach a verified digest to a purl as the spec's checksum qualifier."""
+    return f"{purl}?checksum=sha256:{checksum}" if checksum else purl
+
+
+def package(
+    name: str,
+    version: str,
+    download: str,
+    purl: str,
+    checksum: str | None = None,
+) -> dict:
+    if checksum:
+        checksum = sha(checksum, name)
     item = {
         "SPDXID": "SPDXRef-" + re.sub(r"[^A-Za-z0-9.-]", "-", name),
         "name": name,
@@ -25,9 +48,16 @@ def package(name: str, version: str, download: str, checksum: str | None = None)
         "licenseConcluded": "NOASSERTION",
         "licenseDeclared": "NOASSERTION",
         "copyrightText": "NOASSERTION",
+        "externalRefs": [
+            {
+                "referenceCategory": "PACKAGE-MANAGER",
+                "referenceType": "purl",
+                "referenceLocator": with_checksum_qualifier(purl, checksum),
+            }
+        ],
     }
     if checksum:
-        item["checksums"] = [{"algorithm": "SHA256", "checksumValue": sha(checksum, name)}]
+        item["checksums"] = [{"algorithm": "SHA256", "checksumValue": checksum}]
     return item
 
 
@@ -59,12 +89,46 @@ def main() -> int:
         "documentNamespace": f"https://projectbluefin.org/spdx/contribute/{args.version}/{args.revision}",
         "creationInfo": {"creators": ["Tool: generate-contribute-sbom.py"], "created": "1970-01-01T00:00:00Z"},
         "packages": [
-            package("omp", args.omp_version, f"https://github.com/can1357/oh-my-pi/releases/download/v{args.omp_version}/", args.omp_sha256),
-            package("node", args.node_version, f"https://nodejs.org/dist/v{args.node_version}/", args.node_sha256),
-            package("gh", args.gh_version, f"https://github.com/cli/cli/releases/download/v{args.gh_version}/", args.gh_sha256),
-            package("tmux", args.tmux_version, f"https://github.com/tmux/tmux-builds/releases/download/v{args.tmux_version}/", args.tmux_sha256),
-            package("ws", args.ws_version, "https://registry.npmjs.org/ws"),
-            package("hive-contributor-runtime", hive, f"https://github.com/hivecommons/hive/tree/{hive}/bin"),
+            package(
+                "omp",
+                args.omp_version,
+                f"https://github.com/can1357/oh-my-pi/releases/download/v{args.omp_version}/",
+                f"pkg:github/can1357/oh-my-pi@v{args.omp_version}",
+                args.omp_sha256,
+            ),
+            package(
+                "node",
+                args.node_version,
+                f"https://nodejs.org/dist/v{args.node_version}/",
+                f"pkg:generic/node@{args.node_version}",
+                args.node_sha256,
+            ),
+            package(
+                "gh",
+                args.gh_version,
+                f"https://github.com/cli/cli/releases/download/v{args.gh_version}/",
+                f"pkg:github/cli/cli@v{args.gh_version}",
+                args.gh_sha256,
+            ),
+            package(
+                "tmux",
+                args.tmux_version,
+                f"https://github.com/tmux/tmux-builds/releases/download/v{args.tmux_version}/",
+                f"pkg:github/tmux/tmux-builds@v{args.tmux_version}",
+                args.tmux_sha256,
+            ),
+            package(
+                "ws",
+                args.ws_version,
+                "https://registry.npmjs.org/ws",
+                f"pkg:npm/ws@{args.ws_version}",
+            ),
+            package(
+                "hive-contributor-runtime",
+                hive,
+                f"https://github.com/hivecommons/hive/tree/{hive}/bin",
+                f"pkg:github/hivecommons/hive@{hive}",
+            ),
         ],
     }
     with open(args.out, "w", encoding="utf-8") as output:
