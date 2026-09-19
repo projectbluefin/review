@@ -420,7 +420,7 @@ jobs:
 
       - name: Generate release notes
         if: needs.metadata.outputs.release == 'true'
-        uses: projectbluefin/actions/bootc-build/generate-release-notes@4d3b97eb9760539d2b4a8f2a495db0ec3bf9e8a0 # v1
+        uses: projectbluefin/actions/bootc-build/generate-release-notes@8895d09342174927b950abc75dccd6da2c8ba36f # v1
         with:
           tag: v${{ needs.metadata.outputs.version }}
           output-file: ${{ runner.temp }}/CHANGELOG.md
