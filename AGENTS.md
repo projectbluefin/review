@@ -219,6 +219,15 @@ When behavior changes, update the matching user documentation. Treat the
 launcher, image, and tests as the sources of truth for this repository's
 behavior.
 
+## PR rules
+
+- PR titles follow Conventional Commits (`feat:`, `fix:`, `chore:`, `docs:`,
+  `style:`, `refactor:`, `perf:`, `test:`, `ci:`, `build:`, `revert:`), enforced
+  by the required `conventional-title` check. The type must be the first token
+  in the title — any prefix before it fails the check. The description is
+  free-form, so trailing annotations are fine. This repository squash-merges, so
+  the PR title becomes the permanent commit subject.
+
 ## Documentation Is the Model
 
 [`docs/factory/agentic-model.md`](docs/factory/agentic-model.md) is the
